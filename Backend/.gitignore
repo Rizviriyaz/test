@@ -1,0 +1,22 @@
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+app/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Logs & Temp
+*.log
+*.tmp
+.DS_Store
