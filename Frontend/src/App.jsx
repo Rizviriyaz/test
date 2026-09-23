@@ -15,6 +15,9 @@ import Tracking from "./pages/Tracking"
 import IdleAnalytics from "./pages/IdleAnalytics"
 
 
+import AiAssistantWidget from "./components/AI/AiAssistantWidget"
+
+
 function App() {
     return (
         <AuthProvider>
@@ -125,6 +128,7 @@ function App() {
                     {/* Fallback */}
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
+                <AiAssistantWidget />
             </BrowserRouter>
         </AuthProvider>
     )

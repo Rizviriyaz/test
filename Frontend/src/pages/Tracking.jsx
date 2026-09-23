@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react"
+import { useSearchParams } from "react-router-dom"
 
 import {
     Search,
@@ -16,6 +17,7 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 
 
 function Tracking() {
+    const [searchParams] = useSearchParams()
 
     const [vehicles, setVehicles] = useState([])
 
@@ -33,6 +35,14 @@ function Tracking() {
 
     const [error, setError] =
         useState(null)
+
+    useEffect(() => {
+        const vParam = searchParams.get("vehicleId") || searchParams.get("v")
+        if (vParam) {
+            const num = Number(vParam)
+            setSelectedVehicleId(!isNaN(num) ? num : vParam)
+        }
+    }, [searchParams])
 
 
     /*

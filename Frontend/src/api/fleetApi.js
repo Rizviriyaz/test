@@ -151,3 +151,55 @@ export async function getVehicleSafety(vehicleId) {
     }
     return response.json()
 }
+
+export async function getFleetIdleAnalytics(options = {}) {
+    const { hours = 24, from_time, to_time, group_id, vehicle_id } = options
+    let url = `${API_URL}/api/idle/fleet-analytics`
+    const params = new URLSearchParams()
+
+    if (from_time !== undefined && from_time !== null && to_time !== undefined && to_time !== null) {
+        params.append("from_time", from_time)
+        params.append("to_time", to_time)
+    } else if (hours) {
+        params.append("hours", hours)
+    }
+
+    if (group_id) {
+        params.append("group_id", group_id)
+    }
+
+    if (vehicle_id) {
+        params.append("vehicle_id", vehicle_id)
+    }
+
+    const queryString = params.toString()
+    if (queryString) {
+        url += `?${queryString}`
+    }
+
+    const response = await fetch(url)
+    if (!response.ok) {
+        throw new Error("Failed to fetch fleet idle analytics")
+    }
+    return response.json()
+}
+
+export async function sendAiChatMessage(messages, sessionToken) {
+    const response = await fetch(`${API_URL}/api/ai/chat`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+            messages,
+            session_token: sessionToken || "ats_session_active",
+        }),
+    })
+
+    if (!response.ok) {
+        const errData = await response.json().catch(() => ({}))
+        throw new Error(errData.detail || "Failed to communicate with Fleet AI")
+    }
+
+    return response.json()
+}

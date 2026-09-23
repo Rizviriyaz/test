@@ -1,20 +1,13 @@
 import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import {
-    Activity,
-    HeartPulse,
-    HomeIcon,
-    LayoutDashboard,
-    Map,
     Menu,
-    Truck,
     X,
-    LogIn,
 } from "lucide-react"
 import AtsLogo from "../assets/AtsLogo"
 import { AnimatedBackground } from "../components/core/animated-background"
-import { Dock, DockIcon, DockItem, DockLabel } from "../components/core/dock"
 import { Magnetic } from "../components/core/magnetic"
+import { useAuth } from "../context/AuthContext"
 
 function usePrefersReducedMotion() {
     const [reduced, setReduced] = useState(false)
@@ -40,17 +33,8 @@ const NAV_TABS = [
     { id: "About", href: "#about", type: "anchor" },
 ]
 
-const DOCK_ITEMS = [
-    { title: "Home", href: "/", icon: HomeIcon },
-    { title: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-    { title: "Tracking", href: "/tracking", icon: Map },
-    { title: "Vehicles", href: "/vehicles", icon: Truck },
-    { title: "Activity", href: "/idle-analytics", icon: Activity },
-    { title: "Fleet Health", href: "/vehicle-health", icon: HeartPulse },
-    { title: "Sign In", href: "/login", icon: LogIn },
-]
-
 export default function Landing() {
+    const { isAuthenticated } = useAuth()
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
     const navigate = useNavigate()
     const reducedMotion = usePrefersReducedMotion()
@@ -94,12 +78,14 @@ export default function Landing() {
                 </nav>
 
                 <div className="justify-self-end flex items-center gap-2 sm:gap-3">
-                    <Link
-                        to="/login"
-                        className="hidden sm:inline-flex items-center text-xs font-semibold text-zinc-700 hover:text-black px-3.5 py-2 rounded-full border border-zinc-200 hover:border-zinc-300 transition-all"
-                    >
-                        Sign In
-                    </Link>
+                    {!isAuthenticated && (
+                        <Link
+                            to="/login"
+                            className="hidden sm:inline-flex items-center text-xs font-semibold text-zinc-700 hover:text-black px-3.5 py-2 rounded-full border border-zinc-200 hover:border-zinc-300 transition-all"
+                        >
+                            Sign In
+                        </Link>
+                    )}
                     <button
                         type="button"
                         onClick={() => setMobileMenuOpen(true)}
@@ -152,7 +138,7 @@ export default function Landing() {
                 </div>
             )}
 
-            <main className="flex-grow pb-28">
+            <main className="flex-grow pb-12">
                 <section className="max-w-4xl mx-auto px-6 pt-10 sm:pt-14 pb-12 sm:pb-16 text-center">
                     <h1 className="text-4xl sm:text-6xl md:text-7xl font-extrabold tracking-[-0.03em] font-display text-zinc-900 leading-[1.08]">
                         Every Vehicle. One Clear View.
@@ -245,7 +231,7 @@ export default function Landing() {
                 </section>
             </main>
 
-            <footer className="border-t border-zinc-200 py-10 bg-zinc-50 mb-20">
+            <footer className="border-t border-zinc-200 py-10 bg-zinc-50">
                 <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-zinc-500">
                     <div className="flex items-center gap-2">
                         <AtsLogo className="h-7" showSubtitle={false} />
@@ -259,27 +245,6 @@ export default function Landing() {
                     <div>© {new Date().getFullYear()} ATS. All rights reserved.</div>
                 </div>
             </footer>
-
-            <div className="fixed bottom-3 left-1/2 z-40 max-w-[calc(100%-1.5rem)] -translate-x-1/2">
-                <Dock className="items-end pb-3">
-                    {DOCK_ITEMS.map((item) => {
-                        const Icon = item.icon
-                        return (
-                            <DockItem
-                                key={item.title}
-                                className="aspect-square rounded-full bg-zinc-100"
-                                aria-label={item.title}
-                                onClick={() => navigate(item.href)}
-                            >
-                                <DockLabel>{item.title}</DockLabel>
-                                <DockIcon>
-                                    <Icon className="h-full w-full text-neutral-600" />
-                                </DockIcon>
-                            </DockItem>
-                        )
-                    })}
-                </Dock>
-            </div>
         </div>
     )
 }
