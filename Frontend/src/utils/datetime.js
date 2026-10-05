@@ -1,0 +1,54 @@
+export const UAE_TIMEZONE = "Asia/Dubai"
+
+/**
+ * Formats a UNIX timestamp (seconds/ms) or ISO string to UAE Time (Asia/Dubai, UTC+4).
+ */
+export function formatUAEDateTime(ts, options = {}) {
+    if (!ts) return "—"
+    const date = typeof ts === "number" ? new Date(ts > 1e11 ? ts : ts * 1000) : new Date(ts)
+    if (isNaN(date.getTime())) return "—"
+
+    return date.toLocaleString("en-US", {
+        timeZone: UAE_TIMEZONE,
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+        ...options
+    })
+}
+
+/**
+ * Formats a UNIX timestamp to HH:MM AM/PM in UAE Time.
+ */
+export function formatUAETime(ts, options = {}) {
+    if (!ts) return "—"
+    const date = typeof ts === "number" ? new Date(ts > 1e11 ? ts : ts * 1000) : new Date(ts)
+    if (isNaN(date.getTime())) return "—"
+
+    return date.toLocaleTimeString("en-US", {
+        timeZone: UAE_TIMEZONE,
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+        ...options
+    })
+}
+
+/**
+ * Returns current UAE calendar date as YYYY-MM-DD.
+ */
+export function getUAETodayStr() {
+    const date = new Date()
+    return date.toLocaleDateString("en-CA", { timeZone: UAE_TIMEZONE })
+}
+
+/**
+ * Returns UAE date offset by N days as YYYY-MM-DD.
+ */
+export function getUAEDateStr(offsetDays = 0) {
+    const date = new Date(Date.now() + offsetDays * 86400 * 1000)
+    return date.toLocaleDateString("en-CA", { timeZone: UAE_TIMEZONE })
+}

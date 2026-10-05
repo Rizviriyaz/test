@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from app.wialon import login, get_vehicle_history
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity
+from app.utils.datetime_helpers import UAE_TZ
 
 
 def _format_duration(seconds: int) -> str:
@@ -26,11 +27,11 @@ def _format_duration(seconds: int) -> str:
 
 
 def _format_ts(ts) -> str:
-    """Unix timestamp → readable string."""
+    """Unix timestamp → readable string in UAE time."""
     if not ts:
         return "—"
     try:
-        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%b %d, %H:%M UTC")
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone(UAE_TZ).strftime("%b %d, %H:%M UAE")
     except Exception:
         return str(ts)
 
@@ -48,6 +49,7 @@ def tool_get_fleet_summary() -> dict:
     moving = sum(1 for v in fleet if v.get("status") == "MOVING")
     idling = sum(1 for v in fleet if v.get("status") == "IDLING")
     stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
+    offline = sum(1 for v in fleet if v.get("status") == "OFFLINE")
     extended_idling = sum(1 for v in fleet if v.get("status") == "IDLING" and (v.get("idle_duration") or 0) >= 900)
 
     return {
@@ -55,12 +57,13 @@ def tool_get_fleet_summary() -> dict:
         "moving": moving,
         "idling": idling,
         "stopped": stopped,
+        "offline": offline,
         "vehicles_requiring_idle_attention": extended_idling,
     }
 
 
 def tool_get_vehicles_by_status(status: str) -> dict:
-    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/ALL)."""
+    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/OFFLINE/ALL)."""
     status = status.upper().strip()
     sid = login()
     vehicles = get_all_vehicles(sid)
@@ -141,8 +144,7 @@ def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle
     all_events = []
     min_seconds = min_duration_minutes * 60
 
-    # Limit to first 20 vehicles for response speed (same pattern as existing fleet analytics)
-    for v in target[:20]:
+    for v in target:
         vid = v.get("id")
         vname = v.get("nm", f"Vehicle {vid}")
         sens = v.get("sens") or {}
@@ -209,6 +211,52 @@ def tool_get_vehicle_trips(vehicle_id: int, hours: int = 24) -> dict:
     }
 
 
+def tool_get_fleet_health() -> dict:
+    """Return fleet health overview: battery status, GPS signal quality, connectivity, and warning counts."""
+    from app.fleet_analytics import get_fleet_health_analytics
+    return get_fleet_health_analytics()
+
+
+def tool_get_fleet_utilization(hours: int = 24) -> dict:
+    """Return fleet utilization, driving time, idle time, stopped time, and top utilized vehicles."""
+    from app.fleet_analytics import get_fleet_utilization_analytics
+    return get_fleet_utilization_analytics(hours=hours)
+
+
+def tool_get_fleet_safety(hours: int = 168) -> dict:
+    """Return safety analytics: harsh braking, harsh acceleration, harsh cornering counts and events."""
+    from app.fleet_analytics import get_safety_analytics
+    return get_safety_analytics(hours=hours)
+
+
+def tool_get_fleet_alerts() -> dict:
+    """Return current active fleet alerts categorized by CRITICAL, WARNING, and INFO."""
+    from app.fleet_analytics import get_fleet_alerts_analytics
+    return get_fleet_alerts_analytics()
+
+
+def tool_get_group_analytics() -> dict:
+    """Return group-level analytics: total vehicles, distance, trips, and safety events by group."""
+    from app.fleet_analytics import get_fleet_groups_analytics
+    return get_fleet_groups_analytics()
+
+
+def tool_get_vehicle_deep_analytics(vehicle_id, hours: int = 24) -> dict:
+    """Return deep diagnostics, health, today's metrics, and trip count for a specific vehicle."""
+    from app.fleet_analytics import get_single_vehicle_deep_analytics
+    try:
+        vid = int(vehicle_id)
+    except Exception:
+        # Search by name in fleet
+        sid = login()
+        v_list = get_all_vehicles(sid)
+        target = next((v for v in v_list if str(vehicle_id).lower() in str(v.get("nm", "")).lower()), None)
+        vid = target.get("id") if target else None
+    if not vid:
+        return {"found": False, "vehicle_id": vehicle_id}
+    return get_single_vehicle_deep_analytics(vehicle_id=vid, hours=hours)
+
+
 # ─── Groq Tool Schemas (JSON Schema) ──────────────────────────────────────────
 
 TOOL_DEFINITIONS = [
@@ -216,7 +264,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_fleet_summary",
-            "description": "Get the current fleet status summary: total vehicles, how many are moving, idling, and stopped.",
+            "description": "Get current fleet status summary: total vehicles, moving, idling, stopped, and offline counts.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -224,13 +272,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicles_by_status",
-            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, or ALL.",
+            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, OFFLINE, or ALL.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["MOVING", "IDLING", "STOPPED", "ALL"],
+                        "enum": ["MOVING", "IDLING", "STOPPED", "OFFLINE", "ALL"],
                         "description": "Vehicle operational status to filter by, or ALL for entire fleet.",
                     }
                 },
@@ -242,7 +290,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicle_status",
-            "description": "Get the live status, speed, location, and idle duration for a specific vehicle by its ID or name.",
+            "description": "Get live status, speed, location, and idle duration for a specific vehicle by its ID or name.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -250,6 +298,72 @@ TOOL_DEFINITIONS = [
                         "type": ["string", "integer"],
                         "description": "The vehicle ID or vehicle name.",
                     }
+                },
+                "required": ["vehicle_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fleet_health",
+            "description": "Get fleet health diagnostics: battery warnings, GPS issues, offline devices, and average health score.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fleet_utilization",
+            "description": "Get fleet utilization rates, total driving time vs idle time, and vehicle utilization rankings.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer", "description": "Time window in hours. Default 24.", "default": 24}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fleet_safety",
+            "description": "Get safety analytics: harsh braking, harsh acceleration, and harsh cornering events across the fleet.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "integer", "description": "Look-back window in hours. Default 168 (7 days).", "default": 168}
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fleet_alerts",
+            "description": "Get active fleet operational alerts: critical low battery, device offline, weak GPS, and safety triggers.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_group_analytics",
+            "description": "Get analytics aggregated by dynamic fleet customer groups: distance, trips, vehicle count, and safety.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_vehicle_deep_analytics",
+            "description": "Get deep analytics for a vehicle: health score, battery, GPS quality, 24h distance, trips, and engine hours.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vehicle_id": {"type": ["string", "integer"], "description": "Vehicle ID or name."}
                 },
                 "required": ["vehicle_id"],
             },
@@ -298,6 +412,18 @@ def dispatch_tool(name: str, args: dict) -> str:
             result = tool_get_vehicles_by_status(args.get("status", "ALL"))
         elif name == "get_vehicle_status":
             result = tool_get_vehicle_status(args.get("vehicle_id"))
+        elif name == "get_fleet_health":
+            result = tool_get_fleet_health()
+        elif name == "get_fleet_utilization":
+            result = tool_get_fleet_utilization(hours=int(args.get("hours", 24)))
+        elif name == "get_fleet_safety":
+            result = tool_get_fleet_safety(hours=int(args.get("hours", 168)))
+        elif name == "get_fleet_alerts":
+            result = tool_get_fleet_alerts()
+        elif name == "get_group_analytics":
+            result = tool_get_group_analytics()
+        elif name == "get_vehicle_deep_analytics":
+            result = tool_get_vehicle_deep_analytics(args.get("vehicle_id"), hours=int(args.get("hours", 24)))
         elif name == "get_idle_events":
             result = tool_get_idle_events(
                 hours=int(args.get("hours", 24)),

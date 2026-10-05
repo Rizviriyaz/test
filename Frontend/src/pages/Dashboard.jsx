@@ -7,40 +7,31 @@ import {
     Square,
     AlertTriangle,
     Activity,
-    MapPin,
-    Gauge,
     Wifi,
     ArrowUpRight,
     Filter,
     Layers,
-    Calendar,
     Loader2,
 } from "lucide-react"
 
 import {
     getVehicles,
-    getFleetHealth,
-    getDashboardTrends,
     getDashboardMileage,
-    getVehicleGroups,
 } from "../api/fleetApi"
 
 import {
     ResponsiveContainer,
     BarChart,
     Bar,
-    LineChart,
-    Line,
     XAxis,
     YAxis,
     CartesianGrid,
     Tooltip,
-    Legend,
-    Cell,
 } from "recharts"
 
 import FleetMap from "../components/FleetMap"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
+import { formatUAETime } from "../utils/datetime"
 
 
 function Dashboard() {
@@ -48,14 +39,6 @@ function Dashboard() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [lastUpdated, setLastUpdated] = useState(null)
-
-    const [fleetHealth, setFleetHealth] = useState(null)
-    const [fleetHealthLoading, setFleetHealthLoading] = useState(true)
-
-    const [dashboardTrends, setDashboardTrends] = useState(null)
-    const [trendsLoading, setTrendsLoading] = useState(true)
-
-    const [vehicleGroups, setVehicleGroups] = useState([])
 
     // Filters for Top Vehicles by Mileage
     const [selectedMileageGroup, setSelectedMileageGroup] = useState("ALL")
@@ -97,26 +80,6 @@ function Dashboard() {
     }, [])
 
     /*
-        Load fleet health
-    */
-    useEffect(() => {
-        let mounted = true
-        const loadFleetHealth = async () => {
-            try {
-                const data = await getFleetHealth()
-                if (!mounted) return
-                setFleetHealth(data)
-            } catch (err) {
-                console.error("Fleet health error:", err)
-            } finally {
-                if (mounted) setFleetHealthLoading(false)
-            }
-        }
-        loadFleetHealth()
-        return () => { mounted = false }
-    }, [])
-
-    /*
         Load Top Mileage rankings by timeframe
     */
     useEffect(() => {
@@ -138,45 +101,6 @@ function Dashboard() {
     }, [mileageTimeframe])
 
     /*
-        Load trends
-    */
-    useEffect(() => {
-        let mounted = true
-        const loadTrends = async () => {
-            try {
-                const data = await getDashboardTrends(24)
-                if (!mounted) return
-                setDashboardTrends(data)
-            } catch (err) {
-                console.error("Dashboard trends error:", err)
-            } finally {
-                if (mounted) setTrendsLoading(false)
-            }
-        }
-        loadTrends()
-        return () => { mounted = false }
-    }, [])
-
-    /*
-        Load Wialon groups dynamically
-    */
-    useEffect(() => {
-        let mounted = true
-        const loadGroups = async () => {
-            try {
-                const data = await getVehicleGroups()
-                if (mounted && data.groups) {
-                    setVehicleGroups(data.groups)
-                }
-            } catch (err) {
-                console.error("Failed to load Wialon groups:", err)
-            }
-        }
-        loadGroups()
-        return () => { mounted = false }
-    }, [])
-
-    /*
         Fleet calculations
     */
     const totalVehicles = vehicles.length
@@ -185,16 +109,19 @@ function Dashboard() {
         return vehicles.map((vehicle) => ({
             ...vehicle,
             normalizedStatus: String(vehicle.status || "").trim().toUpperCase(),
+            isOffline: vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || String(vehicle.status || "").trim().toUpperCase() === "OFFLINE",
         }))
     }, [vehicles])
 
     const movingVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "MOVING"), [normalizedVehicles])
     const idlingVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "IDLING"), [normalizedVehicles])
     const stoppedVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "STOPPED"), [normalizedVehicles])
+    const offlineVehicles = useMemo(() => normalizedVehicles.filter(v => v.isOffline), [normalizedVehicles])
 
     const movingCount = movingVehicles.length
     const idlingCount = idlingVehicles.length
     const stoppedCount = stoppedVehicles.length
+    const offlineCount = offlineVehicles.length
 
     const fleetUtilization = totalVehicles > 0
         ? Math.round(((movingCount + idlingCount) / totalVehicles) * 100)
@@ -231,23 +158,28 @@ function Dashboard() {
     const timeframeConfig = {
         today: {
             label: "Today",
-            subtitle: "Trip distance covered today (24h)",
+            subtitle: "Trip distance covered today in UAE (00:00:00 Asia/Dubai -> Now)",
             unit: "km today"
         },
+        yesterday: {
+            label: "Yesterday",
+            subtitle: "Total trip distance covered yesterday in UAE (Full calendar day)",
+            unit: "km yesterday"
+        },
         week: {
-            label: "Last 1 Week",
-            subtitle: "Cumulative distance covered over the last 7 days",
-            unit: "km (7d)"
+            label: "This Week",
+            subtitle: "Cumulative distance covered this week (UAE Monday -> Now)",
+            unit: "km (this week)"
         },
         month: {
-            label: "Last 1 Month",
-            subtitle: "Estimated distance covered over the last 30 days",
-            unit: "km (30d)"
+            label: "This Month",
+            subtitle: "Distance covered this month (UAE 1st -> Now)",
+            unit: "km (this month)"
         },
         year: {
-            label: "Last 1 Year",
-            subtitle: "Annual fleet mileage breakdown",
-            unit: "km (1y)"
+            label: "This Year",
+            subtitle: "Annual fleet mileage breakdown (UAE Jan 1 -> Now)",
+            unit: "km (this year)"
         },
         all: {
             label: "All Time",
@@ -257,11 +189,14 @@ function Dashboard() {
     }
 
     const mileageUnitsSource = useMemo(() => {
-        if (mileageData?.all_units && mileageData.all_units.length > 0) {
+        if (mileageData?.all_units && Array.isArray(mileageData.all_units) && mileageData.all_units.length > 0) {
             return mileageData.all_units
         }
-        return fleetHealth?.mileage?.all_units || fleetHealth?.mileage?.top_units || []
-    }, [mileageData, fleetHealth])
+        if (mileageData?.top_units && Array.isArray(mileageData.top_units) && mileageData.top_units.length > 0) {
+            return mileageData.top_units
+        }
+        return []
+    }, [mileageData])
 
     const availableGroups = useMemo(() => {
         const set = new Set()
@@ -347,7 +282,7 @@ function Dashboard() {
                             <div className="flex items-center gap-3">
                                 {lastUpdated && (
                                     <span className="rounded-full bg-white border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 shadow-2xs">
-                                        Last Updated {lastUpdated.toLocaleTimeString()}
+                                        Last Updated {formatUAETime(lastUpdated)}
                                     </span>
                                 )}
                             </div>
@@ -373,7 +308,7 @@ function Dashboard() {
                         <div className="space-y-8">
                             {/* Primary Summary KPIs */}
                             <section>
-                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
                                     {/* Total */}
                                     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
                                         <div className="flex items-start justify-between">
@@ -453,6 +388,21 @@ function Dashboard() {
                                             Ignition OFF, Speed = 0
                                         </p>
                                     </div>
+
+                                    {/* Offline */}
+                                    <div className="rounded-2xl border border-red-200 bg-white p-5 shadow-xs">
+                                        <div className="flex items-start justify-between">
+                                            <div>
+                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Offline</p>
+                                                <p className="mt-2 text-3xl font-black text-red-600">{offlineCount}</p>
+                                            </div>
+                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-100 bg-red-50">
+                                                <Wifi className="h-5 w-5 text-red-600" />
+                                            </div>
+                                        </div>
+                                        <p className="mt-3 text-xs font-medium text-slate-500">No Wialon message within configured threshold</p>
+                                    </div>
+
                                 </div>
                             </section>
 
@@ -473,7 +423,7 @@ function Dashboard() {
                                             </span>
                                         </div>
                                         <p className="mt-1 text-xs text-slate-500">
-                                            Real-time proportion of active versus stationary fleet vehicles
+                                             Real-time fleet counts by Wialon connection and activity status
                                         </p>
 
                                         {/* Progress Bar */}
@@ -502,7 +452,7 @@ function Dashboard() {
                                         </div>
 
                                         {/* Metrics Grid */}
-                                        <div className="mt-6 grid grid-cols-3 gap-3 text-center">
+                                        <div className="mt-6 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
                                             <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
                                                 <span className="text-[11px] font-bold text-emerald-800">Moving</span>
                                                 <p className="mt-1 text-xl font-black text-emerald-700">{movingCount}</p>
@@ -524,6 +474,13 @@ function Dashboard() {
                                                 <p className="mt-1 text-xl font-black text-slate-700">{stoppedCount}</p>
                                                 <p className="text-[10px] text-slate-500 font-semibold">
                                                     {totalVehicles > 0 ? Math.round((stoppedCount / totalVehicles) * 100) : 0}%
+                                                </p>
+                                            </div>
+                                            <div className="rounded-xl border border-red-200 bg-red-50/60 p-3">
+                                                <span className="text-[11px] font-bold text-red-800">Offline</span>
+                                                <p className="mt-1 text-xl font-black text-red-700">{offlineCount}</p>
+                                                <p className="text-[10px] font-semibold text-red-600">
+                                                    {totalVehicles > 0 ? Math.round((offlineCount / totalVehicles) * 100) : 0}%
                                                 </p>
                                             </div>
                                         </div>
@@ -585,6 +542,7 @@ function Dashboard() {
                                                             </div>
                                                             <p className="mt-1 text-[11px] font-semibold text-amber-800">
                                                                 Idling for {vehicle.idle_duration_formatted}
+                                                                {vehicle.idle_start ? ` (since ${formatUAETime(vehicle.idle_start)})` : ""}
                                                             </p>
                                                         </div>
 
@@ -638,9 +596,10 @@ function Dashboard() {
                                         <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-2xs">
                                             {[
                                                 { id: "today", label: "Today" },
-                                                { id: "week", label: "Last 1 Week" },
-                                                { id: "month", label: "Last 1 Month" },
-                                                { id: "year", label: "Last 1 Year" },
+                                                { id: "yesterday", label: "Yesterday" },
+                                                { id: "week", label: "This Week" },
+                                                { id: "month", label: "This Month" },
+                                                { id: "year", label: "This Year" },
                                                 { id: "all", label: "All Time" },
                                             ].map((tf) => {
                                                 const isActive = mileageTimeframe === tf.id

@@ -24,6 +24,7 @@ function getMarkerIcon(status, selected = false) {
         MOVING: "#22c55e",
         IDLING: "#f97316",
         STOPPED: "#94a3b8",
+        OFFLINE: "#dc2626",
     }
 
     const color = colors[status] || "#64748b"
@@ -200,6 +201,8 @@ function formatStatusBadge(status) {
             return { label: "Idling", bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-200", dot: "bg-orange-500" }
         case "STOPPED":
             return { label: "Stopped", bg: "bg-slate-100", text: "text-slate-600", border: "border-slate-200", dot: "bg-slate-400" }
+        case "OFFLINE":
+            return { label: "Offline", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" }
         default:
             return { label: "Unknown", bg: "bg-slate-50", text: "text-slate-500", border: "border-slate-200", dot: "bg-slate-400" }
     }
@@ -304,7 +307,6 @@ function VehiclePopupCard({ vehicle }) {
 function FleetMap({
     vehicles = [],
     selectedVehicleId = null,
-    selectedVehicle = null,
     onVehicleSelect = () => {},
 }) {
     const vehiclesWithLocation = vehicles.filter(
@@ -355,7 +357,7 @@ function FleetMap({
                         ]}
                         icon={getMarkerIcon(
                             vehicle.status,
-                            vehicle.vehicle_id === selectedVehicleId
+                            String(vehicle.vehicle_id) === String(selectedVehicleId)
                         )}
                         eventHandlers={{
                             click: () => {

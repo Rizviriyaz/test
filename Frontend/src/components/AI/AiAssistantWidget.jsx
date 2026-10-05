@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect } from "react"
 import { useNavigate } from "react-router-dom"
 import {
     Bot,
@@ -15,7 +15,7 @@ import {
     Clock,
     Sparkles,
 } from "lucide-react"
-import { useAuth } from "../../context/AuthContext"
+import { useAuth } from "../../context/useAuth"
 import { sendAiChatMessage } from "../../api/fleetApi"
 
 const QUICK_PROMPTS = [
@@ -36,7 +36,7 @@ function extractActionsAndCleanText(content) {
     const fallbackVehicleId = idMatch ? idMatch[1] : null
 
     const actions = []
-    const actionRegex = /\[([^\]]+)\](?:\((#[^\)]+)\))?/g
+    const actionRegex = /\[([^\]]+)\](?:\((#[^)]+)\))?/g
 
     const cleanedText = content
         .replace(actionRegex, (fullMatch, label, href) => {
@@ -103,7 +103,7 @@ function extractActionsAndCleanText(content) {
 }
 
 export default function AiAssistantWidget() {
-    const { isAuthenticated, user } = useAuth()
+    const { isAuthenticated } = useAuth()
     const navigate = useNavigate()
 
     const [isOpen, setIsOpen] = useState(false)
@@ -156,7 +156,6 @@ export default function AiAssistantWidget() {
 
     if (!isAuthenticated) return null
 
-    const sessionToken = user?.id || "ats_session_user"
 
     const handleSend = async (textToSend) => {
         const query = (textToSend || input).trim()
@@ -176,7 +175,7 @@ export default function AiAssistantWidget() {
                 content: m.content,
             }))
 
-            const data = await sendAiChatMessage(apiMessages, sessionToken)
+            const data = await sendAiChatMessage(apiMessages)
             if (data && data.reply) {
                 setMessages((prev) => [
                     ...prev,

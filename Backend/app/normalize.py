@@ -1,4 +1,19 @@
+import math
+
 INVALID_WIALON_VALUE = -348201.3876
+
+
+def haversine_distance(lat1, lon1, lat2, lon2):
+    try:
+        r = 6371.0
+        p1 = math.radians(float(lat1))
+        p2 = math.radians(float(lat2))
+        dp = math.radians(float(lat2) - float(lat1))
+        dl = math.radians(float(lon2) - float(lon1))
+        a = math.sin(dp / 2.0)**2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2.0)**2
+        return 2.0 * r * math.asin(math.sqrt(max(0.0, min(1.0, a))))
+    except Exception:
+        return 0.0
 
 
 def is_valid_sensor_value(value):
@@ -86,6 +101,59 @@ def resolve_sensor_id_by_name(configured_sensors, name):
     return None
 
 
+def resolve_unit_sensors(configured_sensors):
+    """
+    Dynamically resolve sensor IDs for a unit based on sensor type, name, and parameter configuration.
+    Never relies on hardcoded sensor IDs like '1', '11', '12', '14'.
+    """
+    mapping = {
+        "ignition_id": None,
+        "battery_id": None,
+        "odometer_id": None,
+        "driver_id": None,
+        "key_id": None,
+        "harsh_accel_id": None,
+        "harsh_brake_id": None,
+        "harsh_corner_id": None
+    }
+    if not configured_sensors:
+        return mapping
+
+    for sid, sconf in configured_sensors.items():
+        if not sconf:
+            continue
+        name = str(sconf.get("n", "")).strip().lower()
+        stype = str(sconf.get("t", "")).strip().lower()
+        param = str(sconf.get("p", "")).strip().lower()
+
+        if "engine operation" in stype or "ignition" in name:
+            if not mapping["ignition_id"]:
+                mapping["ignition_id"] = str(sid)
+        elif "voltage" in stype or "battery" in name or "pwr_ext" in param:
+            if not mapping["battery_id"]:
+                mapping["battery_id"] = str(sid)
+        elif "odometer" in name or ("custom" in stype and "io_16" in param):
+            if not mapping["odometer_id"]:
+                mapping["odometer_id"] = str(sid)
+        elif "driver" in stype or "driver id" in name or "drvr_code" in param:
+            if not mapping["driver_id"]:
+                mapping["driver_id"] = str(sid)
+        elif "key" in name or ("digital" in stype and "key" in name):
+            if not mapping["key_id"]:
+                mapping["key_id"] = str(sid)
+        elif "harsh acceleration" in name or "harsh accel" in name:
+            if not mapping["harsh_accel_id"]:
+                mapping["harsh_accel_id"] = str(sid)
+        elif "harsh braking" in name or "harsh brake" in name:
+            if not mapping["harsh_brake_id"]:
+                mapping["harsh_brake_id"] = str(sid)
+        elif "harsh cornering" in name or "harsh corner" in name:
+            if not mapping["harsh_corner_id"]:
+                mapping["harsh_corner_id"] = str(sid)
+
+    return mapping
+
+
 def normalize_wialon_message(message, configured_sensors=None, sensor_id_map=None):
     """
     Convert a raw Wialon history message into
@@ -120,29 +188,22 @@ def normalize_wialon_message(message, configured_sensors=None, sensor_id_map=Non
     except (TypeError, ValueError):
         speed = 0
 
-    # Build or use cached sensor ID mapping
-    if sensor_id_map is None:
-        sensor_id_map = {}
-        if configured_sensors:
-            for sid, sconfig in configured_sensors.items():
-                if sconfig and "n" in sconfig:
-                    sensor_id_map[str(sconfig["n"]).strip().lower()] = str(sid)
+    # Dynamic sensor resolution from unit configuration
+    s_map = resolve_unit_sensors(configured_sensors)
+    ign_id = s_map["ignition_id"]
+    key_id = s_map["key_id"]
+    bat_id = s_map["battery_id"]
+    odo_id = s_map["odometer_id"]
+    drv_id = s_map["driver_id"]
 
-    # Dynamic sensor lookup with graceful fallbacks
-    ign_id = sensor_id_map.get("ignition") or "11"
-    key_id = sensor_id_map.get("key") or "14"
-    bat_id = sensor_id_map.get("battery") or "1"
-    odo_id = sensor_id_map.get("odometer") or "12"
-    drv_id = sensor_id_map.get("driver id") or "3"
+    ignition_val = get_sensor_value(sensors, ign_id) if ign_id else None
+    key_val = get_sensor_value(sensors, key_id) if key_id else None
+    battery_voltage = get_sensor_value(sensors, bat_id) if bat_id else None
+    odometer = get_sensor_value(sensors, odo_id) if odo_id else None
+    driver_id = get_sensor_value(sensors, drv_id) if drv_id else None
 
-    ignition_val = get_sensor_value(sensors, ign_id)
-    key_val = get_sensor_value(sensors, key_id)
-    battery_voltage = get_sensor_value(sensors, bat_id)
-    odometer = get_sensor_value(sensors, odo_id)
-    driver_id = get_sensor_value(sensors, drv_id)
-
-    # Normalize binary sensors.
-    ignition = True if ignition_val == 1 else False
+    # Normalize binary / voltage sensors.
+    ignition = True if ignition_val == 1 else (True if isinstance(ignition_val, (int, float)) and ignition_val > 12.8 else False)
     key = True if key_val == 1 else False
 
     # Driver placeholder means no assigned driver.
@@ -442,25 +503,33 @@ def segment_vehicle_activity(
 
                 previous_point = telemetry[index - 1]
 
-                previous_odo = (
-                    previous_point["metrics"]
-                    .get("odometer")
-                )
+                loc1 = previous_point.get("location") or {}
+                loc2 = point.get("location") or {}
+                lat1, lon1 = loc1.get("latitude"), loc1.get("longitude")
+                lat2, lon2 = loc2.get("latitude"), loc2.get("longitude")
 
-                current_odo = (
-                    point["metrics"]
-                    .get("odometer")
-                )
+                step_dist = 0.0
+                if lat1 is not None and lon1 is not None and lat2 is not None and lon2 is not None:
+                    step_dist = haversine_distance(lat1, lon1, lat2, lon2)
+
+                previous_odo = previous_point["metrics"].get("odometer")
+                current_odo = point["metrics"].get("odometer")
 
                 if (
                     previous_odo is not None
                     and current_odo is not None
                     and current_odo >= previous_odo
                 ):
+                    odo_delta = float(current_odo) - float(previous_odo)
+                    if 0 < odo_delta <= 5.0:
+                        step_dist = odo_delta
+                    elif 0 < (odo_delta / 1000.0) <= 5.0:
+                        step_dist = odo_delta / 1000.0
+                    elif 0 < (odo_delta / 10.0) <= 5.0:
+                        step_dist = odo_delta / 10.0
 
-                    current_trip["distance"] += (
-                        current_odo - previous_odo
-                    ) / 10
+                if 0 < step_dist < 10.0:
+                    current_trip["distance"] += step_dist
 
                 current_trip["max_speed"] = max(
                     current_trip["max_speed"],

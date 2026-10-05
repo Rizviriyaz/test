@@ -1,0 +1,427 @@
+{
+  "inspection_period": {
+    "start_utc": 1789624922,
+    "end_utc": 1790229722,
+    "start_str": "2026-09-17 06:02:02 UTC",
+    "end_str": "2026-09-24 06:02:02 UTC",
+    "duration_days": 7
+  },
+  "fleet_summary": {
+    "total_units_discovered": 30,
+    "units_with_history": 30,
+    "total_fleet_messages": 184583,
+    "groups_discovered": 5,
+    "sampled_units_count": 11
+  },
+  "position_history": {
+    "available": true,
+    "fields": [
+      "latitude",
+      "longitude",
+      "altitude",
+      "speed",
+      "course",
+      "satellites"
+    ],
+    "units_with_history": 30
+  },
+  "speed_history": {
+    "available": true,
+    "sources": [
+      "pos.s",
+      "io_24",
+      "sensor_13"
+    ],
+    "max_speed_kmh": 112.0,
+    "avg_speed_kmh": 35.5
+  },
+  "idle_analysis": {
+    "direct_field": false,
+    "derivable_from_telemetry": true,
+    "rules": "speed == 0 AND (ignition == 1 OR pwr_ext >= threshold)"
+  },
+  "mileage": {
+    "calculated_available": true,
+    "hardware_available": true,
+    "hardware_source": "p.io_16 (meters cumulative)",
+    "daily_derivable": true
+  },
+  "engine_hours": {
+    "current_available": true,
+    "historical_derivable": true,
+    "method": "Integrate ignition-on durations across message stream"
+  },
+  "driver_history": {
+    "available": false,
+    "reason": "RFID/iButton drvr_code parameter present but contains placeholder zeros"
+  },
+  "safety_events": {
+    "available": true,
+    "parameters": [
+      "io_253",
+      "io_254",
+      "event_io_id"
+    ],
+    "sensors": [
+      "4",
+      "5",
+      "6",
+      "7",
+      "9"
+    ],
+    "events_discovered_in_sample": 6,
+    "sample_events": [
+      {
+        "vehicle": "48143",
+        "unit_id": 600446504,
+        "event_type": "Harsh Braking",
+        "timestamp": "2026-09-17 12:25:55 UTC",
+        "timestamp_raw": 1789647955,
+        "latitude": 25.0627649,
+        "longitude": 55.1671566,
+        "speed_kmh": 31,
+        "raw_type_code": 2,
+        "g_force": 0.77,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 1,
+          "event_corner": 0,
+          "green_param": 2,
+          "braking_g": 0.77
+        }
+      },
+      {
+        "vehicle": "27040",
+        "unit_id": 600446512,
+        "event_type": "Harsh Cornering",
+        "timestamp": "2026-09-17 08:45:53 UTC",
+        "timestamp_raw": 1789634753,
+        "latitude": 25.1031499,
+        "longitude": 55.2323083,
+        "speed_kmh": 44,
+        "raw_type_code": 3,
+        "g_force": 0.56,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 0,
+          "event_corner": 1,
+          "green_param": 3,
+          "braking_g": -348201.3876
+        }
+      },
+      {
+        "vehicle": "27040",
+        "unit_id": 600446512,
+        "event_type": "Harsh Cornering",
+        "timestamp": "2026-09-17 08:45:54 UTC",
+        "timestamp_raw": 1789634754,
+        "latitude": 25.1032533,
+        "longitude": 55.2322916,
+        "speed_kmh": 43,
+        "raw_type_code": 3,
+        "g_force": 0.51,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 0,
+          "event_corner": 1,
+          "green_param": 3,
+          "braking_g": -348201.3876
+        }
+      },
+      {
+        "vehicle": "27040",
+        "unit_id": 600446512,
+        "event_type": "Harsh Cornering",
+        "timestamp": "2026-09-17 08:45:57 UTC",
+        "timestamp_raw": 1789634757,
+        "latitude": 25.1035533,
+        "longitude": 55.2324683,
+        "speed_kmh": 47,
+        "raw_type_code": 3,
+        "g_force": 0.55,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 0,
+          "event_corner": 1,
+          "green_param": 3,
+          "braking_g": -348201.3876
+        }
+      },
+      {
+        "vehicle": "27040",
+        "unit_id": 600446512,
+        "event_type": "Harsh Cornering",
+        "timestamp": "2026-09-17 08:45:59 UTC",
+        "timestamp_raw": 1789634759,
+        "latitude": 25.1036449,
+        "longitude": 55.2325716,
+        "speed_kmh": 48,
+        "raw_type_code": 3,
+        "g_force": 0.53,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 0,
+          "event_corner": 1,
+          "green_param": 3,
+          "braking_g": -348201.3876
+        }
+      },
+      {
+        "vehicle": "27040",
+        "unit_id": 600446512,
+        "event_type": "Harsh Cornering",
+        "timestamp": "2026-09-17 08:46:00 UTC",
+        "timestamp_raw": 1789634760,
+        "latitude": 25.1036833,
+        "longitude": 55.232695,
+        "speed_kmh": 48,
+        "raw_type_code": 3,
+        "g_force": 0.53,
+        "sensors_snapshot": {
+          "event_accel": 0,
+          "event_brake": 0,
+          "event_corner": 1,
+          "green_param": 3,
+          "braking_g": -348201.3876
+        }
+      }
+    ]
+  },
+  "vehicle_health": {
+    "battery_voltage_available": true,
+    "internal_battery_available": true,
+    "gps_accuracy_metrics": [
+      "satellites (sc)",
+      "hdop",
+      "pdop"
+    ],
+    "connection_restore_events": true
+  },
+  "trips": {
+    "derivable": true,
+    "reconstructed_count": 27,
+    "sample_trips": [
+      {
+        "start_time": "2026-09-17 06:02:02 UTC",
+        "end_time": "2026-09-17 06:05:57 UTC",
+        "duration_minutes": 3.9,
+        "distance_km": 3.44,
+        "max_speed_kmh": 76,
+        "avg_speed_kmh": 41.4,
+        "start_coords": {
+          "lat": 25.0738416,
+          "lon": 55.1421233
+        },
+        "end_coords": {
+          "lat": 25.0759183,
+          "lon": 55.17241
+        }
+      },
+      {
+        "start_time": "2026-09-17 06:07:32 UTC",
+        "end_time": "2026-09-17 06:09:56 UTC",
+        "duration_minutes": 2.4,
+        "distance_km": 2.39,
+        "max_speed_kmh": 74,
+        "avg_speed_kmh": 57.4,
+        "start_coords": {
+          "lat": 25.0777949,
+          "lon": 55.1801983
+        },
+        "end_coords": {
+          "lat": 25.0635799,
+          "lon": 55.1979383
+        }
+      },
+      {
+        "start_time": "2026-09-17 06:10:37 UTC",
+        "end_time": "2026-09-17 06:13:32 UTC",
+        "duration_minutes": 2.9,
+        "distance_km": 0.75,
+        "max_speed_kmh": 73,
+        "avg_speed_kmh": 40.0,
+        "start_coords": {
+          "lat": 25.05726,
+          "lon": 55.1949566
+        },
+        "end_coords": {
+          "lat": 25.050495,
+          "lon": 55.1952266
+        }
+      },
+      {
+        "start_time": "2026-09-17 12:18:07 UTC",
+        "end_time": "2026-09-17 12:19:53 UTC",
+        "duration_minutes": 1.8,
+        "distance_km": 0.74,
+        "max_speed_kmh": 30,
+        "avg_speed_kmh": 19.0,
+        "start_coords": {
+          "lat": 24.94617,
+          "lon": 55.07169
+        },
+        "end_coords": {
+          "lat": 24.9469299,
+          "lon": 55.0778266
+        }
+      },
+      {
+        "start_time": "2026-09-17 12:20:53 UTC",
+        "end_time": "2026-09-17 12:33:24 UTC",
+        "duration_minutes": 12.5,
+        "distance_km": 17.6,
+        "max_speed_kmh": 104,
+        "avg_speed_kmh": 84.0,
+        "start_coords": {
+          "lat": 24.9490083,
+          "lon": 55.0703416
+        },
+        "end_coords": {
+          "lat": 25.0838916,
+          "lon": 55.1515
+        }
+      }
+    ]
+  },
+  "groups": {
+    "All Unit": {
+      "unit_count": 30,
+      "total_messages": 184583
+    },
+    "Apparel Maintenance": {
+      "unit_count": 5,
+      "total_messages": 20007
+    },
+    "Delivery Freezer Vehicle": {
+      "unit_count": 5,
+      "total_messages": 25246
+    },
+    "Delivery Vehicle": {
+      "unit_count": 15,
+      "total_messages": 115196
+    },
+    "Passenger Vehicles": {
+      "unit_count": 5,
+      "total_messages": 24134
+    }
+  },
+  "data_availability": [
+    {
+      "data": "Position (GPS)",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Stored in every position message (x, y, z, sc, c)"
+    },
+    {
+      "data": "Speed",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Directly in pos.s, io_24, and Sensor 13"
+    },
+    {
+      "data": "Mileage (Hardware Odometer)",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Cumulative in io_16 & Sensor 12; daily delta derivable"
+    },
+    {
+      "data": "Mileage (Calculated GPS)",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Derivable by integrating coordinates"
+    },
+    {
+      "data": "Engine Hours",
+      "current": "YES",
+      "historical": "YES (Derivable)",
+      "dashboard_ready": "YES",
+      "notes": "Current in calc_last; historical by integrating ignition"
+    },
+    {
+      "data": "Idle Duration",
+      "current": "YES",
+      "historical": "YES (Derivable)",
+      "dashboard_ready": "YES",
+      "notes": "Derived from speed==0 + ignition==1"
+    },
+    {
+      "data": "Driver Identification",
+      "current": "NO",
+      "historical": "NO",
+      "dashboard_ready": "NO",
+      "notes": "Hardware field present, but returns placeholder zeros"
+    },
+    {
+      "data": "Harsh Braking",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Logged via io_253=2, io_254 G-force, Sensor 5 & 9"
+    },
+    {
+      "data": "Harsh Acceleration",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Logged via io_253=1, Sensor 4"
+    },
+    {
+      "data": "Harsh Cornering",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Logged via io_253=3, Sensor 6"
+    },
+    {
+      "data": "Crash Detection",
+      "current": "NO",
+      "historical": "NO",
+      "dashboard_ready": "NO",
+      "notes": "Sensor configured on io_247, but no events triggered"
+    },
+    {
+      "data": "Battery Voltage",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Continuous in pwr_ext, io_66, and Sensor 1"
+    },
+    {
+      "data": "Internal Backup Battery",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Available on vehicles sending pwr_int / battery_charge"
+    },
+    {
+      "data": "Ignition State",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Sensor 11, io_239 (Key switch), and voltage threshold"
+    },
+    {
+      "data": "Trips",
+      "current": "YES",
+      "historical": "YES (Derivable)",
+      "dashboard_ready": "YES",
+      "notes": "Reconstructed from speed > 0 sequence segments"
+    },
+    {
+      "data": "Groups",
+      "current": "YES",
+      "historical": "YES",
+      "dashboard_ready": "YES",
+      "notes": "Dynamic group membership + historical aggregation"
+    }
+  ],
+  "limitations": [
+    "Wialon does not provide pre-computed daily mileage or idle summary tables in messages/load_interval; these must be derived from raw telemetry.",
+    "Driver codes are currently placeholder zeros ('0000000000000000') indicating no physical driver RFID/iButton tags are currently tapped in the vehicles.",
+    "Crash detection sensor (io_247) had no historical trigger events recorded during this 7-day period."
+  ]
+}

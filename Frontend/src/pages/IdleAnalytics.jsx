@@ -13,7 +13,6 @@ import {
     Layers,
     X,
     SlidersHorizontal,
-    ChevronDown,
     ChevronRight,
     Users,
     TrendingUp,
@@ -25,6 +24,8 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import AnalyticsChart from "../components/Analytics/AnalyticsChart"
 import IdleMapModal from "../components/Analytics/IdleMapModal"
 import { LocationName } from "../utils/reverseGeocode"
+
+import { formatUAEDateTime, getUAETodayStr, getUAEDateStr } from "../utils/datetime"
 
 // ─── Utilities ───────────────────────────────────────────────
 
@@ -38,36 +39,19 @@ const formatDuration = (seconds) => {
     return `${sec}s`
 }
 
-const formatDateTime = (ts) => {
-    if (!ts) return "—"
-    return new Date(Number(ts) * 1000).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-    })
-}
+const formatDateTime = (ts) => formatUAEDateTime(ts)
 
-const getIdleSeverity = (seconds) => {
-    const d = Number(seconds || 0)
-    if (d >= 3600) return { label: "Critical", bg: "bg-red-50 text-red-700", dot: "bg-red-500" }
-    if (d >= 1800) return { label: "Attention", bg: "bg-orange-50 text-orange-700", dot: "bg-orange-500" }
-    if (d >= 600) return { label: "Monitor", bg: "bg-yellow-50 text-yellow-700", dot: "bg-yellow-500" }
-    return { label: "Normal", bg: "bg-green-50 text-green-700", dot: "bg-green-500" }
-}
-
-const exportToCSV = (events, filters) => {
+const exportToCSV = (events) => {
     if (!events || events.length === 0) return
     const headers = [
         "Vehicle Name", "Vehicle ID", "Group", "Idle Start", "Idle End",
-        "Duration (min)", "Duration (HH:MM:SS)", "Severity", "Latitude", "Longitude",
+        "Duration (min)", "Duration (HH:MM:SS)", "Latitude", "Longitude",
     ]
     const rows = events.map((ev) => {
         const dur = Number(ev.duration || 0)
         const h = Math.floor(dur / 3600).toString().padStart(2, "0")
         const m = Math.floor((dur % 3600) / 60).toString().padStart(2, "0")
         const s = Math.floor(dur % 60).toString().padStart(2, "0")
-        const sev = getIdleSeverity(dur)
         return [
             ev.vehicle_name || "",
             ev.vehicle_id || "",
@@ -76,7 +60,6 @@ const exportToCSV = (events, filters) => {
             formatDateTime(ev.end_time),
             ev.duration_minutes || "",
             `${h}:${m}:${s}`,
-            sev.label,
             ev.location?.latitude || "",
             ev.location?.longitude || "",
         ]
@@ -111,10 +94,11 @@ function KpiCard({ icon: Icon, iconBg, iconColor, label, value, sub }) {
 // ─── Filter Bar ───────────────────────────────────────────────
 
 const PRESET_OPTIONS = [
+    { label: "Today", timeframe: "today", hours: 0 },
+    { label: "Last 24h", hours: 24 },
     { label: "Last 1h", hours: 1 },
     { label: "Last 6h", hours: 6 },
     { label: "Last 12h", hours: 12 },
-    { label: "Today (24h)", hours: 24 },
     { label: "Last 48h", hours: 48 },
     { label: "Last 7 days", hours: 168 },
     { label: "Last 30 days", hours: 720 },
@@ -134,9 +118,10 @@ const MIN_IDLE_OPTIONS = [
 export default function IdleAnalytics() {
     // ── Time filters ──
     const [rangeMode, setRangeMode] = useState("preset")
+    const [selectedTimeframe, setSelectedTimeframe] = useState("today")
     const [hours, setHours] = useState(24)
-    const todayStr = new Date().toISOString().slice(0, 10)
-    const sevenDaysAgoStr = new Date(Date.now() - 7 * 86400 * 1000).toISOString().slice(0, 10)
+    const todayStr = getUAETodayStr()
+    const sevenDaysAgoStr = getUAEDateStr(-7)
     const [startDate, setStartDate] = useState(sevenDaysAgoStr)
     const [endDate, setEndDate] = useState(todayStr)
 
@@ -164,11 +149,18 @@ export default function IdleAnalytics() {
     const load = useCallback(async () => {
         setLoading(true)
         setError("")
+        if (rangeMode === "custom" && startDate && endDate && startDate > endDate) {
+            setError("End date must be on or after the start date.")
+            setLoading(false)
+            return
+        }
         try {
             const opts = {}
             if (rangeMode === "custom" && startDate && endDate) {
-                opts.from_time = Math.floor(new Date(`${startDate}T00:00:00`).getTime() / 1000)
-                opts.to_time = Math.floor(new Date(`${endDate}T23:59:59`).getTime() / 1000)
+                opts.from_date = startDate
+                opts.to_date = endDate
+            } else if (selectedTimeframe === "today") {
+                opts.timeframe = "today"
             } else {
                 opts.hours = hours
             }
@@ -180,24 +172,25 @@ export default function IdleAnalytics() {
             setLastUpdated(new Date())
         } catch (err) {
             console.error(err)
-            setError("Failed to load idle analytics. Please try again.")
+            setError(err.message || "Failed to load idle analytics. Please try again.")
         } finally {
             setLoading(false)
         }
-    }, [hours, rangeMode, startDate, endDate, filterGroupId, filterVehicleId])
+    }, [hours, selectedTimeframe, rangeMode, startDate, endDate, filterGroupId, filterVehicleId])
 
     useEffect(() => {
-        load()
+        const timer = setTimeout(() => { void load() }, 0)
+        return () => clearTimeout(timer)
     }, [load])
 
     // ── Derived / filtered data ──
     const kpis = analytics?.kpis || {}
     const groups = analytics?.groups || []
-    const allEvents = analytics?.events || []
-    const byVehicle = analytics?.by_vehicle || []
-    const byGroup = analytics?.by_group || []
-    const byLocation = analytics?.by_location || []
-    const trend = analytics?.trend || []
+    const allEvents = useMemo(() => analytics?.events || [], [analytics])
+    const byVehicle = useMemo(() => analytics?.by_vehicle || [], [analytics])
+    const byGroup = useMemo(() => analytics?.by_group || [], [analytics])
+    const byLocation = useMemo(() => analytics?.by_location || [], [analytics])
+    const trend = useMemo(() => analytics?.trend || [], [analytics])
 
     // Client-side filters applied to event list
     const filteredEvents = useMemo(() => {
@@ -370,12 +363,20 @@ export default function IdleAnalytics() {
                                 <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
                                     <Timer className="h-4 w-4 text-slate-400" />
                                     <select
-                                        value={hours}
-                                        onChange={(e) => setHours(Number(e.target.value))}
+                                        value={selectedTimeframe === "today" ? "today" : hours}
+                                        onChange={(e) => {
+                                            const val = e.target.value
+                                            if (val === "today") {
+                                                setSelectedTimeframe("today")
+                                            } else {
+                                                setSelectedTimeframe("preset")
+                                                setHours(Number(val))
+                                            }
+                                        }}
                                         className="bg-transparent text-sm font-semibold text-slate-800 outline-none"
                                     >
                                         {PRESET_OPTIONS.map((o) => (
-                                            <option key={o.hours} value={o.hours}>{o.label}</option>
+                                            <option key={o.timeframe || o.hours} value={o.timeframe || o.hours}>{o.label}</option>
                                         ))}
                                     </select>
                                 </div>
@@ -679,7 +680,7 @@ export default function IdleAnalytics() {
                                                         <p className="text-xs text-slate-400">Events</p>
                                                         <p className="text-sm font-semibold text-slate-800">{v.idle_events}</p>
                                                     </div>
-                                                    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium ${v.status === "MOVING" ? "bg-green-50 text-green-700" : v.status === "IDLING" ? "bg-orange-50 text-orange-700" : "bg-slate-100 text-slate-600"}`}>
+                                                    <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium ${v.status === "MOVING" ? "bg-green-50 text-green-700" : v.status === "IDLING" ? "bg-orange-50 text-orange-700" : v.status === "OFFLINE" ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-600"}`}>
                                                         {v.status}
                                                     </span>
                                                 </div>
@@ -789,7 +790,7 @@ export default function IdleAnalytics() {
                                             )}
                                         </div>
                                         {lastUpdated && (
-                                            <span className="hidden text-xs text-slate-400 sm:inline">Updated {lastUpdated.toLocaleTimeString()}</span>
+                                            <span className="hidden text-xs text-slate-400 sm:inline">Updated {formatUAEDateTime(lastUpdated)}</span>
                                         )}
                                     </div>
                                 </div>
@@ -838,7 +839,6 @@ export default function IdleAnalytics() {
                                                         ["start_time", "Idle Start"],
                                                         ["end_time", "Idle End"],
                                                         ["duration", "Duration"],
-                                                        [null, "Severity"],
                                                         [null, "Location"],
                                                     ].map(([col, label]) => (
                                                         <th
@@ -854,7 +854,6 @@ export default function IdleAnalytics() {
                                             </thead>
                                             <tbody className="divide-y divide-slate-100">
                                                 {filteredEvents.slice(0, 100).map((ev, idx) => {
-                                                    const sev = getIdleSeverity(ev.duration)
                                                     const hasLoc = ev.location?.latitude != null && ev.location?.longitude != null
                                                     return (
                                                         <tr key={ev.id || idx} className="transition hover:bg-slate-50">

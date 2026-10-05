@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { Link, useNavigate, useLocation } from "react-router-dom"
-import { useAuth } from "../context/AuthContext"
+import { useAuth } from "../context/useAuth"
 import AtsLogo from "../assets/AtsLogo"
 import {
     Mail,
@@ -80,8 +80,8 @@ export default function Login() {
 
             {/* Top Navigation — matches Landing */}
             <header className="w-full max-w-7xl mx-auto px-6 py-6 flex items-center justify-between z-10 relative">
-                <Link to="/" className="inline-block transition-opacity hover:opacity-80">
-                    <AtsLogo className="h-auto" showSubtitle={true} />
+                <Link to="/" className="inline-flex items-center transition-opacity hover:opacity-80">
+                    <AtsLogo className="h-9 sm:h-10 max-h-10" />
                 </Link>
                 <Link
                     to="/"

@@ -1,15 +1,11 @@
-import { createContext, useContext, useEffect, useState, useTransition } from "react"
+import { useEffect, useState } from "react"
 import { supabase, isSupabaseConfigured } from "../lib/supabase"
-
-const AuthContext = createContext(null)
-
-const AUTH_STORAGE_KEY = "ats_fleet_session"
+import { AuthContext } from "./auth-context"
 
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null)
     const [profile, setProfile] = useState(null)
     const [loading, setLoading] = useState(true)
-    const [isPending, startTransition] = useTransition()
 
     // ─── Initial Session Load ───────────────────────────────────────────────
     useEffect(() => {
@@ -39,7 +35,7 @@ export function AuthProvider({ children }) {
                                     id: session.user.id,
                                     email: session.user.email,
                                     full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Fleet Manager",
-                                    role: session.user.user_metadata?.role || "admin",
+                                    role: "viewer",
                                 })
                             }
                         } catch {
@@ -48,40 +44,16 @@ export function AuthProvider({ children }) {
                                     id: session.user.id,
                                     email: session.user.email,
                                     full_name: session.user.email?.split("@")[0] || "Fleet Manager",
-                                    role: "admin",
+                                    role: "viewer",
                                 })
                             }
                         }
-                    } else if (mounted) {
-                        // Check local fallback storage
-                        loadLocalSession()
                     }
-                } else {
-                    loadLocalSession()
                 }
             } catch (err) {
                 console.error("Auth initialization error:", err)
-                if (mounted) loadLocalSession()
             } finally {
                 if (mounted) setLoading(false)
-            }
-        }
-
-        const loadLocalSession = () => {
-            try {
-                const stored = localStorage.getItem(AUTH_STORAGE_KEY) || sessionStorage.getItem(AUTH_STORAGE_KEY)
-                if (stored) {
-                    const parsed = JSON.parse(stored)
-                    setUser(parsed.user)
-                    setProfile(parsed.profile || {
-                        id: parsed.user.id,
-                        email: parsed.user.email,
-                        full_name: parsed.user.name || "Fleet Manager",
-                        role: parsed.user.role || "admin",
-                    })
-                }
-            } catch (e) {
-                console.error("Failed to parse local session:", e)
             }
         }
 
@@ -97,7 +69,7 @@ export function AuthProvider({ children }) {
                         id: session.user.id,
                         email: session.user.email,
                         full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Fleet Manager",
-                        role: session.user.user_metadata?.role || "admin",
+                        role: "viewer",
                     })
                 } else {
                     setUser(null)
@@ -138,7 +110,7 @@ export function AuthProvider({ children }) {
                 id: data.user.id,
                 email: data.user.email,
                 full_name: data.user.user_metadata?.full_name || cleanEmail.split("@")[0] || "Fleet Manager",
-                role: data.user.user_metadata?.role || "admin",
+                role: "viewer",
             }
 
             try {
@@ -155,60 +127,17 @@ export function AuthProvider({ children }) {
             setProfile(fetchedProfile)
             return { user: data.user, profile: fetchedProfile }
         }
-
-        // ─── Local / Fallback V1 Auth Provider ──────────────────────────────
-        // Provides default secure authentication with demo account for V1
-        const isValidDemo = (cleanEmail === "admin@ats-fleet.com" || cleanEmail === "admin@ats.com" || cleanEmail === "manager@ats.com") && password === "admin123"
-        const isGenericEmail = cleanEmail.includes("@") && password.length >= 6
-
-        if (!isValidDemo && !isGenericEmail) {
-            throw new Error("Invalid credentials. Password must be at least 6 characters.")
-        }
-
-        const localUser = {
-            id: "usr_" + Math.random().toString(36).substr(2, 9),
-            email: cleanEmail,
-            name: cleanEmail.split("@")[0].replace(/[._]/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
-            role: cleanEmail.includes("admin") ? "admin" : "fleet_manager",
-            created_at: new Date().toISOString(),
-        }
-
-        const localProfile = {
-            id: localUser.id,
-            email: localUser.email,
-            full_name: localUser.name,
-            role: localUser.role,
-            organization: "ATS Fleet Operations",
-        }
-
-        const sessionPayload = JSON.stringify({ user: localUser, profile: localProfile, token: "ats_jwt_" + Date.now() })
-        if (rememberMe) {
-            localStorage.setItem(AUTH_STORAGE_KEY, sessionPayload)
-            sessionStorage.removeItem(AUTH_STORAGE_KEY)
-        } else {
-            sessionStorage.setItem(AUTH_STORAGE_KEY, sessionPayload)
-            localStorage.removeItem(AUTH_STORAGE_KEY)
-        }
-
-        startTransition(() => {
-            setUser(localUser)
-            setProfile(localProfile)
-        })
-
-        return { user: localUser, profile: localProfile }
+        void rememberMe
+        throw new Error("Supabase authentication is not configured. Sign-in is unavailable.")
     }
 
     // ─── Logout Function ────────────────────────────────────────────────────
     const logout = async () => {
         try {
-            if (isSupabaseConfigured() && supabase) {
-                await supabase.auth.signOut()
-            }
+            if (isSupabaseConfigured() && supabase) await supabase.auth.signOut()
         } catch (e) {
             console.warn("Supabase sign out warning:", e)
         } finally {
-            localStorage.removeItem(AUTH_STORAGE_KEY)
-            sessionStorage.removeItem(AUTH_STORAGE_KEY)
             setUser(null)
             setProfile(null)
         }
@@ -229,12 +158,4 @@ export function AuthProvider({ children }) {
             {children}
         </AuthContext.Provider>
     )
-}
-
-export function useAuth() {
-    const context = useContext(AuthContext)
-    if (!context) {
-        throw new Error("useAuth must be used within an AuthProvider")
-    }
-    return context
 }

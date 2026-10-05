@@ -1,7 +1,9 @@
-from datetime import datetime, timezone
+from app.utils.datetime_helpers import now_timestamp, to_iso_uae
+from app.utils.status_config import CONN_DELAYED_SECONDS
 
 from app.wialon import (
     wialon_request,
+    WialonAPIError,
     login,
     get_vehicle_history,
     get_vehicle_groups
@@ -13,7 +15,7 @@ from app.status import (
     format_duration
 )
 
-from app.normalize import is_valid_sensor_value
+from app.normalize import is_valid_sensor_value, resolve_unit_sensors
 
 idle_start_times = {}
 
@@ -35,10 +37,8 @@ def get_all_vehicles(sid):
         sid
     )
 
-    if "error" in vehicle_data:
-        print("Vehicle search failed:")
-        print(vehicle_data)
-        return []
+    if isinstance(vehicle_data, dict) and "error" in vehicle_data:
+        raise WialonAPIError(f"Wialon vehicle search failed: {vehicle_data}")
 
     vehicles = vehicle_data.get("items", [])
 
@@ -63,10 +63,8 @@ def get_calculated_data(sid, vehicles):
         sid
     )
 
-    if "error" in calculated_data:
-        print("Calculated data request failed:")
-        print(calculated_data)
-        return []
+    if isinstance(calculated_data, dict) and "error" in calculated_data:
+        raise WialonAPIError(f"Wialon calculated data request failed: {calculated_data}")
 
     return calculated_data
 
@@ -116,7 +114,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         try:
             groups = get_vehicle_groups(sid)
         except Exception:
-            groups = []
+            raise
 
     unit_groups_map = {}
     for group in groups:
@@ -135,10 +133,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
     }
 
     fleet = []
-    current_time = int(
-        datetime.now(timezone.utc).timestamp()
-    )
-
+    current_time = now_timestamp()
 
     for vehicle in vehicles:
         vehicle_id = vehicle.get("id")
@@ -213,10 +208,15 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             }
 
         # ---------------------------------------------------------
-        # IGNITION
+        # SENSOR RESOLUTION & EVALUATION
         # ---------------------------------------------------------
 
-        ignition_sensor = sensors_by_name.get("ignition")
+        sensor_map = resolve_unit_sensors(configured_sensors)
+        ign_sid = sensor_map["ignition_id"]
+        bat_sid = sensor_map["battery_id"]
+
+        ignition_sensor = calculated_sensors.get(str(ign_sid)) if ign_sid else None
+        battery_sensor = calculated_sensors.get(str(bat_sid)) if bat_sid else None
 
         ignition_value = (
             ignition_sensor.get("value")
@@ -224,13 +224,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             else 0
         )
 
-        ignition_on = ignition_value == 1
-
-        # ---------------------------------------------------------
-        # BATTERY
-        # ---------------------------------------------------------
-
-        battery_sensor = sensors_by_name.get("battery")
+        ignition_on = (ignition_value == 1) or (isinstance(ignition_value, (int, float)) and ignition_value > 12.8)
 
         battery_voltage = (
             battery_sensor.get("value")
@@ -238,22 +232,10 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             else None
         )
 
-        # ---------------------------------------------------------
-        # ODOMETER
-        # ---------------------------------------------------------
-
-        odometer_sensor = sensors_by_name.get("odometer")
-
-        odometer = (
-            odometer_sensor.get("value")
-            if odometer_sensor and is_valid_sensor_value(odometer_sensor.get("value"))
-            else None
-        )
-
-        # Wialon calculated mileage is also available.
+        # Wialon calculated mileage is the authoritative cumulative odometer.
         mileage_data = calculated.get("mileage") or {}
-
         mileage = mileage_data.get("value")
+        odometer = mileage
 
         # ---------------------------------------------------------
         # ENGINE HOURS
@@ -266,13 +248,23 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         engine_hours = engine_hours_data.get("value")
 
         # ---------------------------------------------------------
-        # DRIVING STATUS
+        # DRIVING STATUS & CONNECTIVITY
         # ---------------------------------------------------------
 
         status = calculate_status(
             speed,
             ignition_on
         )
+        last_message_ts = (vehicle.get("lmsg") or {}).get("t") or position.get("t")
+        seconds_since_update = (current_time - int(last_message_ts)) if last_message_ts else None
+
+        if seconds_since_update is None or seconds_since_update > CONN_DELAYED_SECONDS:
+            connection_status = "OFFLINE"
+        elif seconds_since_update > 600:
+            connection_status = "DELAYED"
+        else:
+            connection_status = "STABLE"
+        is_offline = (connection_status == "OFFLINE")
 
         # ---------------------------------------------------------
         # IDLE DURATION
@@ -285,7 +277,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
                 messages = get_vehicle_history(
                     sid,
                     vehicle_id,
-                    hours=24
+                    hours=2
                 )
 
                 idle_duration_from_history = (
@@ -384,7 +376,13 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             "speed": speed,
             "ignition": ignition_on,
             "status": status,
+            "connection_status": connection_status,
+            "is_offline": is_offline,
+            "seconds_since_update": seconds_since_update,
+            "last_message_timestamp": last_message_ts,
             "idle_duration": idle_duration,
+            "idle_start": idle_start if status == "IDLING" else None,
+            "idle_start_iso": to_iso_uae(idle_start) if status == "IDLING" and idle_start else None,
             "idle_duration_formatted": (
                 format_duration(
                     idle_duration
@@ -423,7 +421,9 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             # Idle
             "idle": {
                 "is_idling": status == "IDLING",
-                "duration": idle_duration
+                "duration": idle_duration,
+                "start_time": idle_start if status == "IDLING" else None,
+                "start_time_iso": to_iso_uae(idle_start) if status == "IDLING" and idle_start else None
             },
 
             # Safety
@@ -445,4 +445,4 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
         fleet.append(vehicle_record)
 
-    return fleet
+    return fleet

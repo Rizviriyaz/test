@@ -4,24 +4,29 @@ import {
     Route,
     Navigate,
 } from "react-router-dom"
+import { lazy, Suspense } from "react"
 
 import { AuthProvider } from "./context/AuthContext"
 import ProtectedRoute from "./components/Auth/ProtectedRoute"
 
-import Landing from "./pages/Landing"
-import Login from "./pages/Login"
-import Dashboard from "./pages/Dashboard"
-import Tracking from "./pages/Tracking"
-import IdleAnalytics from "./pages/IdleAnalytics"
+const Landing = lazy(() => import("./pages/Landing"))
+const Login = lazy(() => import("./pages/Login"))
+const Dashboard = lazy(() => import("./pages/Dashboard"))
+const Tracking = lazy(() => import("./pages/Tracking"))
+const IdleAnalytics = lazy(() => import("./pages/IdleAnalytics"))
+const FleetAnalytics = lazy(() => import("./pages/FleetAnalytics"))
+const VehicleHealth = lazy(() => import("./pages/VehicleHealth"))
+const DriverSafety = lazy(() => import("./pages/DriverSafety"))
+const FleetAlerts = lazy(() => import("./pages/FleetAlerts"))
 
-
-import AiAssistantWidget from "./components/AI/AiAssistantWidget"
+const AiAssistantWidget = lazy(() => import("./components/AI/AiAssistantWidget"))
 
 
 function App() {
     return (
         <AuthProvider>
             <BrowserRouter>
+                <Suspense fallback={<div className="min-h-screen grid place-items-center text-sm text-slate-500">Loading page…</div>}>
                 <Routes>
                     {/* Public Routes */}
                     <Route path="/" element={<Landing />} />
@@ -80,7 +85,7 @@ function App() {
                         path="/analytics"
                         element={
                             <ProtectedRoute>
-                                <Dashboard />
+                                <FleetAnalytics />
                             </ProtectedRoute>
                         }
                     />
@@ -88,7 +93,7 @@ function App() {
                         path="/driver-safety"
                         element={
                             <ProtectedRoute>
-                                <IdleAnalytics />
+                                <DriverSafety />
                             </ProtectedRoute>
                         }
                     />
@@ -96,7 +101,7 @@ function App() {
                         path="/vehicle-health"
                         element={
                             <ProtectedRoute>
-                                <Dashboard />
+                                <VehicleHealth />
                             </ProtectedRoute>
                         }
                     />
@@ -112,7 +117,7 @@ function App() {
                         path="/alerts"
                         element={
                             <ProtectedRoute>
-                                <IdleAnalytics />
+                                <FleetAlerts />
                             </ProtectedRoute>
                         }
                     />
@@ -129,6 +134,7 @@ function App() {
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
                 <AiAssistantWidget />
+                </Suspense>
             </BrowserRouter>
         </AuthProvider>
     )

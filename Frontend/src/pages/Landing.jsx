@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { Link, useNavigate } from "react-router-dom"
+import { Link } from "react-router-dom"
 import {
     Menu,
     X,
@@ -7,14 +7,13 @@ import {
 import AtsLogo from "../assets/AtsLogo"
 import { AnimatedBackground } from "../components/core/animated-background"
 import { Magnetic } from "../components/core/magnetic"
-import { useAuth } from "../context/AuthContext"
+import { useAuth } from "../context/useAuth"
 
 function usePrefersReducedMotion() {
-    const [reduced, setReduced] = useState(false)
+    const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches)
 
     useEffect(() => {
         const mq = window.matchMedia("(prefers-reduced-motion: reduce)")
-        setReduced(mq.matches)
         const handler = (e) => setReduced(e.matches)
         mq.addEventListener("change", handler)
         return () => mq.removeEventListener("change", handler)
@@ -36,14 +35,13 @@ const NAV_TABS = [
 export default function Landing() {
     const { isAuthenticated } = useAuth()
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-    const navigate = useNavigate()
     const reducedMotion = usePrefersReducedMotion()
 
     return (
         <div className="bg-white min-h-screen flex flex-col justify-between selection:bg-black selection:text-white text-zinc-900 font-sans overflow-x-hidden">
             <header className="w-full max-w-7xl mx-auto px-6 py-6 grid grid-cols-[1fr_auto] md:grid-cols-3 items-center gap-4">
-                <Link to="/" className="justify-self-start min-w-0">
-                    <AtsLogo className="h-auto" showSubtitle={true} />
+                <Link to="/" className="justify-self-start min-w-0 flex items-center">
+                    <AtsLogo className="h-9 sm:h-10 max-h-10" />
                 </Link>
 
                 <nav className="hidden md:flex items-center justify-center">
@@ -108,7 +106,7 @@ export default function Landing() {
             {mobileMenuOpen && (
                 <div className="fixed inset-0 bg-white z-50 md:hidden flex flex-col p-6">
                     <div className="flex justify-between items-center mb-8">
-                        <AtsLogo className="h-auto" showSubtitle={true} />
+                        <AtsLogo className="h-8 sm:h-9 max-h-9" />
                         <button type="button" onClick={() => setMobileMenuOpen(false)} aria-label="Close navigation menu" className="p-2 text-zinc-700">
                             <X className="h-6 w-6" />
                         </button>
@@ -233,9 +231,8 @@ export default function Landing() {
 
             <footer className="border-t border-zinc-200 py-10 bg-zinc-50">
                 <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-zinc-500">
-                    <div className="flex items-center gap-2">
-                        <AtsLogo className="h-7" showSubtitle={false} />
-                        <span className="font-semibold text-zinc-800">ATS Advanced Technology Solutions</span>
+                    <div className="flex items-center">
+                        <AtsLogo className="h-7 max-h-7" />
                     </div>
                     <div className="flex items-center space-x-6">
                         <Link to="/dashboard" className="hover:text-black transition-colors">Dashboard</Link>

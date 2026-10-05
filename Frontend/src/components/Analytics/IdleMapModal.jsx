@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet"
 import { X, MapPin, Truck, Clock3, Users, ArrowUpRight } from "lucide-react"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
+import { formatUAEDateTime } from "../../utils/datetime"
 
 function getIdleMarkerIcon() {
     const size = 26
@@ -33,15 +34,7 @@ const formatDuration = (seconds) => {
     return `${sec}s`
 }
 
-const formatDateTime = (ts) => {
-    if (!ts) return "—"
-    return new Date(Number(ts) * 1000).toLocaleString(undefined, {
-        month: "short",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-    })
-}
+const formatDateTime = (ts) => formatUAEDateTime(ts)
 
 export default function IdleMapModal({ event, onClose }) {
     useEffect(() => {

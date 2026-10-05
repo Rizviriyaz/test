@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef } from "react"
+import { useState, useRef } from "react"
 import {
     LayoutDashboard,
     Map,
@@ -14,17 +14,15 @@ import {
     Clock3,
     PanelLeft,
     LogOut,
-    User,
 } from "lucide-react"
 
 import { NavLink, Link, useNavigate } from "react-router-dom"
-import { AtsIcon } from "../../assets/AtsLogo"
-import { useAuth } from "../../context/AuthContext"
+import AtsLogo from "../../assets/AtsLogo"
+import { useAuth } from "../../context/useAuth"
+import { SidebarContext } from "./sidebar-context"
 
 
 // ─── Sidebar context (kept for compatibility) ─────────────────────────────────
-
-const SidebarContext = createContext({ collapsed: true })
 
 export function SidebarProvider({ children }) {
     return (
@@ -32,10 +30,6 @@ export function SidebarProvider({ children }) {
             {children}
         </SidebarContext.Provider>
     )
-}
-
-export function useSidebar() {
-    return useContext(SidebarContext)
 }
 
 
@@ -127,17 +121,9 @@ export default function Sidebar() {
                     /* Collapsed: show just the icon acting as the hover trigger */
                     <PanelLeft className="h-5 w-5 text-slate-400" />
                 ) : (
-                    /* Expanded: show logo + brand */
-                    <Link to="/" className="flex items-center gap-2.5 no-underline min-w-0 overflow-hidden">
-                        <AtsIcon className="h-8 w-8 shrink-0 drop-shadow-xs" />
-                        <div className="min-w-0">
-                            <p className="text-sm font-black tracking-tight text-[#1C5E7A] leading-none whitespace-nowrap">
-                                ATS FLEET
-                            </p>
-                            <p className="text-[9px] font-bold tracking-wider text-slate-400 uppercase mt-0.5 whitespace-nowrap">
-                                Fleet Intelligence
-                            </p>
-                        </div>
+                    /* Expanded: show logo */
+                    <Link to="/" className="flex items-center no-underline min-w-0 overflow-hidden">
+                        <AtsLogo className="h-8 max-h-8 w-auto max-w-[200px]" />
                     </Link>
                 )}
             </div>

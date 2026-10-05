@@ -28,17 +28,13 @@ def calculate_idle_duration(
     # --------------------------------------------------
 
     ignition_sensor_id = None
-
-    for sensor_id, sensor_config in configured_sensors.items():
-
-        sensor_name = sensor_config.get("n", "")
-
-        if sensor_name.lower() == "ignition":
-            ignition_sensor_id = str(sensor_id)
-            break
-
-    if ignition_sensor_id is None:
-        return 0
+    if isinstance(configured_sensors, dict):
+        for sensor_id, sensor_config in configured_sensors.items():
+            s_type = str(sensor_config.get("t", "")).lower()
+            s_name = str(sensor_config.get("n", "")).lower()
+            if s_type == "engine operation" or any(kw in s_name for kw in ["ignition", "engine", "acc", "ig"]):
+                ignition_sensor_id = str(sensor_id)
+                break
 
     # --------------------------------------------------
     # Build status history
@@ -64,22 +60,19 @@ def calculate_idle_duration(
             speed = 0
 
         # Ignition
-        sensors = message.get(
-            "sensors",
-            {}
-        )
-
-        ignition_sensor = sensors.get(
-            ignition_sensor_id,
-            {}
-        )
-
-        ignition_value = ignition_sensor.get(
-            "value",
-            0
-        )
-
-        ignition_on = ignition_value == 1
+        ignition_on = False
+        sensors = message.get("sensors", {})
+        if ignition_sensor_id and ignition_sensor_id in sensors:
+            ig_val = sensors[ignition_sensor_id].get("value")
+            if ig_val is not None:
+                ignition_on = (ig_val == 1 or str(ig_val).lower() in ["1", "true", "on"])
+        else:
+            # Fallback to telemetry parameters (io_11 or in1)
+            params = message.get("p") or {}
+            if "io_11" in params:
+                ignition_on = float(params["io_11"]) > 0
+            elif "in1" in params:
+                ignition_on = float(params["in1"]) > 0
 
         # Status
         status = calculate_status(
