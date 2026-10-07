@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useMemo, useRef } from "react"
 import {
     MapContainer,
     TileLayer,
@@ -19,6 +19,16 @@ import {
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 
+export function isValidCoordinate(lat, lng) {
+    if (lat === null || lat === undefined || lng === null || lng === undefined) return false
+    const numLat = Number(lat)
+    const numLng = Number(lng)
+    if (isNaN(numLat) || isNaN(numLng)) return false
+    if (numLat === 0 && numLng === 0) return false
+    if (numLat < -90 || numLat > 90 || numLng < -180 || numLng > 180) return false
+    return true
+}
+
 function getMarkerIcon(status, selected = false) {
     const colors = {
         MOVING: "#22c55e",
@@ -28,13 +38,12 @@ function getMarkerIcon(status, selected = false) {
     }
 
     const color = colors[status] || "#64748b"
-
     const size = selected ? 24 : 18
     const border = selected ? 4 : 3
     const anchor = size / 2
 
     return L.divIcon({
-        className: "",
+        className: "ats-fleet-marker-icon",
         html: `
             <div
                 style="
@@ -53,7 +62,8 @@ function getMarkerIcon(status, selected = false) {
                                     inset: -6px;
                                     border: 2px solid ${color};
                                     border-radius: 9999px;
-                                    opacity: 0.35;
+                                    opacity: 0.45;
+                                    animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
                                 "
                             ></div>
                         `
@@ -69,7 +79,7 @@ function getMarkerIcon(status, selected = false) {
                                     inset: -4px;
                                     border: 2px solid ${color};
                                     border-radius: 9999px;
-                                    opacity: 0.2;
+                                    opacity: 0.25;
                                 "
                             ></div>
                         `
@@ -85,62 +95,39 @@ function getMarkerIcon(status, selected = false) {
                         border: ${border}px solid white;
                         border-radius: 9999px;
                         box-sizing: border-box;
-                        box-shadow: 0 2px 7px rgba(0,0,0,0.35);
+                        box-shadow: 0 2px 8px rgba(0,0,0,0.35);
                     "
                 ></div>
             </div>
         `,
         iconSize: [size, size],
         iconAnchor: [anchor, anchor],
-        popupAnchor: [0, -anchor - 4],
+        popupAnchor: [0, -anchor - 6],
     })
 }
 
-/**
- * Handles saving map view state prior to opening a popup
- * and restoring the exact center/zoom when the popup is closed.
- */
-function MapPopupHandler({ onVehicleSelect }) {
+function SelectedVehicleFocus({ selectedVehicle }) {
     const map = useMap()
-    const savedViewRef = useRef(null)
-    const isClosingRef = useRef(false)
+    const lastFocusedId = useRef(null)
 
     useEffect(() => {
-        const handlePopupOpen = () => {
-            // Save the current center and zoom level before autoPan shifts the map
-            if (!savedViewRef.current && !isClosingRef.current) {
-                savedViewRef.current = {
-                    center: map.getCenter(),
-                    zoom: map.getZoom(),
-                }
+        if (!selectedVehicle) return
+        const vehicleId = selectedVehicle.vehicle_id || selectedVehicle.id
+        if (!vehicleId) return
+
+        if (isValidCoordinate(selectedVehicle.latitude, selectedVehicle.longitude)) {
+            const lat = Number(selectedVehicle.latitude)
+            const lng = Number(selectedVehicle.longitude)
+
+            // Fly to vehicle if different selection or user focused
+            if (lastFocusedId.current !== vehicleId) {
+                lastFocusedId.current = vehicleId
+                map.flyTo([lat, lng], Math.max(map.getZoom(), 14), {
+                    duration: 0.7,
+                })
             }
         }
-
-        const handlePopupClose = () => {
-            isClosingRef.current = true
-            if (savedViewRef.current) {
-                const { center, zoom } = savedViewRef.current
-                savedViewRef.current = null
-                map.flyTo(center, zoom, { duration: 0.6 })
-            }
-
-            if (onVehicleSelect) {
-                onVehicleSelect(null)
-            }
-
-            setTimeout(() => {
-                isClosingRef.current = false
-            }, 650)
-        }
-
-        map.on("popupopen", handlePopupOpen)
-        map.on("popupclose", handlePopupClose)
-
-        return () => {
-            map.off("popupopen", handlePopupOpen)
-            map.off("popupclose", handlePopupClose)
-        }
-    }, [map, onVehicleSelect])
+    }, [selectedVehicle, map])
 
     return null
 }
@@ -148,24 +135,20 @@ function MapPopupHandler({ onVehicleSelect }) {
 function FleetMapControls({ vehicles }) {
     const map = useMap()
 
-    const validVehicles = vehicles.filter(
-        vehicle =>
-            vehicle.latitude !== null &&
-            vehicle.longitude !== null
-    )
-
     const resetView = () => {
+        const validVehicles = vehicles.filter(v => isValidCoordinate(v?.latitude, v?.longitude))
+
         if (validVehicles.length > 0) {
             const bounds = L.latLngBounds(
                 validVehicles.map(vehicle => [
-                    vehicle.latitude,
-                    vehicle.longitude,
+                    Number(vehicle.latitude),
+                    Number(vehicle.longitude),
                 ])
             )
 
             map.fitBounds(bounds, {
                 padding: [50, 50],
-                maxZoom: 12,
+                maxZoom: 13,
                 duration: 0.8,
             })
             return
@@ -180,7 +163,7 @@ function FleetMapControls({ vehicles }) {
                 type="button"
                 onClick={resetView}
                 title="Reset map view to fit all vehicles"
-                className="rounded-lg border border-slate-200 bg-white/95 px-2.5 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur-xs transition hover:bg-slate-50 active:scale-95"
+                className="rounded-lg border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur-xs transition hover:bg-slate-50 active:scale-95"
             >
                 Fit All Units
             </button>
@@ -194,7 +177,7 @@ function formatDriver(vehicle) {
 }
 
 function formatStatusBadge(status) {
-    switch (status) {
+    switch (String(status || "").toUpperCase()) {
         case "MOVING":
             return { label: "Moving", bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", dot: "bg-emerald-500" }
         case "IDLING":
@@ -211,16 +194,17 @@ function formatStatusBadge(status) {
 function VehiclePopupCard({ vehicle }) {
     const statusInfo = formatStatusBadge(vehicle.status)
     const driverName = formatDriver(vehicle)
+    const hasCoords = isValidCoordinate(vehicle.latitude, vehicle.longitude)
 
     return (
-        <div className="p-3.5 text-slate-900 select-none">
+        <div className="p-3.5 text-slate-900 select-none min-w-[220px]">
             {/* Header */}
             <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2.5">
                 <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
                         <Truck className="h-3.5 w-3.5 text-[#1C5E7A] shrink-0" />
                         <h4 className="truncate text-sm font-bold text-slate-900 leading-tight">
-                            {vehicle.vehicle_name}
+                            {vehicle.vehicle_name || `Unit #${vehicle.vehicle_id}`}
                         </h4>
                     </div>
                     <p className="mt-0.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
@@ -243,7 +227,7 @@ function VehiclePopupCard({ vehicle }) {
                         <span>Speed</span>
                     </div>
                     <p className="mt-0.5 text-sm font-black text-slate-800">
-                        {Math.round(vehicle.speed || 0)} <span className="text-[10px] font-normal text-slate-500">km/h</span>
+                        {Math.round(Number(vehicle.speed) || 0)} <span className="text-[10px] font-normal text-slate-500">km/h</span>
                     </p>
                 </div>
 
@@ -282,7 +266,7 @@ function VehiclePopupCard({ vehicle }) {
             </div>
 
             {/* Coordinates & Location Link */}
-            {vehicle.latitude !== null && vehicle.longitude !== null && (
+            {hasCoords && (
                 <div className="mt-2.5 flex items-center justify-between rounded-lg bg-slate-50 border border-slate-100 px-2.5 py-1.5 text-[11px]">
                     <div className="flex items-center gap-1 text-slate-500">
                         <MapPin className="h-3 w-3 text-amber-600 shrink-0" />
@@ -307,30 +291,25 @@ function VehiclePopupCard({ vehicle }) {
 function FleetMap({
     vehicles = [],
     selectedVehicleId = null,
+    selectedVehicle = null,
     onVehicleSelect = () => {},
 }) {
-    const vehiclesWithLocation = vehicles.filter(
-        vehicle =>
-            vehicle.latitude !== null &&
-            vehicle.longitude !== null
-    )
+    const vehiclesWithLocation = useMemo(() => {
+        return (vehicles || []).filter(v => isValidCoordinate(v?.latitude, v?.longitude))
+    }, [vehicles])
 
-    const center =
-        vehiclesWithLocation.length > 0
-            ? [
-                vehiclesWithLocation.reduce(
-                    (sum, vehicle) =>
-                        sum + vehicle.latitude,
-                    0
-                ) / vehiclesWithLocation.length,
-
-                vehiclesWithLocation.reduce(
-                    (sum, vehicle) =>
-                        sum + vehicle.longitude,
-                    0
-                ) / vehiclesWithLocation.length,
-            ]
-            : [25.2048, 55.2708]
+    const center = useMemo(() => {
+        if (vehiclesWithLocation.length > 0) {
+            const sumLat = vehiclesWithLocation.reduce((sum, v) => sum + Number(v.latitude), 0)
+            const sumLng = vehiclesWithLocation.reduce((sum, v) => sum + Number(v.longitude), 0)
+            const avgLat = sumLat / vehiclesWithLocation.length
+            const avgLng = sumLng / vehiclesWithLocation.length
+            if (!isNaN(avgLat) && !isNaN(avgLng)) {
+                return [avgLat, avgLng]
+            }
+        }
+        return [25.2048, 55.2708] // Default UAE Center
+    }, [vehiclesWithLocation])
 
     return (
         <div className="relative h-full w-full overflow-hidden">
@@ -338,42 +317,43 @@ function FleetMap({
                 center={center}
                 zoom={10}
                 className="h-full w-full"
+                scrollWheelZoom={true}
             >
-                <MapPopupHandler onVehicleSelect={onVehicleSelect} />
+                <SelectedVehicleFocus selectedVehicle={selectedVehicle} />
 
                 <FleetMapControls vehicles={vehiclesWithLocation} />
 
                 <TileLayer
-                    attribution="&copy; OpenStreetMap contributors"
+                    attribution="&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors"
                     url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
 
-                {vehiclesWithLocation.map(vehicle => (
-                    <Marker
-                        key={vehicle.vehicle_id}
-                        position={[
-                            vehicle.latitude,
-                            vehicle.longitude,
-                        ]}
-                        icon={getMarkerIcon(
-                            vehicle.status,
-                            String(vehicle.vehicle_id) === String(selectedVehicleId)
-                        )}
-                        eventHandlers={{
-                            click: () => {
-                                onVehicleSelect(vehicle)
-                            },
-                        }}
-                    >
-                        <Popup
-                            className="ats-vehicle-popup"
-                            autoPan={true}
-                            autoPanPadding={[60, 60]}
+                {vehiclesWithLocation.map(vehicle => {
+                    const isSelected = String(vehicle.vehicle_id || vehicle.id) === String(selectedVehicleId)
+                    return (
+                        <Marker
+                            key={vehicle.vehicle_id || vehicle.id}
+                            position={[
+                                Number(vehicle.latitude),
+                                Number(vehicle.longitude),
+                            ]}
+                            icon={getMarkerIcon(vehicle.status, isSelected)}
+                            eventHandlers={{
+                                click: () => {
+                                    onVehicleSelect(vehicle)
+                                },
+                            }}
                         >
-                            <VehiclePopupCard vehicle={vehicle} />
-                        </Popup>
-                    </Marker>
-                ))}
+                            <Popup
+                                className="ats-vehicle-popup"
+                                autoPan={true}
+                                autoPanPadding={[50, 50]}
+                            >
+                                <VehiclePopupCard vehicle={vehicle} />
+                            </Popup>
+                        </Marker>
+                    )
+                })}
             </MapContainer>
         </div>
     )

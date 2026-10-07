@@ -352,3 +352,87 @@ export async function getVehicleRoute(vehicleId, hours = 24) {
     if (!response.ok) throw new Error(`Failed to fetch route for vehicle ${vehicleId}`)
     return response.json()
 }
+
+// ─── Fuel & Fleet Performance Analytics APIs ──────────────────────────────────
+
+function buildFuelQueryString(params = {}) {
+    const q = new URLSearchParams()
+    Object.entries(params).forEach(([key, val]) => {
+        if (val !== undefined && val !== null && val !== "") {
+            q.append(key, val)
+        }
+    })
+    const qs = q.toString()
+    return qs ? `?${qs}` : ""
+}
+
+export async function getFuelSummary(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/summary${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getFuelTrend(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/trend${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getFuelVehicles(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/vehicles${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getFuelTypes(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/fuel-types${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getFleetEfficiency(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getVehicleEfficiencyList(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency/vehicles${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getEfficiencyTrend(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency/trend${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getFuelVehicleDistance(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function previewFuelImport(file) {
+    const formData = new FormData()
+    formData.append("file", file)
+    const response = await apiFetch(`${API_URL}/api/fuel/import/preview`, {
+        method: "POST",
+        body: formData,
+    })
+    return response.json()
+}
+
+export async function executeFuelImport(file, mapping) {
+    const formData = new FormData()
+    formData.append("file", file)
+    formData.append("mapping", typeof mapping === "string" ? mapping : JSON.stringify(mapping))
+    const response = await apiFetch(`${API_URL}/api/fuel/import`, {
+        method: "POST",
+        body: formData,
+    })
+    return response.json()
+}
+
+export async function getFuelImports(limit = 50, offset = 0) {
+    const response = await apiFetch(`${API_URL}/api/fuel/imports?limit=${limit}&offset=${offset}`)
+    return response.json()
+}
+
+export async function getFuelTransactions(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`)
+    return response.json()
+}

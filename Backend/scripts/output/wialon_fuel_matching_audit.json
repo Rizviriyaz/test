@@ -1,0 +1,646 @@
+{
+  "total_fuel_identifiers": 238,
+  "total_wialon_units": 30,
+  "matched_count": 28,
+  "matched_wialon_count": 28,
+  "unmatched_fuel_count": 210,
+  "unmatched_wialon_count": 2,
+  "matched": [
+    {
+      "fuel_identifier": "13-AUH-30561",
+      "wialon_unit_id": 600446403,
+      "wialon_unit_name": "30561",
+      "match_type": "Token Match ('30561' in '13-AUH-30561')"
+    },
+    {
+      "fuel_identifier": "13-AUH-31638",
+      "wialon_unit_id": 600446511,
+      "wialon_unit_name": "31638",
+      "match_type": "Token Match ('31638' in '13-AUH-31638')"
+    },
+    {
+      "fuel_identifier": "16-AUH-54943",
+      "wialon_unit_id": 600446402,
+      "wialon_unit_name": "54943",
+      "match_type": "Token Match ('54943' in '16-AUH-54943')"
+    },
+    {
+      "fuel_identifier": "20-AUH-82495",
+      "wialon_unit_id": 600446510,
+      "wialon_unit_name": "82495",
+      "match_type": "Token Match ('82495' in '20-AUH-82495')"
+    },
+    {
+      "fuel_identifier": "20-AUH-84698",
+      "wialon_unit_id": 600446324,
+      "wialon_unit_name": "84698",
+      "match_type": "Token Match ('84698' in '20-AUH-84698')"
+    },
+    {
+      "fuel_identifier": "20-AUH-98921",
+      "wialon_unit_id": 600446506,
+      "wialon_unit_name": "98921",
+      "match_type": "Token Match ('98921' in '20-AUH-98921')"
+    },
+    {
+      "fuel_identifier": "22-AUH-58523",
+      "wialon_unit_id": 600446509,
+      "wialon_unit_name": "58523",
+      "match_type": "Token Match ('58523' in '22-AUH-58523')"
+    },
+    {
+      "fuel_identifier": "23-AUH-75036",
+      "wialon_unit_id": 601763798,
+      "wialon_unit_name": "75036",
+      "match_type": "Token Match ('75036' in '23-AUH-75036')"
+    },
+    {
+      "fuel_identifier": "5-AUH-56816",
+      "wialon_unit_id": 600446404,
+      "wialon_unit_name": "56816",
+      "match_type": "Token Match ('56816' in '5-AUH-56816')"
+    },
+    {
+      "fuel_identifier": "CC-DXB-17428",
+      "wialon_unit_id": 600691973,
+      "wialon_unit_name": "17428",
+      "match_type": "Numeric Match (digits: 17428)"
+    },
+    {
+      "fuel_identifier": "CC-DXB-17429",
+      "wialon_unit_id": 600693357,
+      "wialon_unit_name": "17429",
+      "match_type": "Numeric Match (digits: 17429)"
+    },
+    {
+      "fuel_identifier": "CC-DXB-17430",
+      "wialon_unit_id": 600691976,
+      "wialon_unit_name": "17430",
+      "match_type": "Numeric Match (digits: 17430)"
+    },
+    {
+      "fuel_identifier": "CC-DXB-17432",
+      "wialon_unit_id": 600691975,
+      "wialon_unit_name": "17432",
+      "match_type": "Numeric Match (digits: 17432)"
+    },
+    {
+      "fuel_identifier": "DD-DXB-28321",
+      "wialon_unit_id": 600446388,
+      "wialon_unit_name": "28321",
+      "match_type": "Numeric Match (digits: 28321)"
+    },
+    {
+      "fuel_identifier": "F-DXB-29432",
+      "wialon_unit_id": 600446529,
+      "wialon_unit_name": "29432",
+      "match_type": "Numeric Match (digits: 29432)"
+    },
+    {
+      "fuel_identifier": "F-DXB-72031",
+      "wialon_unit_id": 600446547,
+      "wialon_unit_name": "72031",
+      "match_type": "Numeric Match (digits: 72031)"
+    },
+    {
+      "fuel_identifier": "G-DXB-94181",
+      "wialon_unit_id": 600446518,
+      "wialon_unit_name": "94181",
+      "match_type": "Numeric Match (digits: 94181)"
+    },
+    {
+      "fuel_identifier": "G-DXB-99238",
+      "wialon_unit_id": 600446820,
+      "wialon_unit_name": "99238",
+      "match_type": "Numeric Match (digits: 99238)"
+    },
+    {
+      "fuel_identifier": "H-DXB-40780",
+      "wialon_unit_id": 600446328,
+      "wialon_unit_name": "40780",
+      "match_type": "Numeric Match (digits: 40780)"
+    },
+    {
+      "fuel_identifier": "H-DXB-64207",
+      "wialon_unit_id": 600446548,
+      "wialon_unit_name": "64207",
+      "match_type": "Numeric Match (digits: 64207)"
+    },
+    {
+      "fuel_identifier": "H-DXB-75629",
+      "wialon_unit_id": 600446390,
+      "wialon_unit_name": "75629",
+      "match_type": "Numeric Match (digits: 75629)"
+    },
+    {
+      "fuel_identifier": "H-DXB-95331",
+      "wialon_unit_id": 600446391,
+      "wialon_unit_name": "95331",
+      "match_type": "Numeric Match (digits: 95331)"
+    },
+    {
+      "fuel_identifier": "J-DXB-27040",
+      "wialon_unit_id": 600446512,
+      "wialon_unit_name": "27040",
+      "match_type": "Numeric Match (digits: 27040)"
+    },
+    {
+      "fuel_identifier": "P-DXB-23494",
+      "wialon_unit_id": 600446808,
+      "wialon_unit_name": "23494",
+      "match_type": "Numeric Match (digits: 23494)"
+    },
+    {
+      "fuel_identifier": "S-DXB-74509",
+      "wialon_unit_id": 600446337,
+      "wialon_unit_name": "74509",
+      "match_type": "Numeric Match (digits: 74509)"
+    },
+    {
+      "fuel_identifier": "S-DXB-74526",
+      "wialon_unit_id": 600446482,
+      "wialon_unit_name": "74526",
+      "match_type": "Numeric Match (digits: 74526)"
+    },
+    {
+      "fuel_identifier": "T-DXB-15770",
+      "wialon_unit_id": 600446393,
+      "wialon_unit_name": "15770",
+      "match_type": "Numeric Match (digits: 15770)"
+    },
+    {
+      "fuel_identifier": "T-DXB-48143",
+      "wialon_unit_id": 600446504,
+      "wialon_unit_name": "48143",
+      "match_type": "Numeric Match (digits: 48143)"
+    }
+  ],
+  "unmatched_wialon": [
+    {
+      "id": 600691982,
+      "name": "17431",
+      "reg_plate": "",
+      "brand": ""
+    },
+    {
+      "id": 600446340,
+      "name": "21956",
+      "reg_plate": "",
+      "brand": ""
+    }
+  ],
+  "unmatched_fuel": [
+    "1-AUH-30057",
+    "1-DXB-10916",
+    "13-AUH-75914",
+    "13-AUH-75964",
+    "17-AUH-54836",
+    "18-AUH-43057",
+    "18-AUH-43076",
+    "20-AUH-69597",
+    "20-AUH-98924",
+    "22-AUH-62965",
+    "22-AUH-62970",
+    "22-AUH-72796",
+    "22-AUH-72802",
+    "5-AUH-60557",
+    "7-AUH-55863",
+    "7-AUH-55902",
+    "7-AUH-55943",
+    "8-AUH-74413",
+    "8-AUH-74428",
+    "AA-DXB-24203",
+    "AA-DXB-42897",
+    "AA-DXB-61209",
+    "AA-DXB-64623",
+    "AA-DXB-64624",
+    "AA-DXB-78728",
+    "AA-DXB-97637",
+    "B-DXB-10758",
+    "B-DXB-18048",
+    "B-DXB-46296",
+    "B-DXB-51038",
+    "B-DXB-54500",
+    "BB-DXB-39055",
+    "BB-DXB-41204",
+    "BB-DXB-67347",
+    "BB-DXB-88964",
+    "BB-DXB-95964",
+    "C-DXB-21726",
+    "C-DXB-23142",
+    "C-DXB-46653",
+    "C-DXB-73668",
+    "C-DXB-74536",
+    "C-DXB-79069",
+    "C-DXB-93833",
+    "C-DXB-99732",
+    "CC-DXB-17434",
+    "CC-DXB-40533",
+    "CC-DXB-45936",
+    "CC-DXB-62760",
+    "CC-DXB-64104",
+    "CC-DXB-79145",
+    "CC-DXB-79146",
+    "CC-DXB-93290",
+    "CC-DXB-94898",
+    "D-DXB-23843",
+    "D-DXB-24936",
+    "D-DXB-28701",
+    "D-DXB-3103",
+    "D-DXB-65738",
+    "DD-DXB-20469",
+    "DD-DXB-28316",
+    "DD-DXB-28317",
+    "DD-DXB-28320",
+    "DD-DXB-28322",
+    "DD-DXB-55092",
+    "DD-DXB-55093",
+    "DD-DXB-55094",
+    "DD-DXB-67662",
+    "DD-DXB-67984",
+    "DD-DXB-76192",
+    "E-DXB-40689",
+    "E-DXB-50160",
+    "E-DXB-86221",
+    "E-DXB-93464",
+    "E-DXB-97742",
+    "EE-DXB-16504",
+    "EE-DXB-35939",
+    "EE-DXB-60927",
+    "EE-DXB-93447",
+    "EE-DXB-94535",
+    "F-DXB-52922",
+    "F-DXB-57416",
+    "F-DXB-776",
+    "FF-DXB-48272",
+    "FF-DXB-59054",
+    "G-DXB-32133",
+    "G-DXB-34916",
+    "G-DXB-50677",
+    "G-DXB-59274",
+    "G-DXB-67015",
+    "G-DXB-94087",
+    "H-DXB-17731",
+    "H-DXB-20156",
+    "H-DXB-35463",
+    "H-DXB-35580",
+    "H-DXB-36771",
+    "H-DXB-40630",
+    "H-DXB-50428",
+    "H-DXB-52551",
+    "H-DXB-57199",
+    "H-DXB-57204",
+    "H-DXB-59260",
+    "H-DXB-65791",
+    "H-DXB-68973",
+    "H-DXB-79525",
+    "I-DXB-24889",
+    "I-DXB-27623",
+    "I-DXB-49558",
+    "J-DXB-18162",
+    "J-DXB-49489",
+    "J-DXB-60779",
+    "J-DXB-66856",
+    "J-DXB-67497",
+    "J-DXB-97541",
+    "J-DXB-98927",
+    "K-DXB-13158",
+    "K-DXB-64036",
+    "K-DXB-74080",
+    "K-DXB-9786",
+    "L-DXB-13523",
+    "L-DXB-59724",
+    "L-DXB-61003",
+    "L-DXB-63109",
+    "L-DXB-99103",
+    "M-DXB-11528",
+    "M-DXB-29087",
+    "M-DXB-33915",
+    "M-DXB-37199",
+    "M-DXB-49819",
+    "M-DXB-50896",
+    "M-DXB-50897",
+    "M-DXB-54684",
+    "M-DXB-65667",
+    "M-DXB-66597",
+    "M-DXB-87608",
+    "M-DXB-89663",
+    "N-DXB-34149",
+    "N-DXB-48278",
+    "N-DXB-48351",
+    "N-DXB-83858",
+    "O-DXB-10264",
+    "O-DXB-16428",
+    "O-DXB-24303",
+    "O-DXB-35933",
+    "O-DXB-62764",
+    "O-DXB-74041",
+    "OM-41813",
+    "OM-4950",
+    "P-DXB-23492",
+    "P-DXB-23493",
+    "P-DXB-41256",
+    "P-DXB-46438",
+    "P-DXB-49783",
+    "P-DXB-67128",
+    "P-DXB-68103",
+    "P-DXB-69850",
+    "P-DXB-73865",
+    "P-DXB-76098",
+    "P-DXB-79960",
+    "Q-DXB-18826",
+    "Q-DXB-8921",
+    "R-DXB-47042",
+    "R-DXB-78249",
+    "S-DXB-15687",
+    "S-DXB-1908",
+    "S-DXB-2272",
+    "S-DXB-2412",
+    "S-DXB-272",
+    "S-DXB-50637",
+    "S-DXB-54306",
+    "S-DXB-57813",
+    "S-DXB-62674",
+    "S-DXB-71949",
+    "S-DXB-86995",
+    "S-DXB-89206",
+    "S-DXB-92154",
+    "SA-1",
+    "T-DXB-15771",
+    "T-DXB-15774",
+    "T-DXB-16109",
+    "T-DXB-25513",
+    "T-DXB-30817",
+    "T-DXB-39488",
+    "T-DXB-52185",
+    "T-DXB-54290",
+    "U-DXB-48270",
+    "U-DXB-65289",
+    "U-DXB-81664",
+    "U-DXB-82779",
+    "U-DXB-85157",
+    "V-DXB-13384",
+    "V-DXB-23461",
+    "V-DXB-40187",
+    "V-DXB-77158",
+    "V-DXB-84417",
+    "V-DXB-96836",
+    "W-DXB-21685",
+    "W-DXB-29980",
+    "W-DXB-47652",
+    "W-DXB-73019",
+    "X-DXB-13873",
+    "X-DXB-59807",
+    "X-DXB-60977",
+    "X-DXB-61877",
+    "X-DXB-83069",
+    "X-DXB-91562",
+    "X-DXB-93964",
+    "Y-DXB-10524",
+    "Y-DXB-29018",
+    "Y-DXB-43509",
+    "Z-DXB-51028"
+  ],
+  "wialon_units_all": [
+    {
+      "id": 600446393,
+      "name": "15770",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600691973,
+      "name": "17428",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600693357,
+      "name": "17429",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600691976,
+      "name": "17430",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600691982,
+      "name": "17431",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600691975,
+      "name": "17432",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446340,
+      "name": "21956",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446808,
+      "name": "23494",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446512,
+      "name": "27040",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446388,
+      "name": "28321",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446529,
+      "name": "29432",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446403,
+      "name": "30561",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446511,
+      "name": "31638",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446328,
+      "name": "40780",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446504,
+      "name": "48143",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446402,
+      "name": "54943",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446404,
+      "name": "56816",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446509,
+      "name": "58523",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446548,
+      "name": "64207",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446547,
+      "name": "72031",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446337,
+      "name": "74509",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446482,
+      "name": "74526",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 601763798,
+      "name": "75036",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446390,
+      "name": "75629",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446510,
+      "name": "82495",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446324,
+      "name": "84698",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446518,
+      "name": "94181",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446391,
+      "name": "95331",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446506,
+      "name": "98921",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    },
+    {
+      "id": 600446820,
+      "name": "99238",
+      "cls": 2,
+      "reg_plate": "",
+      "brand": "",
+      "custom_fields": []
+    }
+  ]
+}

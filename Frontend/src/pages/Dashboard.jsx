@@ -32,6 +32,7 @@ import {
 import FleetMap from "../components/FleetMap"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import { formatUAETime } from "../utils/datetime"
+import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 
 
 function Dashboard() {
@@ -782,6 +783,14 @@ function Dashboard() {
                     )}
                 </main>
             </div>
+
+            {/* Vehicle Detail Drawer (Live Telemetry + Fuel Performance) */}
+            {selectedVehicle && (
+                <VehicleDetailDrawer
+                    vehicle={selectedVehicle}
+                    onClose={() => setSelectedVehicleId(null)}
+                />
+            )}
         </div>
         </SidebarProvider>
     )

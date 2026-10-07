@@ -1,12 +1,10 @@
 import { useState, useRef } from "react"
 import {
     LayoutDashboard,
+    Fuel,
     Map,
-    Truck,
     Users,
     Route,
-    BarChart3,
-    ShieldAlert,
     HeartPulse,
     FileText,
     Bell,
@@ -39,32 +37,17 @@ const navigation = [
     {
         section: null,
         items: [
-            { name: "Dashboard",    icon: LayoutDashboard, path: "/dashboard" },
+            { name: "Fleet Overview",     icon: LayoutDashboard, path: "/dashboard" },
+            { name: "Fuel & Performance", icon: Fuel,            path: "/fuel" },
         ],
     },
     {
         section: "OPERATIONS",
         items: [
-            { name: "Live Tracking", icon: Map,      path: "/tracking"  },
-            { name: "Vehicles",      icon: Truck,    path: "/vehicles"  },
-            { name: "Drivers",       icon: Users,    path: "/drivers"   },
-            { name: "Trips",         icon: Route,    path: "/trips"     },
-        ],
-    },
-    {
-        section: "ANALYTICS",
-        items: [
-            { name: "Fleet Analytics", icon: BarChart3,  path: "/analytics"      },
+            { name: "Live Tracking",   icon: Map,        path: "/tracking" },
             { name: "Idle Analytics",  icon: Clock3,     path: "/idle-analytics" },
-            { name: "Driver Safety",   icon: ShieldAlert, path: "/driver-safety" },
             { name: "Vehicle Health",  icon: HeartPulse, path: "/vehicle-health" },
-        ],
-    },
-    {
-        section: "REPORTING",
-        items: [
-            { name: "Reports", icon: FileText, path: "/reports" },
-            { name: "Alerts",  icon: Bell,     path: "/alerts"  },
+            { name: "Alerts",          icon: Bell,       path: "/alerts" },
         ],
     },
 ]
@@ -142,6 +125,27 @@ export default function Sidebar() {
                         <div className="space-y-0.5">
                             {group.items.map((item) => {
                                 const Icon = item.icon
+                                if (item.isAction) {
+                                    return (
+                                        <button
+                                            key={item.name}
+                                            type="button"
+                                            onClick={() => window.dispatchEvent(new CustomEvent("open-ai-assistant"))}
+                                            title={collapsed ? item.name : undefined}
+                                            className={`flex w-full items-center rounded-xl py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors cursor-pointer ${
+                                                collapsed ? "justify-center px-0" : "gap-2.5 px-2.5"
+                                            }`}
+                                        >
+                                            <Icon className="h-4 w-4 shrink-0 text-[#1C5E7A]" />
+                                            {!collapsed && (
+                                                <span className="whitespace-nowrap font-bold text-[#1C5E7A]">
+                                                    {item.name}
+                                                </span>
+                                            )}
+                                        </button>
+                                    )
+                                }
+
                                 return (
                                     <NavLink
                                         key={item.name}

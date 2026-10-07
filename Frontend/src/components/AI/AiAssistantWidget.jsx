@@ -21,8 +21,9 @@ import { sendAiChatMessage } from "../../api/fleetApi"
 const QUICK_PROMPTS = [
     "How is the fleet doing?",
     "Which vehicle is idling the longest?",
-    "How many vehicles are moving?",
-    "Show recent idle events",
+    "How much fuel did we consume?",
+    "Which vehicle has the worst fuel efficiency?",
+    "Which vehicles have high fuel relative to distance?",
 ]
 
 function extractActionsAndCleanText(content) {
@@ -146,6 +147,14 @@ export default function AiAssistantWidget() {
             handleOpen()
         }
     }
+
+    useEffect(() => {
+        const handleTrigger = () => {
+            handleOpen()
+        }
+        window.addEventListener("open-ai-assistant", handleTrigger)
+        return () => window.removeEventListener("open-ai-assistant", handleTrigger)
+    }, [])
 
     useEffect(() => {
         if (isOpen) {

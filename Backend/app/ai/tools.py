@@ -435,9 +435,200 @@ def dispatch_tool(name: str, args: dict) -> str:
                 vehicle_id=int(args["vehicle_id"]),
                 hours=int(args.get("hours", 24)),
             )
+        elif name == "get_fuel_summary":
+            result = tool_get_fuel_summary(
+                date_from=args.get("date_from"),
+                date_to=args.get("date_to"),
+            )
+        elif name == "get_fleet_fuel_efficiency":
+            result = tool_get_fleet_fuel_efficiency(
+                date_from=args.get("date_from"),
+                date_to=args.get("date_to"),
+            )
+        elif name == "get_vehicle_fuel_ranking":
+            result = tool_get_vehicle_fuel_ranking(
+                sort_by=args.get("sort_by", "litres"),
+                sort_order=args.get("sort_order", "desc"),
+                limit=int(args.get("limit", 5)),
+            )
+        elif name == "get_vehicle_fuel_performance":
+            result = tool_get_vehicle_fuel_performance(
+                vehicle_identifier=str(args.get("vehicle_identifier", "")),
+            )
         else:
             result = {"error": f"Unknown tool: {name}"}
     except Exception as e:
         result = {"error": str(e)}
 
     return json.dumps(result)
+
+
+# ─── Fuel Intelligence Tool Implementations ───────────────────────────────────
+
+def tool_get_fuel_summary(date_from: str = None, date_to: str = None) -> dict:
+    """Return total fleet fuel consumption, expenditure, and refuel counts."""
+    from app.fuel.db import fetch_fuel_transactions_for_analytics
+    from app.fuel.analytics import calculate_fuel_summary
+
+    filters = {"date_from": date_from, "date_to": date_to}
+    txs = fetch_fuel_transactions_for_analytics(filters)
+    s = calculate_fuel_summary(txs)
+    return {
+        "total_litres": round(s.total_litres, 1),
+        "total_cost_aed": round(s.total_cost, 2),
+        "transaction_count": s.transaction_count,
+        "unique_vehicles": s.vehicle_count,
+        "average_unit_price": round(s.average_unit_price, 2),
+    }
+
+
+def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None) -> dict:
+    """Return weighted fleet efficiency (L/100 km) and cost per km combining fuel and Wialon distance."""
+    from app.fuel.db import fetch_fuel_transactions_for_analytics
+    from app.fuel.efficiency import calculate_fleet_efficiency
+    from app.fuel.wialon_distance import get_fleet_distances_map
+    from app.wialon import login
+    from app.vehicles import get_all_vehicles
+
+    filters = {"date_from": date_from, "date_to": date_to}
+    txs = fetch_fuel_transactions_for_analytics(filters)
+    sid = login()
+    units = get_all_vehicles(sid)
+    dmap = get_fleet_distances_map(date_from or "2026-08-01", date_to or "2026-08-31", sid)
+    eff = calculate_fleet_efficiency(txs, dmap, units)
+    return {
+        "fuel_efficiency_l_per_100km": round(eff.fuel_efficiency_l_per_100km, 2) if eff.fuel_efficiency_l_per_100km else None,
+        "fuel_cost_per_km_aed": round(eff.fuel_cost_per_km, 2) if eff.fuel_cost_per_km else None,
+        "total_distance_km": round(eff.total_distance_km, 1) if eff.total_distance_km else None,
+        "total_litres": round(eff.total_litres, 1),
+        "total_cost_aed": round(eff.total_cost, 2),
+        "tracked_vehicles": eff.matched_vehicle_count,
+        "total_vehicles": eff.vehicle_count,
+    }
+
+
+def tool_get_vehicle_fuel_ranking(sort_by: str = "litres", sort_order: str = "desc", limit: int = 5) -> dict:
+    """Return vehicles ranked by fuel, cost, distance, efficiency (L/100km), or cost_per_km."""
+    from app.fuel.db import fetch_fuel_transactions_for_analytics
+    from app.fuel.efficiency import calculate_vehicle_efficiency_records, paginate_and_sort_vehicle_efficiency
+    from app.fuel.wialon_distance import get_fleet_distances_map
+    from app.wialon import login
+    from app.vehicles import get_all_vehicles
+
+    txs = fetch_fuel_transactions_for_analytics({})
+    sid = login()
+    units = get_all_vehicles(sid)
+    dmap = get_fleet_distances_map("2026-08-01", "2026-08-31", sid)
+    records = calculate_vehicle_efficiency_records(txs, dmap, units)
+    paged = paginate_and_sort_vehicle_efficiency(records, 1, limit, sort_by, sort_order)
+    return {
+        "sort_by": sort_by,
+        "sort_order": sort_order,
+        "vehicles": [
+            {
+                "vehicle": v.vehicle_identifier,
+                "wialon_unit": v.wialon_unit_name,
+                "litres": round(v.litres, 1),
+                "cost_aed": round(v.total_cost, 2),
+                "distance_km": round(v.distance_km, 1) if v.distance_km is not None else None,
+                "fuel_efficiency_l_per_100km": round(v.fuel_efficiency_l_per_100km, 2) if v.fuel_efficiency_l_per_100km is not None else None,
+                "cost_per_km_aed": round(v.fuel_cost_per_km, 2) if v.fuel_cost_per_km is not None else None,
+                "status": v.status,
+            }
+            for v in paged.data
+        ],
+    }
+
+
+def tool_get_vehicle_fuel_performance(vehicle_identifier: str) -> dict:
+    """Get specific vehicle fuel, distance, and efficiency performance."""
+    from app.fuel.db import fetch_fuel_transactions_for_analytics
+    from app.fuel.efficiency import calculate_vehicle_efficiency_records
+    from app.fuel.wialon_distance import get_fleet_distances_map
+    from app.wialon import login
+    from app.vehicles import get_all_vehicles
+
+    txs = fetch_fuel_transactions_for_analytics({"vehicle_identifier": vehicle_identifier})
+    sid = login()
+    units = get_all_vehicles(sid)
+    dmap = get_fleet_distances_map("2026-08-01", "2026-08-31", sid)
+    records = calculate_vehicle_efficiency_records(txs, dmap, units)
+    v = next((item for item in records if vehicle_identifier.lower() in item.vehicle_identifier.lower()), None)
+    if not v:
+        return {"error": f"No fuel data found matching '{vehicle_identifier}'"}
+    return {
+        "vehicle": v.vehicle_identifier,
+        "wialon_unit": v.wialon_unit_name,
+        "litres": round(v.litres, 1),
+        "cost_aed": round(v.total_cost, 2),
+        "distance_km": round(v.distance_km, 1) if v.distance_km is not None else None,
+        "fuel_efficiency_l_per_100km": round(v.fuel_efficiency_l_per_100km, 2) if v.fuel_efficiency_l_per_100km is not None else None,
+        "cost_per_km_aed": round(v.fuel_cost_per_km, 2) if v.fuel_cost_per_km is not None else None,
+        "refuel_transactions": v.transaction_count,
+        "status": v.status,
+    }
+
+
+# Append fuel tools to TOOL_DEFINITIONS
+TOOL_DEFINITIONS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fuel_summary",
+            "description": "Get fleet fuel consumption summary: total litres, expenditure in AED, transaction count, and average fuel price.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from": {"type": ["string", "null"], "description": "Start date (YYYY-MM-DD). Optional."},
+                    "date_to": {"type": ["string", "null"], "description": "End date (YYYY-MM-DD). Optional."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fleet_fuel_efficiency",
+            "description": "Get weighted fleet fuel efficiency in L/100 km, cost per km (AED/km), total GPS distance, and tracked coverage.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from": {"type": ["string", "null"], "description": "Start date (YYYY-MM-DD). Optional."},
+                    "date_to": {"type": ["string", "null"], "description": "End date (YYYY-MM-DD). Optional."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_vehicle_fuel_ranking",
+            "description": "Get top or bottom ranked vehicles by fuel consumption, expenditure, distance, fuel efficiency (L/100km), or cost/km.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sort_by": {"type": "string", "enum": ["litres", "cost", "distance", "efficiency", "cost_per_km"], "description": "Metric to rank vehicles by."},
+                    "sort_order": {"type": "string", "enum": ["asc", "desc"], "description": "Sort order: 'desc' for highest, 'asc' for lowest."},
+                    "limit": {"type": "integer", "description": "Number of vehicles to return (default 5)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_vehicle_fuel_performance",
+            "description": "Get detailed fuel consumption, expenditure, GPS distance, L/100 km, and cost/km for a specific vehicle plate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vehicle_identifier": {"type": "string", "description": "Vehicle registration or plate number."},
+                },
+                "required": ["vehicle_identifier"],
+            },
+        },
+    },
+])

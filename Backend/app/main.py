@@ -41,6 +41,7 @@ from app.vehicles import (
     idle_start_times,
 )
 from app.status import calculate_idle_duration
+from app.fuel.routes import router as fuel_router
 
 
 
@@ -58,6 +59,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+app.include_router(fuel_router)
 
 cors_origins_env = os.getenv("CORS_ORIGINS", "")
 if cors_origins_env.strip():

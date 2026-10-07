@@ -88,16 +88,17 @@ def execute_wialon_unit_trips_report(
             trips = []
 
             if tables:
-                row_res = wialon_request(
-                    "report/get_result_rows",
-                    {"tableIndex": 0, "indexFrom": 0, "indexTo": 500},
-                    sid=sid,
-                )
-                if isinstance(row_res, dict) and "error" in row_res:
-                    raise WialonAPIError(f"Wialon trip rows failed for vehicle {vehicle_id}: {row_res}")
-                if not isinstance(row_res, list):
-                    raise WialonAPIError(f"Wialon trip rows returned an invalid response for vehicle {vehicle_id}")
-                if isinstance(row_res, list):
+                total_rows = tables[0].get("rows", 0)
+                if total_rows > 0:
+                    row_res = wialon_request(
+                        "report/get_result_rows",
+                        {"tableIndex": 0, "indexFrom": 0, "indexTo": total_rows - 1},
+                        sid=sid,
+                    )
+                    if isinstance(row_res, dict) and "error" in row_res:
+                        raise WialonAPIError(f"Wialon trip rows failed for vehicle {vehicle_id}: {row_res}")
+                    if not isinstance(row_res, list):
+                        raise WialonAPIError(f"Wialon trip rows returned an invalid response for vehicle {vehicle_id}")
                     for r in row_res:
                         cols = r.get("c", [])
                         if len(cols) >= 10:
@@ -307,17 +308,17 @@ def execute_wialon_group_trips_report(
             unit_summaries = []
 
             if tables:
-                # Fetch up to 500 units in the group report table
-                row_res = wialon_request(
-                    "report/get_result_rows",
-                    {"tableIndex": 0, "indexFrom": 0, "indexTo": 500},
-                    sid=sid,
-                )
-                if isinstance(row_res, dict) and "error" in row_res:
-                    raise WialonAPIError(f"Wialon trip rows failed for group {group_id}: {row_res}")
-                if not isinstance(row_res, list):
-                    raise WialonAPIError(f"Wialon trip rows returned an invalid response for group {group_id}")
-                if isinstance(row_res, list):
+                total_rows = tables[0].get("rows", 0)
+                if total_rows > 0:
+                    row_res = wialon_request(
+                        "report/get_result_rows",
+                        {"tableIndex": 0, "indexFrom": 0, "indexTo": total_rows - 1},
+                        sid=sid,
+                    )
+                    if isinstance(row_res, dict) and "error" in row_res:
+                        raise WialonAPIError(f"Wialon trip rows failed for group {group_id}: {row_res}")
+                    if not isinstance(row_res, list):
+                        raise WialonAPIError(f"Wialon trip rows returned an invalid response for group {group_id}")
                     for r in row_res:
                         cols = r.get("c", [])
                         # Table 0 columns: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Mileage', 'Total time', 'Engine hours', 'Avg. speed', 'Max. speed', 'Driver']
