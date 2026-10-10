@@ -17,6 +17,12 @@ import {
     Loader2,
     History,
     RefreshCw,
+    Sliders,
+    Flame,
+    Clock,
+    Route,
+    Info,
+    ArrowUpRight,
 } from "lucide-react"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import { useFuelFilters } from "../context/FuelFilterContext"
@@ -26,6 +32,7 @@ import {
     previewFuelImport,
     executeFuelImport,
     getFuelImports,
+    getFuelWaste,
 } from "../api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
 import KpiCards from "../components/Fuel/KpiCards"
@@ -33,7 +40,8 @@ import FuelTrendChart from "../components/Fuel/FuelTrendChart"
 import FuelTypeDonut from "../components/Fuel/FuelTypeDonut"
 import FleetEfficiencyGauge from "../components/Fuel/FleetEfficiencyGauge"
 import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
-import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
+import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import { formatUAEDateTime } from "../utils/datetime"
 
 const SORT_OPTIONS = [
@@ -49,10 +57,18 @@ const SORT_OPTIONS = [
 export default function FuelPerformance() {
     const { queryParams, periodLabel, setPeriod } = useFuelFilters()
 
+    // Configurable Telematics Idle Rate (Litres/Hour)
+    const [idleRate, setIdleRate] = useState(2.0)
+    const [idleThreshold, setIdleThreshold] = useState(5.0)
+
     // Fleet Efficiency & Overview Metrics
     const [efficiency, setEfficiency] = useState(null)
     const [loadingEfficiency, setLoadingEfficiency] = useState(true)
     const [overviewError, setOverviewError] = useState(null)
+
+    // Fuel Waste & Anomalies
+    const [wasteData, setWasteData] = useState(null)
+    const [loadingWaste, setLoadingWaste] = useState(true)
 
     // Rankings & Outliers State
     const [sortBy, setSortBy] = useState("litres")
@@ -65,8 +81,8 @@ export default function FuelPerformance() {
     const [loadingRankings, setLoadingRankings] = useState(true)
     const [attentionVehicles, setAttentionVehicles] = useState([])
 
-    // Vehicle Detail Drawer State
-    const [drawerVehicle, setDrawerVehicle] = useState(null)
+    // Vehicle Detail Modal State
+    const [selectedVehicleDetail, setSelectedVehicleDetail] = useState(null)
 
     // Excel Import Modal State
     const [isImportModalOpen, setIsImportModalOpen] = useState(false)
@@ -88,7 +104,10 @@ export default function FuelPerformance() {
         try {
             setLoadingEfficiency(true)
             setOverviewError(null)
-            const res = await getFleetEfficiency(queryParams)
+            const res = await getFleetEfficiency({
+                ...queryParams,
+                idle_rate_lph: idleRate,
+            })
             setEfficiency(res)
         } catch (err) {
             console.error("Efficiency load error:", err)
@@ -98,7 +117,24 @@ export default function FuelPerformance() {
         }
     }
 
-    // 2. Fetch Vehicle Rankings
+    // 2. Fetch Fuel Waste & Anomaly Intelligence
+    const loadWasteData = async () => {
+        try {
+            setLoadingWaste(true)
+            const res = await getFuelWaste({
+                ...queryParams,
+                idle_rate_lph: idleRate,
+                idle_threshold_hours: idleThreshold,
+            })
+            setWasteData(res)
+        } catch (err) {
+            console.error("Waste intelligence load error:", err)
+        } finally {
+            setLoadingWaste(false)
+        }
+    }
+
+    // 3. Fetch Vehicle Rankings
     const loadRankingsData = async () => {
         try {
             setLoadingRankings(true)
@@ -109,6 +145,7 @@ export default function FuelPerformance() {
                 sort_order: sortOrder,
                 status: statusFilter || undefined,
                 vehicle_identifier: searchQuery || undefined,
+                idle_rate_lph: idleRate,
                 ...queryParams,
             })
             setVehiclesData(res || { data: [], total: 0, page: 1 })
@@ -119,7 +156,7 @@ export default function FuelPerformance() {
         }
     }
 
-    // 3. Fetch Vehicles Needing Attention Outliers
+    // 4. Fetch Vehicles Needing Attention Outliers
     const loadAttentionData = async () => {
         try {
             const res = await getVehicleEfficiencyList({
@@ -128,6 +165,7 @@ export default function FuelPerformance() {
                 sort_by: "efficiency",
                 sort_order: "desc",
                 status: "matched",
+                idle_rate_lph: idleRate,
                 ...queryParams,
             })
             setAttentionVehicles(res?.data || [])
@@ -138,12 +176,13 @@ export default function FuelPerformance() {
 
     useEffect(() => {
         loadEfficiencyData()
+        loadWasteData()
         loadAttentionData()
-    }, [queryParams])
+    }, [queryParams, idleRate, idleThreshold])
 
     useEffect(() => {
         loadRankingsData()
-    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams])
+    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRate])
 
     // Load Import History when modal is opened
     const loadImportHistory = async () => {
@@ -200,6 +239,7 @@ export default function FuelPerformance() {
             setSelectedFile(null)
             loadImportHistory()
             loadEfficiencyData()
+            loadWasteData()
             loadRankingsData()
         } catch (err) {
             console.error("Import execution failed:", err)
@@ -268,6 +308,69 @@ export default function FuelPerformance() {
                             showFilters={true}
                         />
 
+                        {/* ─── TELEMATICS IDLE RATE COEFFICIENT CONTROLS ──────────── */}
+                        <div className="mb-6 rounded-2xl border border-slate-200/90 bg-white p-4.5 shadow-xs">
+                            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                                <div className="flex items-center gap-3">
+                                    <div className="rounded-xl bg-amber-500/10 p-2 text-amber-600 border border-amber-500/20">
+                                        <Sliders className="h-4 w-4" />
+                                    </div>
+                                    <div>
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="text-xs font-black uppercase tracking-wider text-slate-800">
+                                                Telematics Idle Rate Coefficient
+                                            </h3>
+                                            <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-black text-amber-800">
+                                                {idleRate.toFixed(1)} L/h
+                                            </span>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 mt-0.5">
+                                            Configurable fuel burn rate applied to stationary engine ignition duration across the fleet
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+                                    <span className="text-[11px] font-bold text-slate-400">Presets:</span>
+                                    {[
+                                        { label: "1.5 L/h (Light)", val: 1.5 },
+                                        { label: "2.0 L/h (Standard)", val: 2.0 },
+                                        { label: "2.5 L/h (Heavy)", val: 2.5 },
+                                        { label: "3.0 L/h (Severe / AC)", val: 3.0 },
+                                    ].map((preset) => (
+                                        <button
+                                            key={preset.val}
+                                            type="button"
+                                            onClick={() => setIdleRate(preset.val)}
+                                            className={`rounded-xl px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                                                idleRate === preset.val
+                                                    ? "bg-[#1C5E7A] text-white shadow-xs"
+                                                    : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
+                                            }`}
+                                        >
+                                            {preset.label}
+                                        </button>
+                                    ))}
+
+                                    <div className="flex items-center gap-1.5 ml-1 pl-2 border-l border-slate-200">
+                                        <input
+                                            type="range"
+                                            min="0.5"
+                                            max="5.0"
+                                            step="0.1"
+                                            value={idleRate}
+                                            onChange={(e) => setIdleRate(parseFloat(e.target.value))}
+                                            className="w-24 accent-[#1C5E7A] cursor-pointer"
+                                            title={`Idle rate: ${idleRate.toFixed(1)} L/h`}
+                                        />
+                                        <span className="font-mono text-xs font-bold text-slate-700 w-10 text-right">
+                                            {idleRate.toFixed(1)}
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         {/* Error Message */}
                         {overviewError && (
                             <div className="mb-6 flex items-center gap-3 rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700">
@@ -305,19 +408,32 @@ export default function FuelPerformance() {
                             </div>
                         )}
 
-                        {/* ─── 1. COMPACT KPI CARDS ────────────────────────────────── */}
-                        <KpiCards efficiencyData={efficiency} loading={loadingEfficiency} />
+                        {/* ─── 1. COMPACT KPI CARDS (RECORDED & ESTIMATED) ─────────── */}
+                        <KpiCards
+                            efficiencyData={efficiency}
+                            loading={loadingEfficiency}
+                            idleRate={idleRate}
+                        />
 
-                        {/* ─── 2. MAIN FUEL / DISTANCE / COST TREND CHART ──────────── */}
+                        {/* ─── 2. FUEL WASTE & ANOMALY INTELLIGENCE ─────────────────── */}
+                        <FuelWasteIntelligence
+                            wasteData={wasteData}
+                            loading={loadingWaste}
+                            onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                            idleThreshold={idleThreshold}
+                            onIdleThresholdChange={setIdleThreshold}
+                        />
+
+                        {/* ─── 3. MAIN FUEL / DISTANCE / COST TREND CHART ──────────── */}
                         <FuelTrendChart />
 
-                        {/* ─── 3. FUEL TYPE BREAKDOWN & FLEET EFFICIENCY GAUGE ─────── */}
+                        {/* ─── 4. FUEL TYPE BREAKDOWN & FLEET EFFICIENCY GAUGE ─────── */}
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
                             <FuelTypeDonut />
                             <FleetEfficiencyGauge efficiencyData={efficiency} loading={loadingEfficiency} />
                         </div>
 
-                        {/* ─── 4. VEHICLES NEEDING ATTENTION (OUTLIERS) ────────────── */}
+                        {/* ─── 5. VEHICLES NEEDING ATTENTION (OUTLIERS) ────────────── */}
                         {attentionVehicles.length > 0 && (
                             <section className="mb-8">
                                 <div className="rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50/60 to-rose-50/40 p-5 shadow-xs">
@@ -339,7 +455,7 @@ export default function FuelPerformance() {
                                         {attentionVehicles.map((v) => (
                                             <div
                                                 key={v.vehicle_identifier}
-                                                onClick={() => setDrawerVehicle({ name: v.vehicle_identifier })}
+                                                onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
                                                 className="rounded-xl border border-amber-200 bg-white/90 p-3.5 shadow-2xs hover:shadow-xs transition-shadow cursor-pointer"
                                             >
                                                 <div className="flex items-center justify-between mb-2">
@@ -376,7 +492,7 @@ export default function FuelPerformance() {
                             </section>
                         )}
 
-                        {/* ─── 5. VEHICLE PERFORMANCE RANKINGS ─────────────────────── */}
+                        {/* ─── 6. VEHICLE PERFORMANCE RANKINGS ─────────────────────── */}
                         <section className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs mb-8">
                             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
                                 <div className="flex items-center gap-2">
@@ -385,10 +501,10 @@ export default function FuelPerformance() {
                                     </div>
                                     <div>
                                         <h3 className="text-sm font-bold text-slate-900">
-                                            Vehicle Performance Ranking
+                                            Vehicle Performance Ranking & Analytics
                                         </h3>
                                         <p className="text-[11px] text-slate-500">
-                                            Visual comparison and ranking of fleet vehicles
+                                            Visual comparison, telematics hours, and drill-down analysis of fleet vehicles
                                         </p>
                                     </div>
                                 </div>
@@ -464,10 +580,9 @@ export default function FuelPerformance() {
                                         }}
                                         className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-2xs cursor-pointer"
                                     >
-                                        <option value="">All Statuses</option>
-                                        <option value="matched">Tracked GPS</option>
-                                        <option value="no_distance_data">No Telemetry</option>
-                                        <option value="not_tracked">Untracked</option>
+                                        <option value="">All Matched Vehicles</option>
+                                        <option value="matched">Active Telemetry</option>
+                                        <option value="no_distance_data">Zero Distance in Period</option>
                                     </select>
                                 </div>
                             </div>
@@ -502,8 +617,7 @@ export default function FuelPerformance() {
                                         return (
                                             <div
                                                 key={v.vehicle_identifier}
-                                                onClick={() => setDrawerVehicle({ name: v.vehicle_identifier })}
-                                                className={`rounded-2xl border bg-white p-4 shadow-xs transition-all hover:shadow-md cursor-pointer ${
+                                                className={`rounded-2xl border bg-white p-4.5 shadow-xs transition-all hover:shadow-md ${
                                                     isGold
                                                         ? "border-amber-300/80 bg-gradient-to-r from-amber-50/20 to-white"
                                                         : isSilver
@@ -514,7 +628,8 @@ export default function FuelPerformance() {
                                                 }`}
                                             >
                                                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-                                                    <div className="flex items-center gap-3 min-w-[220px]">
+                                                    {/* Vehicle ID & Badge */}
+                                                    <div className="flex items-center gap-3 min-w-[240px]">
                                                         <span
                                                             className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-xs font-black shadow-2xs ${
                                                                 isGold
@@ -530,60 +645,92 @@ export default function FuelPerformance() {
                                                         </span>
 
                                                         <div>
-                                                            <div className="flex items-center gap-2">
+                                                            <div className="flex flex-wrap items-center gap-2">
                                                                 <span className="font-mono text-sm font-black text-slate-900">
                                                                     {v.vehicle_identifier}
                                                                 </span>
                                                                 <VehicleStatusBadge status={v.status} />
+                                                                {v.estimation_status && (
+                                                                    <span className="rounded-md bg-slate-100 px-1.5 py-0.2 text-[9px] font-bold text-slate-600 border border-slate-200">
+                                                                        [{v.estimation_status.toUpperCase()}]
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                             {v.wialon_unit_name && (
-                                                                <span className="text-[11px] text-slate-400 font-medium">
-                                                                    {v.wialon_unit_name}
+                                                                <span className="text-[11px] text-slate-400 font-medium block mt-0.5">
+                                                                    GPS Unit: {v.wialon_unit_name}
                                                                 </span>
                                                             )}
                                                         </div>
                                                     </div>
 
-                                                    <div className="flex-1 max-w-xs px-2">
-                                                        <div className="flex items-center justify-between text-[11px] font-bold text-slate-500 mb-1">
-                                                            <span>Relative Performance</span>
-                                                            <span className="font-mono text-slate-700">{Math.round(progressPercent)}%</span>
-                                                        </div>
-                                                        <div className="h-2.5 w-full rounded-full bg-slate-100 overflow-hidden border border-slate-200/50">
-                                                            <div
-                                                                className="h-full rounded-full bg-gradient-to-r from-[#1C5E7A] to-[#0284C7] transition-all duration-300"
-                                                                style={{ width: `${progressPercent}%` }}
-                                                            />
-                                                        </div>
-                                                    </div>
-
-                                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-right text-xs shrink-0">
-                                                        <div className="rounded-xl bg-slate-50/60 p-2">
-                                                            <span className="block text-[10px] font-bold text-slate-400 uppercase">Efficiency</span>
-                                                            <span className="font-bold text-[#1C5E7A]">
-                                                                {v.fuel_efficiency_l_per_100km !== null ? `${v.fuel_efficiency_l_per_100km.toFixed(1)} L/100km` : "—"}
-                                                            </span>
-                                                        </div>
-
-                                                        <div className="rounded-xl bg-slate-50/60 p-2">
-                                                            <span className="block text-[10px] font-bold text-slate-400 uppercase">Cost / km</span>
-                                                            <span className="font-bold text-slate-700">
-                                                                {v.fuel_cost_per_km !== null ? `AED ${v.fuel_cost_per_km.toFixed(2)}` : "—"}
-                                                            </span>
-                                                        </div>
-
-                                                        <div className="rounded-xl bg-slate-50/60 p-2">
-                                                            <span className="block text-[10px] font-bold text-slate-400 uppercase">Fuel</span>
-                                                            <span className="font-bold text-slate-900">
+                                                    {/* Metrics Grid */}
+                                                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-right text-xs flex-1">
+                                                        {/* 1. Fuel Purchased */}
+                                                        <div className="rounded-xl bg-slate-50/70 p-2">
+                                                            <span className="block text-[10px] font-bold text-slate-400 uppercase">Fuel [Rec]</span>
+                                                            <span className="font-black text-slate-900">
                                                                 {Math.round(v.litres).toLocaleString()} L
                                                             </span>
+                                                            <span className="block text-[9px] text-slate-400">
+                                                                AED {Math.round(v.total_cost || 0).toLocaleString()}
+                                                            </span>
                                                         </div>
 
-                                                        <div className="rounded-xl bg-slate-50/60 p-2">
+                                                        {/* 2. Distance */}
+                                                        <div className="rounded-xl bg-slate-50/70 p-2">
                                                             <span className="block text-[10px] font-bold text-slate-400 uppercase">Distance</span>
-                                                            <span className="font-bold text-sky-700">
+                                                            <span className="font-black text-sky-700">
                                                                 {v.distance_km !== null ? `${Math.round(v.distance_km).toLocaleString()} km` : "—"}
                                                             </span>
+                                                            <span className="block text-[9px] text-slate-400">
+                                                                {v.transaction_count} refuels
+                                                            </span>
+                                                        </div>
+
+                                                        {/* 3. Efficiency */}
+                                                        <div className="rounded-xl bg-slate-50/70 p-2">
+                                                            <span className="block text-[10px] font-bold text-slate-400 uppercase">Efficiency</span>
+                                                            <span className="font-black text-[#1C5E7A]">
+                                                                {v.fuel_efficiency_l_per_100km !== null ? `${v.fuel_efficiency_l_per_100km.toFixed(1)} L/100` : "—"}
+                                                            </span>
+                                                            <span className="block text-[9px] text-slate-400">
+                                                                {v.fuel_cost_per_km !== null ? `AED ${v.fuel_cost_per_km.toFixed(2)}/km` : "—"}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* 4. Driving Hours */}
+                                                        <div className="rounded-xl bg-sky-50/40 p-2 border border-sky-100/50">
+                                                            <span className="block text-[10px] font-bold text-sky-800 uppercase">Driving</span>
+                                                            <span className="font-bold text-sky-900">
+                                                                {v.driving_duration_hours !== null && v.driving_duration_hours !== undefined ? `${v.driving_duration_hours.toFixed(1)} hrs` : "—"}
+                                                            </span>
+                                                            <span className="block text-[9px] text-sky-700">
+                                                                {v.estimated_driving_fuel_litres !== null && v.estimated_driving_fuel_litres !== undefined ? `${v.estimated_driving_fuel_litres.toFixed(1)} L` : "In motion"}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* 5. Idling Hours & Estimated Waste */}
+                                                        <div className="rounded-xl bg-amber-50/40 p-2 border border-amber-100/50">
+                                                            <span className="block text-[10px] font-bold text-amber-800 uppercase">Idling</span>
+                                                            <span className="font-bold text-amber-900">
+                                                                {v.idle_duration_hours !== null && v.idle_duration_hours !== undefined ? `${v.idle_duration_hours.toFixed(1)} hrs` : "—"}
+                                                            </span>
+                                                            <span className="block text-[9px] text-rose-700 font-semibold">
+                                                                {v.estimated_idle_fuel_litres !== null && v.estimated_idle_fuel_litres !== undefined ? `${v.estimated_idle_fuel_litres.toFixed(1)} L waste` : "—"}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* 6. Inspect Action */}
+                                                        <div className="flex items-center justify-end p-1">
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
+                                                                className="w-full inline-flex items-center justify-center gap-1 rounded-xl bg-slate-100 hover:bg-[#1C5E7A] hover:text-white px-2.5 py-2 text-xs font-bold text-slate-700 transition-colors shadow-2xs cursor-pointer"
+                                                            >
+                                                                <span>Inspect</span>
+                                                                <ArrowUpRight className="h-3.5 w-3.5" />
+                                                            </button>
                                                         </div>
                                                     </div>
                                                 </div>
@@ -817,11 +964,14 @@ export default function FuelPerformance() {
                             </div>
                         )}
 
-                        {/* Vehicle Detail Drawer if clicked */}
-                        {drawerVehicle && (
-                            <VehicleDetailDrawer
-                                vehicle={drawerVehicle}
-                                onClose={() => setDrawerVehicle(null)}
+                        {/* Vehicle Fuel Detail Drill-Down Modal */}
+                        {selectedVehicleDetail && (
+                            <VehicleFuelDetailModal
+                                vehicleIdentifier={selectedVehicleDetail}
+                                onClose={() => setSelectedVehicleDetail(null)}
+                                dateFrom={queryParams.date_from}
+                                dateTo={queryParams.date_to}
+                                idleRate={idleRate}
                             />
                         )}
                     </main>

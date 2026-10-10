@@ -7,19 +7,28 @@ import {
     Clock,
     Activity,
     Fuel,
-    DollarSign,
     Route,
     Gauge,
     ExternalLink,
     Loader2,
+    Compass,
+    Radio,
+    Battery,
+    Key,
+    User,
+    ArrowUpRight,
+    HeartPulse,
+    FileText,
 } from "lucide-react"
-import { getVehicleEfficiencyList } from "../../api/fleetApi"
+import { getVehicleEfficiencyList, getVehicleTrips } from "../../api/fleetApi"
 import { formatUAETime } from "../../utils/datetime"
 import VehicleStatusBadge from "../Fuel/VehicleStatusBadge"
 
 export default function VehicleDetailDrawer({ vehicle, onClose }) {
     const [fuelData, setFuelData] = useState(null)
     const [loadingFuel, setLoadingFuel] = useState(false)
+    const [tripsData, setTripsData] = useState(null)
+    const [loadingTrips, setLoadingTrips] = useState(false)
 
     useEffect(() => {
         if (!vehicle) return
@@ -28,7 +37,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
         async function fetchVehicleFuel() {
             try {
                 setLoadingFuel(true)
-                const plate = vehicle.name || vehicle.plate || vehicle.plate_number || ""
+                const plate = vehicle.vehicle_name || vehicle.name || vehicle.plate || vehicle.plate_number || ""
                 const res = await getVehicleEfficiencyList({
                     vehicle_identifier: plate,
                     page: 1,
@@ -48,13 +57,30 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
             }
         }
 
+        async function fetchVehicleTripsData() {
+            const vid = vehicle.vehicle_id || vehicle.id
+            if (!vid) return
+            try {
+                setLoadingTrips(true)
+                const res = await getVehicleTrips(vid, { hours: 24 })
+                if (!active) return
+                setTripsData(res)
+            } catch (err) {
+                console.error("Failed to fetch vehicle trips:", err)
+                if (active) setTripsData(null)
+            } finally {
+                if (active) setLoadingTrips(false)
+            }
+        }
+
         fetchVehicleFuel()
+        fetchVehicleTripsData()
         return () => { active = false }
     }, [vehicle])
 
     if (!vehicle) return null
 
-    const statusStr = String(vehicle.status || vehicle.normalizedStatus || "OFFLINE").toUpperCase()
+    const statusStr = String(vehicle.status || vehicle.normalizedStatus || (vehicle.is_offline ? "OFFLINE" : "STOPPED")).toUpperCase()
     const statusBg =
         statusStr === "MOVING"
             ? "bg-emerald-50 text-emerald-700 border-emerald-200"
@@ -64,157 +90,266 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
             ? "bg-slate-100 text-slate-700 border-slate-200"
             : "bg-rose-50 text-rose-700 border-rose-200"
 
+    const vehicleName = vehicle.vehicle_name || vehicle.name || `Vehicle #${vehicle.vehicle_id || vehicle.id}`
+    const vehicleGroup = vehicle.group || (Array.isArray(vehicle.groups) && vehicle.groups[0]) || "General Fleet"
+    const unitId = vehicle.vehicle_id || vehicle.id || "—"
+    const hardwareType = vehicle.hardware_type || vehicle.device_type || vehicle.hw_type || null
+
+    const lat = vehicle.latitude ?? vehicle.location?.latitude ?? null
+    const lon = vehicle.longitude ?? vehicle.location?.longitude ?? null
+    const altitude = vehicle.location?.altitude ?? vehicle.altitude ?? null
+    const course = vehicle.location?.course ?? vehicle.course ?? null
+    const satellites = vehicle.location?.satellites ?? vehicle.satellites ?? null
+    const speed = Number(vehicle.speed ?? vehicle.location?.speed ?? 0)
+
+    const batteryVoltage = vehicle.sensors?.battery_voltage ?? vehicle.battery?.voltage ?? vehicle.battery_voltage ?? null
+    const ignitionState = vehicle.ignition !== undefined ? (vehicle.ignition ? "ON" : "OFF") : (vehicle.sensors?.ignition !== undefined ? (vehicle.sensors.ignition ? "ON" : "OFF") : null)
+    const driverId = vehicle.driver?.id || vehicle.driver_id || vehicle.sensors?.driver_id || null
+    const cleanDriverId = driverId && !["0000000000000000", "0", "---", "none", "null"].includes(String(driverId).toLowerCase().trim()) ? String(driverId) : null
+
+    // Activity metrics
+    const tripCount = tripsData?.trip_count ?? vehicle.trip_count ?? vehicle.trips_count ?? null
+    const todayDistance = vehicle.today_mileage ?? vehicle.mileage ?? (tripsData?.trips ? tripsData.trips.reduce((sum, t) => sum + Number(t.distance_km || 0), 0) : null)
+    const idleMinutes = vehicle.idle_duration ? Math.round(vehicle.idle_duration / 60) : null
+
     return (
         <div className="fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col bg-white shadow-2xl border-l border-slate-200 animate-in slide-in-from-right duration-200">
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-slate-50/50">
-                <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#1C5E7A]/10 text-[#1C5E7A]">
+            <div className="flex items-center justify-between border-b border-slate-100 p-5 bg-slate-50/70">
+                <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#1C5E7A]/10 text-[#1C5E7A]">
                         <Truck className="h-5 w-5" />
                     </div>
-                    <div>
-                        <h2 className="font-mono text-base font-black text-slate-900">
-                            {vehicle.name || `Vehicle #${vehicle.vehicle_id}`}
+                    <div className="min-w-0">
+                        <h2 className="font-mono text-base font-black text-slate-900 truncate">
+                            {vehicleName}
                         </h2>
-                        <span className={`inline-block mt-0.5 rounded-full px-2 py-0.5 text-[10px] font-bold border ${statusBg}`}>
-                            {statusStr}
-                        </span>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-bold border ${statusBg}`}>
+                                {statusStr}
+                            </span>
+                            <span className="text-[11px] font-semibold text-slate-500 truncate">
+                                {vehicleGroup}
+                            </span>
+                        </div>
                     </div>
                 </div>
 
                 <button
                     type="button"
                     onClick={onClose}
-                    className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
+                    className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer shrink-0"
+                    aria-label="Close vehicle details"
                 >
                     <X className="h-5 w-5" />
                 </button>
             </div>
 
             {/* Content Body */}
-            <div className="flex-1 overflow-y-auto p-5 space-y-6">
-                {/* ─── LIVE WIALON FLEET TELEMETRY ──────────────────────────── */}
-                <section className="space-y-3">
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                {/* ─── 1. VEHICLE IDENTITY & CURRENT STATUS ────────────────────────── */}
+                <section className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 space-y-3">
                     <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                         <Activity className="h-3.5 w-3.5 text-[#1C5E7A]" />
-                        Live Fleet Telematics
+                        Vehicle Identity & Status
                     </h3>
 
-                    <div className="grid grid-cols-2 gap-2.5">
-                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Speed</span>
-                            <span className="text-base font-black text-slate-900">
-                                {Number(vehicle.speed || 0)} <span className="text-xs text-slate-400 font-semibold">km/h</span>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Unit ID</span>
+                            <span className="font-mono font-bold text-slate-900">{unitId}</span>
+                        </div>
+                        <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Current Speed</span>
+                            <span className="text-sm font-black text-slate-900">
+                                {speed} <span className="text-[10px] font-semibold text-slate-400">km/h</span>
                             </span>
                         </div>
-
-                        <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                            <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Last Update</span>
-                            <span className="text-xs font-bold text-slate-800">
-                                {formatUAETime(vehicle.last_update || vehicle.timestamp)}
+                        {hardwareType && (
+                            <div className="col-span-2 rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Hardware Device</span>
+                                <span className="font-semibold text-slate-800">{hardwareType}</span>
+                            </div>
+                        )}
+                        <div className="col-span-2 rounded-lg bg-white p-2.5 border border-slate-100 flex items-center justify-between">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase">Last Update</span>
+                            <span className="font-semibold text-slate-800 text-[11px]">
+                                {formatUAETime(vehicle.last_update || vehicle.last_message_timestamp || vehicle.timestamp)}
                             </span>
                         </div>
                     </div>
+                </section>
 
-                    <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3 text-xs space-y-1.5">
-                        <div className="flex items-start gap-2">
-                            <MapPin className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
-                            <div>
-                                <span className="font-bold text-slate-700 block">Coordinates</span>
-                                <span className="text-[11px] text-slate-500 font-mono">
-                                    {vehicle.latitude !== null && vehicle.longitude !== null
-                                        ? `${vehicle.latitude?.toFixed(5)}, ${vehicle.longitude?.toFixed(5)}`
-                                        : "No GPS fix"}
-                                </span>
-                            </div>
+                {/* ─── 2. GPS TELEMETRY ────────────────────────────────────────────── */}
+                <section className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 space-y-3">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <MapPin className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                        GPS Telemetry
+                    </h3>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="col-span-2 rounded-lg bg-white p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Coordinates</span>
+                            <span className="font-mono font-bold text-slate-800 text-[11px]">
+                                {lat !== null && lon !== null ? `${Number(lat).toFixed(5)}, ${Number(lon).toFixed(5)}` : "No GPS fix"}
+                            </span>
                         </div>
-
-                        {vehicle.idle_duration > 0 && (
-                            <div className="flex items-center justify-between pt-1 border-t border-slate-200/60 text-[11px]">
-                                <span className="text-amber-700 font-semibold">Idle Duration:</span>
-                                <span className="font-bold text-amber-800">
-                                    {Math.round(vehicle.idle_duration / 60)} minutes
+                        {altitude !== null && (
+                            <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Altitude</span>
+                                <span className="font-bold text-slate-800">{Math.round(altitude)} m</span>
+                            </div>
+                        )}
+                        {course !== null && (
+                            <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Course</span>
+                                <span className="font-bold text-slate-800">{course}°</span>
+                            </div>
+                        )}
+                        {satellites !== null && (
+                            <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Satellites</span>
+                                <span className="font-bold text-slate-800 flex items-center gap-1">
+                                    <Radio className="h-3 w-3 text-sky-600" />
+                                    {satellites} locked
                                 </span>
                             </div>
                         )}
                     </div>
                 </section>
 
-                {/* ─── FUEL & EFFICIENCY TELEMETRY ──────────────────────────── */}
-                <section className="space-y-3">
-                    <div className="flex items-center justify-between">
+                {/* ─── 3. VEHICLE SENSORS & HARDWARE DATA ──────────────────────────── */}
+                {(batteryVoltage !== null || ignitionState !== null || cleanDriverId !== null) && (
+                    <section className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 space-y-3">
                         <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
-                            <Fuel className="h-3.5 w-3.5 text-amber-600" />
-                            Fuel & Performance Records
+                            <Gauge className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                            Vehicle Sensors
                         </h3>
-                        {fuelData && <VehicleStatusBadge status={fuelData.status} />}
-                    </div>
 
-                    {loadingFuel ? (
-                        <div className="rounded-xl border border-slate-100 p-6 text-center text-xs text-slate-400">
-                            <Loader2 className="mx-auto h-5 w-5 animate-spin text-[#1C5E7A] mb-1.5" />
-                            Loading fuel performance…
-                        </div>
-                    ) : fuelData ? (
-                        <div className="space-y-2.5">
-                            <div className="grid grid-cols-2 gap-2.5">
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Fuel Consumed</span>
-                                    <span className="text-base font-black text-slate-900">
-                                        {Number(fuelData.litres || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })} <span className="text-xs text-slate-400 font-semibold">L</span>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            {batteryVoltage !== null && (
+                                <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block flex items-center gap-1">
+                                        <Battery className="h-3 w-3 text-emerald-600" /> Battery
                                     </span>
-                                </div>
-
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Fuel Cost</span>
-                                    <span className="text-base font-black text-emerald-700">
-                                        AED {Number(fuelData.total_cost || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                    </span>
-                                </div>
-
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Tracked Distance</span>
-                                    <span className="text-base font-black text-sky-700">
-                                        {fuelData.distance_km !== null
-                                            ? `${Number(fuelData.distance_km).toLocaleString(undefined, { maximumFractionDigits: 1 })} km`
-                                            : "—"}
-                                    </span>
-                                </div>
-
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3">
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase block mb-0.5">Efficiency</span>
-                                    <span className="text-base font-black text-[#1C5E7A]">
-                                        {fuelData.fuel_efficiency_l_per_100km !== null
-                                            ? `${fuelData.fuel_efficiency_l_per_100km.toFixed(1)} L/100km`
-                                            : "—"}
-                                    </span>
-                                </div>
-                            </div>
-
-                            {fuelData.fuel_cost_per_km !== null && (
-                                <div className="rounded-xl border border-slate-100 bg-slate-50/70 p-3 flex items-center justify-between text-xs">
-                                    <span className="text-slate-500 font-medium">Cost Per Kilometer:</span>
-                                    <span className="font-bold text-slate-800">
-                                        AED {fuelData.fuel_cost_per_km.toFixed(2)} / km
+                                    <span className="font-bold text-slate-900 text-sm">
+                                        {Number(batteryVoltage).toFixed(2)} <span className="text-[10px] font-normal text-slate-400">V</span>
                                     </span>
                                 </div>
                             )}
+                            {ignitionState !== null && (
+                                <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block flex items-center gap-1">
+                                        <Key className="h-3 w-3 text-amber-600" /> Ignition
+                                    </span>
+                                    <span className={`font-bold text-sm ${ignitionState === "ON" ? "text-emerald-600" : "text-slate-600"}`}>
+                                        {ignitionState}
+                                    </span>
+                                </div>
+                            )}
+                            {cleanDriverId !== null && (
+                                <div className="col-span-2 rounded-lg bg-white p-2.5 border border-slate-100 flex items-center justify-between">
+                                    <span className="text-[10px] font-semibold text-slate-400 uppercase flex items-center gap-1">
+                                        <User className="h-3 w-3 text-slate-400" /> Assigned Driver
+                                    </span>
+                                    <span className="font-semibold text-slate-800 text-xs">{cleanDriverId}</span>
+                                </div>
+                            )}
+                        </div>
+                    </section>
+                )}
 
-                            <Link
-                                to={`/fuel?vehicle=${encodeURIComponent(fuelData.vehicle_identifier)}`}
-                                className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#1C5E7A]/20 bg-[#1C5E7A]/5 py-2.5 text-xs font-bold text-[#1C5E7A] hover:bg-[#1C5E7A]/10 transition-colors"
-                            >
-                                <span>Inspect in Fuel & Performance</span>
-                                <ExternalLink className="h-3.5 w-3.5" />
-                            </Link>
+                {/* ─── 4. TODAY'S ACTIVITY ─────────────────────────────────────────── */}
+                <section className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 space-y-3">
+                    <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Route className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                        Today's Activity
+                    </h3>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Distance Today</span>
+                            <span className="font-bold text-slate-900 text-sm">
+                                {todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—"}
+                            </span>
                         </div>
-                    ) : (
-                        <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 text-center text-xs text-slate-500">
-                            No fuel transaction records linked to this unit.
+                        <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Trips Today</span>
+                            <span className="font-bold text-slate-900 text-sm">
+                                {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (tripCount !== null ? tripCount : "—")}
+                            </span>
                         </div>
-                    )}
+                        {idleMinutes !== null && idleMinutes > 0 && (
+                            <div className="col-span-2 rounded-lg bg-white p-2.5 border border-amber-200/80 bg-amber-50/30 flex items-center justify-between">
+                                <span className="text-[11px] font-semibold text-amber-800">Current Idle Duration</span>
+                                <span className="font-bold text-amber-900 text-xs">{idleMinutes} minutes</span>
+                            </div>
+                        )}
+                    </div>
+                </section>
+
+                {/* ─── 5. FUEL & EFFICIENCY (IF AVAILABLE) ────────────────────────── */}
+                {fuelData && (
+                    <section className="rounded-xl border border-slate-200/80 bg-slate-50/40 p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                                <Fuel className="h-3.5 w-3.5 text-amber-600" />
+                                Fuel Record
+                            </h3>
+                            <VehicleStatusBadge status={fuelData.status} />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Fuel Consumed</span>
+                                <span className="font-bold text-slate-900">{Number(fuelData.litres || 0).toFixed(1)} L</span>
+                            </div>
+                            <div className="rounded-lg bg-white p-2.5 border border-slate-100">
+                                <span className="text-[10px] font-semibold text-slate-400 uppercase block">Total Cost</span>
+                                <span className="font-bold text-emerald-700">AED {Number(fuelData.total_cost || 0).toFixed(0)}</span>
+                            </div>
+                        </div>
+                    </section>
+                )}
+
+                {/* ─── 6. DEDICATED PAGE NAVIGATION ACTIONS ────────────────────────── */}
+                <section className="space-y-2 pt-2 border-t border-slate-100">
+                    <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                        Navigate to Detailed Pages
+                    </h3>
+                    <div className="grid grid-cols-2 gap-2">
+                        <Link
+                            to={`/tracking?vehicle=${encodeURIComponent(unitId)}`}
+                            className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                            <span>Live Tracking</span>
+                            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+                        </Link>
+                        <Link
+                            to="/vehicle-health"
+                            className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                            <span>Vehicle Health</span>
+                            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+                        </Link>
+                        <Link
+                            to="/trips"
+                            className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                            <span>Trips & Activity</span>
+                            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+                        </Link>
+                        <Link
+                            to="/idle-analytics"
+                            className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:border-slate-300 transition-colors shadow-2xs"
+                        >
+                            <span>Idle Reports</span>
+                            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+                        </Link>
+                    </div>
                 </section>
             </div>
         </div>
     )
 }
+

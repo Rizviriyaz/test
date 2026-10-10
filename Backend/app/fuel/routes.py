@@ -37,6 +37,9 @@ from app.fuel.schemas import (
     VehicleEfficiencyResponse,
     EfficiencyTrendItem,
     EfficiencyTrendResponse,
+    FuelAnomalyItem,
+    FuelWasteResponse,
+    VehicleFuelDetailResponse,
 )
 from app.fuel.efficiency import (
     VALID_EFFICIENCY_SORT_FIELDS,
@@ -46,9 +49,12 @@ from app.fuel.efficiency import (
     paginate_and_sort_vehicle_efficiency,
     calculate_efficiency_trend,
 )
+from app.fuel.anomalies import detect_fuel_waste_and_anomalies
 from app.fuel.wialon_distance import (
     get_vehicle_distance,
     get_fleet_distances_map,
+    get_fleet_telematics_map,
+    get_vehicle_telematics_detail,
     match_fuel_vehicle_to_wialon,
 )
 from app.vehicles import get_all_vehicles
@@ -62,11 +68,28 @@ router = APIRouter(
 )
 
 
+
 def _get_bearer_token(request: Request) -> Optional[str]:
     """Extract raw bearer token from the Authorization header."""
     auth_header = request.headers.get("authorization", "")
     scheme, _, token = auth_header.partition(" ")
     return token.strip() if scheme.lower() == "bearer" and token.strip() else None
+
+
+def _filter_wialon_matched_transactions(
+    transactions: List[Dict[str, Any]],
+    wialon_units: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Strictly filter transactions to include ONLY records belonging to confidently matched Wialon units."""
+    if not transactions or not wialon_units:
+        return []
+    matched = []
+    for tx in transactions:
+        vid = tx.get("vehicle_identifier")
+        m = match_fuel_vehicle_to_wialon(vid, wialon_units)
+        if m and not m.get("ambiguous"):
+            matched.append(tx)
+    return matched
 
 
 @router.post(
@@ -205,7 +228,7 @@ async def list_fuel_imports(
     "/transactions",
     response_model=FuelTransactionsListResponse,
     summary="List fuel transactions with filtering",
-    description="Retrieve paginated fuel transactions with optional filters for date range, vehicle identifier, fuel type, and import ID.",
+    description="Retrieve paginated fuel transactions with optional filters for date range, vehicle identifier, fuel type, and import ID for strictly matched Wialon vehicles.",
 )
 async def list_fuel_transactions(
     request: Request,
@@ -215,11 +238,10 @@ async def list_fuel_transactions(
     fuel_type: Optional[str] = Query(None, description="Fuel product type filter"),
     import_id: Optional[int] = Query(None, description="Filter by specific import ID"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(50, ge=1, le=100, description="Number of items per page"),
+    page_size: int = Query(50, ge=1, le=1000, description="Number of items per page"),
 ):
-    """List and filter fuel transactions from Supabase."""
+    """List and filter fuel transactions from Supabase strictly for matched Wialon vehicles."""
     bearer_token = _get_bearer_token(request)
-    offset = (page - 1) * page_size
     filters = {
         "date_from": date_from,
         "date_to": date_to,
@@ -228,20 +250,26 @@ async def list_fuel_transactions(
         "import_id": import_id,
     }
 
-    records, total = await run_in_threadpool(
-        get_fuel_transactions_list,
+    raw_transactions = await run_in_threadpool(
+        fetch_fuel_transactions_for_analytics,
         filters,
-        page_size,
-        offset,
         bearer_token,
     )
 
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_records = _filter_wialon_matched_transactions(raw_transactions, wialon_units)
+
+    total = len(matched_records)
+    offset = (page - 1) * page_size
+    paged = matched_records[offset : offset + page_size]
+
     return FuelTransactionsListResponse(
-        count=len(records),
+        count=len(paged),
         page=page,
         page_size=page_size,
         total=total,
-        transactions=[FuelTransactionItem(**r) for r in records],
+        transactions=[FuelTransactionItem(**r) for r in paged],
     )
 
 
@@ -262,7 +290,7 @@ def _validate_date_param(val: Optional[str], param_name: str) -> None:
     "/analytics/summary",
     response_model=FuelSummaryResponse,
     summary="Fleet Fuel Summary Analytics",
-    description="Calculates fleet-wide fuel summary metrics including total litres, total expenditure, transaction count, unique vehicles, and fuel type breakdown with optional filters.",
+    description="Calculates fleet-wide fuel summary metrics including total litres, total expenditure, transaction count, unique vehicles, and fuel type breakdown for matched Wialon vehicles.",
 )
 async def get_fuel_analytics_summary(
     request: Request,
@@ -271,7 +299,7 @@ async def get_fuel_analytics_summary(
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle identifier/plate"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel product type"),
 ):
-    """Calculate aggregate fleet fuel summary."""
+    """Calculate aggregate fleet fuel summary strictly for matched Wialon vehicles."""
     _validate_date_param(date_from, "date_from")
     _validate_date_param(date_to, "date_to")
 
@@ -289,7 +317,11 @@ async def get_fuel_analytics_summary(
         bearer_token,
     )
 
-    summary = await run_in_threadpool(calculate_fuel_summary, transactions)
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    summary = await run_in_threadpool(calculate_fuel_summary, matched_transactions)
     return summary
 
 
@@ -297,7 +329,7 @@ async def get_fuel_analytics_summary(
     "/analytics/trend",
     response_model=FuelTrendResponse,
     summary="Fuel Consumption & Cost Trends",
-    description="Chronological fuel consumption, expenditure, and transaction count aggregated by day, week, or month.",
+    description="Chronological fuel consumption, expenditure, and transaction count aggregated by day, week, or month for matched Wialon vehicles.",
 )
 async def get_fuel_analytics_trend(
     request: Request,
@@ -307,7 +339,7 @@ async def get_fuel_analytics_trend(
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle identifier/plate"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel product type"),
 ):
-    """Calculate chronological fuel trend breakdown."""
+    """Calculate chronological fuel trend breakdown strictly for matched Wialon vehicles."""
     clean_group_by = group_by.lower().strip()
     if clean_group_by not in VALID_GROUP_BY:
         raise HTTPException(
@@ -332,7 +364,11 @@ async def get_fuel_analytics_trend(
         bearer_token,
     )
 
-    trend = await run_in_threadpool(calculate_fuel_trend, transactions, clean_group_by)
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    trend = await run_in_threadpool(calculate_fuel_trend, matched_transactions, clean_group_by)
     return trend
 
 
@@ -340,7 +376,7 @@ async def get_fuel_analytics_trend(
     "/analytics/vehicles",
     response_model=VehicleAnalyticsResponse,
     summary="Vehicle Fuel Analytics & Rankings",
-    description="Per-vehicle aggregation of fuel consumption, cost, refuel count, and averages with sorting and pagination.",
+    description="Per-vehicle aggregation of fuel consumption, cost, refuel count, and averages strictly for matched Wialon vehicles.",
 )
 async def get_fuel_analytics_vehicles(
     request: Request,
@@ -349,11 +385,11 @@ async def get_fuel_analytics_vehicles(
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle identifier/plate"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel product type"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
-    page_size: int = Query(25, ge=1, le=100, description="Items per page (1-100)"),
+    page_size: int = Query(25, ge=1, le=1000, description="Items per page (1-1000)"),
     sort_by: str = Query("litres", description="Sort field: 'litres', 'total_cost', 'transaction_count', 'average_unit_price', 'average_litres_per_transaction', 'vehicle_identifier'"),
     sort_order: str = Query("desc", description="Sort direction: 'asc' or 'desc'"),
 ):
-    """Calculate vehicle-by-vehicle consumption and expenditure metrics."""
+    """Calculate vehicle-by-vehicle consumption and expenditure metrics strictly for matched Wialon vehicles."""
     _validate_date_param(date_from, "date_from")
     _validate_date_param(date_to, "date_to")
 
@@ -385,9 +421,13 @@ async def get_fuel_analytics_vehicles(
         bearer_token,
     )
 
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
     result = await run_in_threadpool(
         calculate_vehicle_analytics,
-        transactions,
+        matched_transactions,
         page,
         page_size,
         clean_sort_by,
@@ -400,7 +440,7 @@ async def get_fuel_analytics_vehicles(
     "/analytics/fuel-types",
     response_model=FuelTypeAnalyticsResponse,
     summary="Fuel Type Analytics Breakdown",
-    description="Consumption and cost breakdown grouped by fuel product type (DIESEL, SPECIAL, SUPER).",
+    description="Consumption and cost breakdown grouped by fuel product type (DIESEL, SPECIAL, SUPER) strictly for matched Wialon vehicles.",
 )
 async def get_fuel_analytics_fuel_types(
     request: Request,
@@ -408,7 +448,7 @@ async def get_fuel_analytics_fuel_types(
     date_to: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD)"),
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle identifier/plate"),
 ):
-    """Calculate breakdown by fuel type."""
+    """Calculate breakdown by fuel type strictly for matched Wialon vehicles."""
     _validate_date_param(date_from, "date_from")
     _validate_date_param(date_to, "date_to")
 
@@ -425,7 +465,11 @@ async def get_fuel_analytics_fuel_types(
         bearer_token,
     )
 
-    result = await run_in_threadpool(calculate_fuel_type_analytics, transactions)
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    result = await run_in_threadpool(calculate_fuel_type_analytics, matched_transactions)
     return result
 
 
@@ -507,8 +551,8 @@ def _resolve_effective_dates(
 @router.get(
     "/analytics/efficiency",
     response_model=FleetEfficiencyResponse,
-    summary="Get overall fleet fuel efficiency and coverage metrics",
-    description="Calculates weighted fleet efficiency (L/100 km) and cost/km using Supabase fuel transactions and authoritative Wialon distance telemetry.",
+    summary="Get overall fleet fuel efficiency, telematics activity, and driving vs idling estimates",
+    description="Calculates weighted fleet efficiency (L/100 km), cost/km, qualifying driving hours, idle hours, and estimated idle fuel waste using Supabase transactions and Wialon native telematics strictly for matched Wialon vehicles.",
 )
 async def get_fleet_fuel_efficiency(
     request: Request,
@@ -516,6 +560,7 @@ async def get_fleet_fuel_efficiency(
     date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle registration"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel type"),
+    idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
 ):
     _ = getattr(request.state, "user", None)
     bearer_token = _get_bearer_token(request)
@@ -538,17 +583,19 @@ async def get_fleet_fuel_efficiency(
         bearer_token,
     )
 
-    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
-
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    distance_map = await run_in_threadpool(get_fleet_distances_map, eff_from, eff_to, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     result = await run_in_threadpool(
         calculate_fleet_efficiency,
-        transactions,
-        distance_map,
+        matched_transactions,
+        telematics_map,
         wialon_units,
+        idle_rate_lph,
     )
     return result
 
@@ -557,7 +604,7 @@ async def get_fleet_fuel_efficiency(
     "/analytics/efficiency/vehicles",
     response_model=VehicleEfficiencyResponse,
     summary="Get per-vehicle fuel efficiency and performance rankings",
-    description="Returns paginated vehicle efficiency records with L/100 km, cost/km, tracking status, and multi-field sorting.",
+    description="Returns paginated vehicle efficiency records with driving/idling hours, estimated idle fuel, L/100 km, cost/km, tracking status, and multi-field sorting strictly for matched Wialon vehicles.",
 )
 async def get_vehicles_fuel_efficiency(
     request: Request,
@@ -566,9 +613,10 @@ async def get_vehicles_fuel_efficiency(
     vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle registration substring"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel type"),
     status: Optional[str] = Query(None, description="Filter by status ('matched', 'not_tracked', 'no_distance_data', 'ambiguous')"),
+    idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(25, ge=1, le=500, description="Items per page"),
-    sort_by: str = Query("litres", description="Sort field ('litres', 'cost', 'distance', 'efficiency', 'cost_per_km', 'transactions', 'vehicle_identifier')"),
+    sort_by: str = Query("litres", description="Sort field ('litres', 'cost', 'distance', 'efficiency', 'cost_per_km', 'transactions', 'idle_hours', 'driving_hours', 'estimated_idle_fuel', 'vehicle_identifier')"),
     sort_order: str = Query("desc", description="Sort direction ('asc' or 'desc')"),
 ):
     _ = getattr(request.state, "user", None)
@@ -609,17 +657,19 @@ async def get_vehicles_fuel_efficiency(
         bearer_token,
     )
 
-    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
-
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    distance_map = await run_in_threadpool(get_fleet_distances_map, eff_from, eff_to, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     items = await run_in_threadpool(
         calculate_vehicle_efficiency_records,
-        transactions,
-        distance_map,
+        matched_transactions,
+        telematics_map,
         wialon_units,
+        idle_rate_lph,
     )
 
     result = await run_in_threadpool(
@@ -636,10 +686,205 @@ async def get_vehicles_fuel_efficiency(
 
 
 @router.get(
+    "/analytics/waste",
+    response_model=FuelWasteResponse,
+    summary="Detect fuel waste, excessive idling, and refuelling anomalies",
+    description="Analyzes fuel transactions and Wialon activity to identify excessive idling, rapid consecutive refuels, volume spikes, and odometer regressions strictly for matched Wialon vehicles.",
+)
+async def get_fuel_waste_and_anomalies(
+    request: Request,
+    date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    vehicle_identifier: Optional[str] = Query(None, description="Filter by vehicle registration"),
+    fuel_type: Optional[str] = Query(None, description="Filter by fuel type"),
+    idle_threshold_hours: float = Query(5.0, ge=0.5, le=100.0, description="Excessive idle threshold in hours"),
+    idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
+):
+    _ = getattr(request.state, "user", None)
+    bearer_token = _get_bearer_token(request)
+
+    _validate_date_param(date_from, "date_from")
+    _validate_date_param(date_to, "date_to")
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from must be on or before date_to")
+
+    filters = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "vehicle_identifier": vehicle_identifier,
+        "fuel_type": fuel_type,
+    }
+
+    transactions_full = await run_in_threadpool(
+        fetch_fuel_transactions_for_analytics,
+        filters,
+        bearer_token,
+    )
+
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions_full, wialon_units)
+
+    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
+
+    vehicle_items = await run_in_threadpool(
+        calculate_vehicle_efficiency_records,
+        matched_transactions,
+        telematics_map,
+        wialon_units,
+        idle_rate_lph,
+    )
+
+    waste_report = await run_in_threadpool(
+        detect_fuel_waste_and_anomalies,
+        matched_transactions,
+        vehicle_items,
+        idle_threshold_hours,
+        idle_rate_lph,
+    )
+    return waste_report
+
+
+@router.get(
+    "/analytics/vehicle-detail",
+    response_model=VehicleFuelDetailResponse,
+    summary="Get complete vehicle fuel intelligence drill-down",
+    description="Returns detailed performance breakdown, activity segregation, full transaction history, specific anomalies, and disclosed formulas for a single matched Wialon vehicle.",
+)
+async def get_vehicle_fuel_detail(
+    request: Request,
+    vehicle_identifier: str = Query(..., description="Vehicle registration plate identifier"),
+    date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
+):
+    _ = getattr(request.state, "user", None)
+    bearer_token = _get_bearer_token(request)
+
+    if not vehicle_identifier or not vehicle_identifier.strip():
+        raise HTTPException(status_code=400, detail="vehicle_identifier is required")
+
+    clean_vid = vehicle_identifier.strip()
+    _validate_date_param(date_from, "date_from")
+    _validate_date_param(date_to, "date_to")
+
+    sid = await run_in_threadpool(login)
+    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
+    matched_unit = match_fuel_vehicle_to_wialon(clean_vid, wialon_units)
+
+    if not matched_unit or matched_unit.get("ambiguous"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Vehicle '{clean_vid}' is not an active matched Wialon GPS fleet vehicle.",
+        )
+
+    # Fetch all transactions for this specific vehicle
+    filters = {
+        "date_from": date_from,
+        "date_to": date_to,
+        "vehicle_identifier": clean_vid,
+        "fuel_type": None,
+    }
+
+    raw_records, total_txns = await run_in_threadpool(
+        get_fuel_transactions_list,
+        filters,
+        500,
+        0,
+        bearer_token,
+    )
+    tx_items = [FuelTransactionItem(**r) for r in raw_records]
+
+    eff_from, eff_to = _resolve_effective_dates(raw_records, date_from, date_to)
+
+    telematics_detail = {
+        "distance_km": 0.0,
+        "trip_count": 0,
+        "driving_duration_hours": 0.0,
+        "idle_duration_hours": 0.0,
+        "engine_hours": 0.0,
+        "stopped_hours": 0.0,
+        "idle_events_count": 0,
+        "idle_events": [],
+        "trips": [],
+        "has_data": False,
+    }
+
+    if matched_unit and matched_unit.get("id"):
+        telematics_detail = await run_in_threadpool(
+            get_vehicle_telematics_detail,
+            int(matched_unit["id"]),
+            eff_from,
+            eff_to,
+            sid,
+        )
+
+    # Compute vehicle summary item
+    telematics_map = {
+        str(matched_unit.get("nm", "")).strip(): {
+            "vehicle_name": str(matched_unit.get("nm", "")).strip(),
+            "mileage_km": telematics_detail["distance_km"],
+            "driving_hours": telematics_detail["driving_duration_hours"],
+            "idle_hours": telematics_detail["idle_duration_hours"],
+            "engine_hours": telematics_detail["engine_hours"],
+            "has_telemetry": telematics_detail["has_data"],
+        }
+    }
+
+    v_records = await run_in_threadpool(
+        calculate_vehicle_efficiency_records,
+        raw_records,
+        telematics_map,
+        wialon_units,
+        idle_rate_lph,
+    )
+
+    v_summary = v_records[0] if v_records else VehicleEfficiencyItem(
+        vehicle_identifier=clean_vid,
+        litres=0.0,
+        total_cost=0.0,
+        transaction_count=0,
+        status="matched",
+        estimation_status="unavailable",
+    )
+
+    # Run anomaly detection for this vehicle
+    waste_res = await run_in_threadpool(
+        detect_fuel_waste_and_anomalies,
+        raw_records,
+        [v_summary],
+        5.0,
+        idle_rate_lph,
+    )
+
+    calculation_transparency = {
+        "period_date_from": eff_from,
+        "period_date_to": eff_to,
+        "idle_coefficient_lph": idle_rate_lph,
+        "idle_formula": "Estimated Idle Fuel (L) = Qualifying Idle Duration (hours) × Idle Coefficient (L/h)",
+        "driving_formula": "Estimated Driving Fuel (L) = Fuel Purchased (L) - Estimated Idle Fuel (L)",
+        "efficiency_formula": "Fuel Efficiency (L/100km) = (Fuel Purchased / GPS Distance km) × 100",
+        "telematics_source": "Wialon Native Reports (Template 4 Trips & Template 1 Engine Hours)",
+        "transaction_source": "Supabase public.fuel_transactions table",
+        "disclaimer": "Purchased fuel reflects refuelling events during the selected window. Instantaneous consumption split is estimated based on verified stationary engine runtime.",
+    }
+
+    return VehicleFuelDetailResponse(
+        vehicle_identifier=clean_vid,
+        vehicle_summary=v_summary,
+        transactions=tx_items,
+        activity_breakdown=telematics_detail,
+        anomalies=waste_res.anomalies,
+        calculation_transparency=calculation_transparency,
+    )
+
+
+@router.get(
     "/analytics/efficiency/trend",
     response_model=EfficiencyTrendResponse,
     summary="Get chronological fuel efficiency trends over time",
-    description="Returns chronological periods grouped by day, week, or month with weighted L/100 km and cost/km.",
+    description="Returns chronological periods grouped by day, week, or month with weighted L/100 km and cost/km strictly for matched Wialon vehicles.",
 )
 async def get_fuel_efficiency_trend(
     request: Request,
@@ -677,19 +922,21 @@ async def get_fuel_efficiency_trend(
         bearer_token,
     )
 
-    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
-
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    distance_map = await run_in_threadpool(get_fleet_distances_map, eff_from, eff_to, sid)
+    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
+
+    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     result = await run_in_threadpool(
         calculate_efficiency_trend,
-        transactions,
-        distance_map,
+        matched_transactions,
+        telematics_map,
         wialon_units,
         group_clean,
     )
     return result
+
 
 

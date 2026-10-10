@@ -1,22 +1,25 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, useCallback } from "react"
 import { Link } from "react-router-dom"
 import {
-    Truck,
-    CirclePlay,
-    Clock3,
-    Square,
-    AlertTriangle,
     Activity,
-    Wifi,
-    ArrowUpRight,
-    Filter,
     Layers,
     Loader2,
+    Route,
+    ArrowUpRight,
+    Filter,
+    Clock,
+    AlertTriangle,
+    CheckCircle2,
+    BarChart3,
+    TrendingUp,
 } from "lucide-react"
 
 import {
     getVehicles,
     getDashboardMileage,
+    getFleetAlertsAnalytics,
+    getFleetTripsAnalytics,
+    getFleetIdleAnalytics,
 } from "../api/fleetApi"
 
 import {
@@ -27,168 +30,368 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
+    PieChart,
+    Pie,
+    Cell,
+    Legend,
 } from "recharts"
 
-import FleetMap from "../components/FleetMap"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 
+// Curated SaaS colors for donut / multi-category charts
+const CHART_COLORS = [
+    "#1C5E7A",
+    "#0284c7",
+    "#059669",
+    "#d97706",
+    "#7c3aed",
+    "#db2777",
+    "#475569",
+    "#ea580c",
+]
+
+const TIMEFRAME_OPTIONS = [
+    { id: "today", label: "Today", unit: "km today" },
+    { id: "yesterday", label: "Yesterday", unit: "km yesterday" },
+    { id: "week", label: "This Week", unit: "km (this week)" },
+    { id: "month", label: "This Month", unit: "km (this month)" },
+    { id: "year", label: "This Year", unit: "km (this year)" },
+    { id: "all", label: "All Time", unit: "total km" },
+]
 
 function Dashboard() {
+    // ─── Core State ─────────────────────────────────────────────────────────
     const [vehicles, setVehicles] = useState([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [lastUpdated, setLastUpdated] = useState(null)
 
-    // Filters for Top Vehicles by Mileage
-    const [selectedMileageGroup, setSelectedMileageGroup] = useState("ALL")
-    const [mileageLimit, setMileageLimit] = useState("5")
+    // Global Vehicle Group Filter (Affects all sections on the page)
+    const [selectedGroup, setSelectedGroup] = useState("ALL")
+
+    // Alerts data
+    const [alertsData, setAlertsData] = useState(null)
+
+    // Today's trips data
+    const [tripsData, setTripsData] = useState(null)
+
+    // Today's verified idle analytics data
+    const [idleAnalyticsData, setIdleAnalyticsData] = useState(null)
+
+    // Mileage ranking state
     const [mileageTimeframe, setMileageTimeframe] = useState("today")
+    const [mileageLimit, setMileageLimit] = useState("5")
     const [mileageData, setMileageData] = useState(null)
-    const [mileageLoading, setMileageLoading] = useState(true)
+    const [mileageLoading, setMileageLoading] = useState(false)
+
+    // Chart type selectors
+    const [utilizationChartType, setUtilizationChartType] = useState("bar") // "bar" | "horizontal" | "donut"
+    const [idleChartType, setIdleChartType] = useState("bar") // "bar" | "horizontal"
+
+    // Vehicle Details Drawer state
     const [selectedVehicleId, setSelectedVehicleId] = useState(null)
 
-    /*
-        Load fleet data
-    */
-    useEffect(() => {
-        let mounted = true
+    // ─── 1. Load Live Vehicles Telemetry (Periodic Refresh) ─────────────────
+    const loadVehicles = useCallback(async (mountedRef = { current: true }) => {
+        try {
+            const data = await getVehicles()
+            if (!mountedRef.current) return
+            setVehicles(data.vehicles || [])
+            setLastUpdated(new Date())
+            setError(null)
+        } catch (err) {
+            if (!mountedRef.current) return
+            console.error("Failed to load vehicle data:", err)
+            setError("Failed to load vehicle data")
+        } finally {
+            if (mountedRef.current) setLoading(false)
+        }
+    }, [])
 
-        const loadVehicles = async () => {
+    useEffect(() => {
+        const mountedRef = { current: true }
+        loadVehicles(mountedRef)
+        const interval = setInterval(() => loadVehicles(mountedRef), 10000)
+        return () => {
+            mountedRef.current = false
+            clearInterval(interval)
+        }
+    }, [loadVehicles])
+
+    // ─── 2. Load Alerts, Today Trips & Idle Analytics ───────────────────────
+    useEffect(() => {
+        let active = true
+        async function fetchAuxiliaryData() {
             try {
-                const data = await getVehicles()
-                if (!mounted) return
-                setVehicles(data.vehicles || [])
-                setLastUpdated(new Date())
-                setError("")
+                const [alertsRes, tripsRes, idleRes] = await Promise.allSettled([
+                    getFleetAlertsAnalytics(),
+                    getFleetTripsAnalytics({ timeframe: "today" }),
+                    getFleetIdleAnalytics({ timeframe: "today" }),
+                ])
+                if (!active) return
+                if (alertsRes.status === "fulfilled") setAlertsData(alertsRes.value)
+                if (tripsRes.status === "fulfilled") setTripsData(tripsRes.value)
+                if (idleRes.status === "fulfilled") setIdleAnalyticsData(idleRes.value)
             } catch (err) {
-                if (!mounted) return
-                console.error(err)
-                setError("Failed to load vehicle data")
-            } finally {
-                if (mounted) setLoading(false)
+                console.error("Failed to fetch dashboard auxiliary data:", err)
             }
         }
-
-        loadVehicles()
-        const interval = setInterval(loadVehicles, 10000)
-
+        fetchAuxiliaryData()
+        const interval = setInterval(fetchAuxiliaryData, 30000)
         return () => {
-            mounted = false
+            active = false
             clearInterval(interval)
         }
     }, [])
 
-    /*
-        Load Top Mileage rankings by timeframe
-    */
+    // ─── 3. Load Mileage Rankings by Timeframe ──────────────────────────────
     useEffect(() => {
-        let mounted = true
-        const loadMileage = async () => {
+        let active = true
+        async function fetchMileage() {
             try {
                 setMileageLoading(true)
                 const data = await getDashboardMileage(mileageTimeframe)
-                if (!mounted) return
+                if (!active) return
                 setMileageData(data)
             } catch (err) {
                 console.error("Mileage ranking error:", err)
             } finally {
-                if (mounted) setMileageLoading(false)
+                if (active) setMileageLoading(false)
             }
         }
-        loadMileage()
-        return () => { mounted = false }
+        fetchMileage()
+        return () => { active = false }
     }, [mileageTimeframe])
 
-    /*
-        Fleet calculations
-    */
-    const totalVehicles = vehicles.length
+    // ─── 4. Dynamic Group Discovery from Actual Wialon Data ─────────────────
+    const availableGroups = useMemo(() => {
+        const set = new Set()
+        vehicles.forEach(v => {
+            if (v.group && v.group.trim()) set.add(v.group.trim())
+            if (Array.isArray(v.groups)) {
+                v.groups.forEach(g => { if (g && g.trim()) set.add(g.trim()) })
+            }
+        })
+        if (mileageData?.all_units) {
+            mileageData.all_units.forEach(u => {
+                if (u.group && u.group.trim()) set.add(u.group.trim())
+            })
+        }
+        return Array.from(set).sort()
+    }, [vehicles, mileageData])
 
+    // ─── 5. Normalize Vehicles ──────────────────────────────────────────────
     const normalizedVehicles = useMemo(() => {
-        return vehicles.map((vehicle) => ({
-            ...vehicle,
-            normalizedStatus: String(vehicle.status || "").trim().toUpperCase(),
-            isOffline: vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || String(vehicle.status || "").trim().toUpperCase() === "OFFLINE",
-        }))
+        return vehicles.map(vehicle => {
+            const rawStatus = String(vehicle.status || "").trim().toUpperCase()
+            const isOffline = vehicle.connection_status === "OFFLINE" ||
+                Boolean(vehicle.is_offline) ||
+                rawStatus === "OFFLINE"
+            let finalStatus = "STOPPED"
+            if (isOffline) {
+                finalStatus = "OFFLINE"
+            } else if (rawStatus === "MOVING") {
+                finalStatus = "MOVING"
+            } else if (rawStatus === "IDLING") {
+                finalStatus = "IDLING"
+            } else {
+                finalStatus = "STOPPED"
+            }
+            return {
+                ...vehicle,
+                normalizedStatus: finalStatus,
+                isOffline,
+            }
+        })
     }, [vehicles])
 
-    const movingVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "MOVING"), [normalizedVehicles])
-    const idlingVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "IDLING"), [normalizedVehicles])
-    const stoppedVehicles = useMemo(() => normalizedVehicles.filter(v => v.normalizedStatus === "STOPPED"), [normalizedVehicles])
-    const offlineVehicles = useMemo(() => normalizedVehicles.filter(v => v.isOffline), [normalizedVehicles])
+    // ─── 6. Global Group Filtering (Applied Page-wide) ──────────────────────
+    const filteredVehicles = useMemo(() => {
+        if (selectedGroup === "ALL") return normalizedVehicles
+        return normalizedVehicles.filter(v => {
+            const primaryMatch = (v.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase()
+            const secondaryMatch = Array.isArray(v.groups) && v.groups.some(g => (g || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+            return primaryMatch || secondaryMatch
+        })
+    }, [normalizedVehicles, selectedGroup])
+
+    // ─── 7. KPI Calculations (Filtered by Global Group) ─────────────────────
+    const totalVehiclesCount = filteredVehicles.length
+    const movingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "MOVING"), [filteredVehicles])
+    const idlingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "IDLING"), [filteredVehicles])
+    const stoppedVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "STOPPED"), [filteredVehicles])
+    const offlineVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "OFFLINE"), [filteredVehicles])
 
     const movingCount = movingVehicles.length
     const idlingCount = idlingVehicles.length
     const stoppedCount = stoppedVehicles.length
     const offlineCount = offlineVehicles.length
 
-    const fleetUtilization = totalVehicles > 0
-        ? Math.round(((movingCount + idlingCount) / totalVehicles) * 100)
-        : 0
-
-    const averageSpeed = movingCount > 0
-        ? Math.round(movingVehicles.reduce((sum, v) => sum + Number(v.speed || 0), 0) / movingCount)
-        : 0
-
-    /*
-        Vehicles requiring attention (Idling > 5 mins)
-    */
-    const attentionVehicles = useMemo(() => {
-        return normalizedVehicles
-            .filter((vehicle) => vehicle.normalizedStatus === "IDLING")
-            .filter((vehicle) => Number(vehicle.idle_duration || 0) > 300)
-            .sort((a, b) => Number(b.idle_duration || 0) - Number(a.idle_duration || 0))
-    }, [normalizedVehicles])
-
-    /*
-        Map vehicles with valid coordinates
-    */
-    const mapVehicles = useMemo(() => {
-        return vehicles.filter(v => v.latitude !== null && v.longitude !== null)
-    }, [vehicles])
-
-    const selectedVehicle = useMemo(() => {
-        return vehicles.find(v => v.vehicle_id === selectedVehicleId) || null
-    }, [vehicles, selectedVehicleId])
-
-    /*
-        Top Vehicles by Mileage (Dynamic with Timeframe and Category Filters)
-    */
-    const timeframeConfig = {
-        today: {
-            label: "Today",
-            subtitle: "Trip distance covered today in UAE (00:00:00 Asia/Dubai -> Now)",
-            unit: "km today"
-        },
-        yesterday: {
-            label: "Yesterday",
-            subtitle: "Total trip distance covered yesterday in UAE (Full calendar day)",
-            unit: "km yesterday"
-        },
-        week: {
-            label: "This Week",
-            subtitle: "Cumulative distance covered this week (UAE Monday -> Now)",
-            unit: "km (this week)"
-        },
-        month: {
-            label: "This Month",
-            subtitle: "Distance covered this month (UAE 1st -> Now)",
-            unit: "km (this month)"
-        },
-        year: {
-            label: "This Year",
-            subtitle: "Annual fleet mileage breakdown (UAE Jan 1 -> Now)",
-            unit: "km (this year)"
-        },
-        all: {
-            label: "All Time",
-            subtitle: "Lifetime cumulative odometer rankings",
-            unit: "total km"
+    // Active Today Calculation
+    const activeTodayCount = useMemo(() => {
+        const activeIds = new Set()
+        // 1. Currently moving or idling
+        filteredVehicles.forEach(v => {
+            if (v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING") {
+                activeIds.add(v.vehicle_id)
+            }
+        })
+        // 2. Vehicles with distance today from mileageData
+        if (mileageData?.all_units) {
+            mileageData.all_units.forEach(u => {
+                if (Number(u.mileage || 0) > 0) {
+                    const matched = filteredVehicles.find(v => v.vehicle_id === u.vehicle_id || v.vehicle_name === u.vehicle_name)
+                    if (matched) activeIds.add(matched.vehicle_id)
+                }
+            })
         }
-    }
+        // 3. Vehicles from today's trips
+        if (tripsData?.vehicles) {
+            tripsData.vehicles.forEach(tv => {
+                if (Number(tv.trip_count || 0) > 0 || Number(tv.gps_mileage_km || 0) > 0) {
+                    const matched = filteredVehicles.find(v => v.vehicle_id === tv.vehicle_id)
+                    if (matched) activeIds.add(matched.vehicle_id)
+                }
+            })
+        }
+        return activeIds.size
+    }, [filteredVehicles, mileageData, tripsData])
 
+    // Filtered Alerts Count
+    const alertsCount = useMemo(() => {
+        if (!alertsData?.alerts) return 0
+        if (selectedGroup === "ALL") return alertsData.total_alerts || alertsData.alerts.length
+        return alertsData.alerts.filter(a => {
+            const grp = (a.group || "").trim().toLowerCase()
+            return grp === selectedGroup.trim().toLowerCase()
+        }).length
+    }, [alertsData, selectedGroup])
+
+    // ─── 8. Today's Fleet Activity Metrics (Filtered by Global Group) ───────
+    const todayFleetActivity = useMemo(() => {
+        // Distance
+        let distanceKm = 0
+        if (mileageData?.all_units) {
+            const filteredUnits = selectedGroup === "ALL"
+                ? mileageData.all_units
+                : mileageData.all_units.filter(u => (u.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase() || (Array.isArray(u.groups) && u.groups.includes(selectedGroup)))
+            distanceKm = filteredUnits.reduce((sum, u) => sum + Number(u.mileage || 0), 0)
+        } else if (tripsData?.vehicles) {
+            const filteredTripVehs = selectedGroup === "ALL"
+                ? tripsData.vehicles
+                : tripsData.vehicles.filter(tv => (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+            distanceKm = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.gps_mileage_km || 0), 0)
+        }
+
+        // Trips count
+        let trips = 0
+        if (tripsData?.vehicles) {
+            const filteredTripVehs = selectedGroup === "ALL"
+                ? tripsData.vehicles
+                : tripsData.vehicles.filter(tv => (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+            trips = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.trip_count || 0), 0)
+        } else {
+            trips = activeTodayCount
+        }
+
+        // Driving time
+        let drivingMinutes = 0
+        if (tripsData?.vehicles) {
+            tripsData.vehicles.forEach(tv => {
+                if (selectedGroup === "ALL" || (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
+                    if (tv.trips && Array.isArray(tv.trips)) {
+                        tv.trips.forEach(t => {
+                            drivingMinutes += Number(t.duration_minutes || 0)
+                        })
+                    } else if (tv.gps_mileage_km && tv.avg_speed_kmh) {
+                        drivingMinutes += Math.round((tv.gps_mileage_km / tv.avg_speed_kmh) * 60)
+                    }
+                }
+            })
+        }
+        if (drivingMinutes === 0 && distanceKm > 0) {
+            drivingMinutes = Math.round((distanceKm / 45) * 60)
+        }
+
+        // Idle time from verified historical idle data for today
+        let idleMinutes = 0
+        if (idleAnalyticsData?.by_vehicle) {
+            const matchingVehicles = selectedGroup === "ALL"
+                ? idleAnalyticsData.by_vehicle
+                : idleAnalyticsData.by_vehicle.filter(v => (v.group_name || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+            const totalIdleSecs = matchingVehicles.reduce((sum, v) => sum + Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
+            idleMinutes = Math.round(totalIdleSecs / 60)
+        } else if (idleAnalyticsData?.summary?.total_idle_seconds !== undefined && selectedGroup === "ALL") {
+            idleMinutes = Math.round(Number(idleAnalyticsData.summary.total_idle_seconds || 0) / 60)
+        }
+
+        const formatHoursMins = (totalMins) => {
+            if (!totalMins || totalMins <= 0) return "0h 0m"
+            const h = Math.floor(totalMins / 60)
+            const m = Math.round(totalMins % 60)
+            if (h === 0) return `${m}m`
+            return `${h}h ${m}m`
+        }
+
+        return {
+            distance: `${Math.round(distanceKm).toLocaleString()} km`,
+            trips: trips > 0 ? trips.toLocaleString() : "—",
+            driving: formatHoursMins(drivingMinutes),
+            idle: formatHoursMins(idleMinutes),
+        }
+    }, [mileageData, tripsData, idleAnalyticsData, selectedGroup, activeTodayCount])
+
+    // ─── 9. Idle Vehicles Requiring Attention (Historical continuous idle >= 5 mins / 300s today) ──────
+    const attentionVehicles = useMemo(() => {
+        if (!idleAnalyticsData) return []
+        const vehicleAttentionMap = new Map()
+
+        if (idleAnalyticsData.events && Array.isArray(idleAnalyticsData.events) && idleAnalyticsData.events.length > 0) {
+            idleAnalyticsData.events.forEach(ev => {
+                const duration = Number(ev.duration_seconds || 0)
+                if (duration >= 300) {
+                    const vid = ev.vehicle_id
+                    const grp = ev.group_name || "General Fleet"
+                    if (selectedGroup === "ALL" || grp.trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
+                        const existing = vehicleAttentionMap.get(vid)
+                        if (!existing || duration > existing.max_duration) {
+                            vehicleAttentionMap.set(vid, {
+                                vehicle_id: vid,
+                                vehicle_name: ev.vehicle_name || `Vehicle #${vid}`,
+                                group: grp,
+                                idle_duration: duration,
+                                max_duration: duration,
+                            })
+                        }
+                    }
+                }
+            })
+        } else if (idleAnalyticsData.by_vehicle && Array.isArray(idleAnalyticsData.by_vehicle)) {
+            idleAnalyticsData.by_vehicle.forEach(v => {
+                const maxDuration = Number(v.max_idle_seconds || v.idle_seconds || 0)
+                if (maxDuration >= 300) {
+                    const grp = v.group_name || "General Fleet"
+                    if (selectedGroup === "ALL" || grp.trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
+                        vehicleAttentionMap.set(v.vehicle_id, {
+                            vehicle_id: v.vehicle_id,
+                            vehicle_name: v.vehicle_name || `Vehicle #${v.vehicle_id}`,
+                            group: grp,
+                            idle_duration: maxDuration,
+                            max_duration: maxDuration,
+                        })
+                    }
+                }
+            })
+        }
+
+        return Array.from(vehicleAttentionMap.values())
+            .sort((a, b) => b.idle_duration - a.idle_duration)
+            .slice(0, 5)
+    }, [idleAnalyticsData, selectedGroup])
+
+    // ─── 10. Top Vehicles by Mileage (Filtered by Group & Timeframe) ────────
     const mileageUnitsSource = useMemo(() => {
         if (mileageData?.all_units && Array.isArray(mileageData.all_units) && mileageData.all_units.length > 0) {
             return mileageData.all_units
@@ -199,599 +402,898 @@ function Dashboard() {
         return []
     }, [mileageData])
 
-    const availableGroups = useMemo(() => {
-        const set = new Set()
-        mileageUnitsSource.forEach(u => {
-            if (u.group) set.add(u.group)
-        })
-        vehicles.forEach(v => {
-            if (v.group) set.add(v.group)
-        })
-        return Array.from(set)
-    }, [mileageUnitsSource, vehicles])
-
-    const filteredMileageData = useMemo(() => {
+    const filteredMileageList = useMemo(() => {
         let units = [...mileageUnitsSource]
-        if (selectedMileageGroup !== "ALL") {
-            units = units.filter(u => u.group === selectedMileageGroup || (u.groups && u.groups.includes(selectedMileageGroup)))
+        if (selectedGroup !== "ALL") {
+            units = units.filter(u => {
+                const g = (u.group || "").trim().toLowerCase()
+                const sel = selectedGroup.trim().toLowerCase()
+                return g === sel || (Array.isArray(u.groups) && u.groups.some(x => (x || "").trim().toLowerCase() === sel))
+            })
         }
+        units.sort((a, b) => Number(b.mileage || 0) - Number(a.mileage || 0))
         if (mileageLimit !== "ALL") {
             units = units.slice(0, Number(mileageLimit))
         }
         return units.map(u => ({
-            vehicle: u.vehicle_name,
-            mileage: u.mileage,
-            group: u.group || "General Fleet"
+            vehicle_id: u.vehicle_id,
+            vehicle: u.vehicle_name || `Vehicle #${u.vehicle_id}`,
+            mileage: Math.round(Number(u.mileage || 0)),
+            group: u.group || "General Fleet",
         }))
-    }, [mileageUnitsSource, selectedMileageGroup, mileageLimit])
+    }, [mileageUnitsSource, selectedGroup, mileageLimit])
 
-    /*
-        Category / Wialon Group Metrics for Bar Charts
-    */
-    const categoryMetrics = useMemo(() => {
+    // ─── 11. Fleet by Group Summary Breakdown ───────────────────────────────
+    const fleetByGroupData = useMemo(() => {
         const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
-
-        return groupsToProcess.map(groupName => {
-            const groupVehicles = normalizedVehicles.filter(v => (v.group || "General Fleet") === groupName)
-            const total = groupVehicles.length
-            const moving = groupVehicles.filter(v => v.normalizedStatus === "MOVING").length
-            const idling = groupVehicles.filter(v => v.normalizedStatus === "IDLING").length
-            const stopped = groupVehicles.filter(v => v.normalizedStatus === "STOPPED").length
-
-            const active = moving + idling
-            const utilizationPercent = total > 0 ? Math.round((active / total) * 100) : 0
-            const totalIdleSecs = groupVehicles.reduce((sum, v) => sum + Number(v.idle_duration || 0), 0)
-
+        return groupsToProcess.map(grpName => {
+            const grpVehicles = normalizedVehicles.filter(v => (v.group || "").trim().toLowerCase() === grpName.trim().toLowerCase())
+            const count = grpVehicles.length
+            const moving = grpVehicles.filter(v => v.normalizedStatus === "MOVING").length
+            const idling = grpVehicles.filter(v => v.normalizedStatus === "IDLING").length
+            const stopped = grpVehicles.filter(v => v.normalizedStatus === "STOPPED").length
+            const offline = grpVehicles.filter(v => v.normalizedStatus === "OFFLINE").length
             return {
-                category: groupName,
-                totalVehicles: total,
-                movingCount: moving,
-                idlingCount: idling,
-                stoppedCount: stopped,
-                utilizationPercent: utilizationPercent,
-                totalIdleMinutes: Math.round(totalIdleSecs / 60)
+                name: grpName,
+                count,
+                moving,
+                idling,
+                stopped,
+                offline,
+                percent: normalizedVehicles.length > 0 ? Math.round((count / normalizedVehicles.length) * 100) : 0,
             }
-        }).filter(item => item.totalVehicles > 0)
+        }).filter(item => item.count > 0).sort((a, b) => b.count - a.count)
     }, [availableGroups, normalizedVehicles])
+
+    // ─── 12. Fleet Utilization by Category Data ─────────────────────────────
+    const utilizationChartData = useMemo(() => {
+        if (selectedGroup === "ALL") {
+            const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
+            return groupsToProcess.map(grpName => {
+                const grpVehs = normalizedVehicles.filter(v => (v.group || "").trim().toLowerCase() === grpName.trim().toLowerCase())
+                const total = grpVehs.length
+                const active = grpVehs.filter(v => v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING").length
+                const pct = total > 0 ? Math.round((active / total) * 100) : 0
+                return {
+                    name: grpName,
+                    value: pct,
+                    totalVehicles: total,
+                    activeVehicles: active,
+                }
+            }).filter(item => item.totalVehicles > 0)
+        } else {
+            return filteredVehicles.map(v => {
+                const isActive = v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING"
+                return {
+                    name: v.vehicle_name,
+                    value: isActive ? 100 : 0,
+                    status: v.normalizedStatus,
+                    vehicle_id: v.vehicle_id,
+                }
+            }).slice(0, 10)
+        }
+    }, [selectedGroup, availableGroups, normalizedVehicles, filteredVehicles])
+
+    // ─── 13. Idle Duration by Category Data (Historical verified idle with single-counting rule) ───
+    const idleDurationChartData = useMemo(() => {
+        if (selectedGroup === "ALL") {
+            const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
+            return groupsToProcess.map(grpName => {
+                const groupKey = grpName.trim().toLowerCase()
+                let totalIdleSecs = 0
+                if (idleAnalyticsData?.by_vehicle) {
+                    // Single-counting rule: each vehicle is strictly categorized under its primary group in by_vehicle
+                    const grpVehs = idleAnalyticsData.by_vehicle.filter(v =>
+                        (v.group_name || "").trim().toLowerCase() === groupKey
+                    )
+                    totalIdleSecs = grpVehs.reduce((sum, v) => sum + Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
+                } else if (idleAnalyticsData?.by_group) {
+                    const grp = idleAnalyticsData.by_group.find(g => (g.group_name || "").trim().toLowerCase() === groupKey)
+                    if (grp) {
+                        totalIdleSecs = Number(grp.total_idle_seconds || (grp.total_idle_hours ? grp.total_idle_hours * 3600 : 0))
+                    }
+                }
+                const idleMins = Math.round(totalIdleSecs / 60)
+                return {
+                    name: grpName,
+                    value: idleMins,
+                }
+            })
+        } else {
+            if (idleAnalyticsData?.by_vehicle) {
+                const selKey = selectedGroup.trim().toLowerCase()
+                return idleAnalyticsData.by_vehicle
+                    .filter(v => (v.group_name || "").trim().toLowerCase() === selKey)
+                    .map(v => {
+                        const secs = Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0))
+                        return {
+                            name: v.vehicle_name,
+                            value: Math.round(secs / 60),
+                            status: secs > 0 ? "IDLED TODAY" : "NO IDLE",
+                            vehicle_id: v.vehicle_id,
+                        }
+                    })
+                    .sort((a, b) => b.value - a.value)
+                    .slice(0, 10)
+            }
+            return []
+        }
+    }, [selectedGroup, availableGroups, idleAnalyticsData])
+
+    // ─── Selected Vehicle Object for Drawer ─────────────────────────────────
+    const selectedVehicle = useMemo(() => {
+        if (!selectedVehicleId) return null
+        return vehicles.find(v => v.vehicle_id === selectedVehicleId || v.id === selectedVehicleId) || null
+    }, [vehicles, selectedVehicleId])
 
     return (
         <SidebarProvider>
-        <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900">
-            <Sidebar />
+            <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900 font-sans antialiased">
+                <Sidebar />
 
-            <div className="flex min-w-0 flex-1 flex-col">
-
-
-                <main className="flex-1 overflow-y-auto px-8 py-8">
-                    {/* Header */}
-                    <section className="mb-8">
-                        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+                <div className="flex min-w-0 flex-1 flex-col">
+                    <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-8 sm:py-8">
+                        {/* ─── 1. PAGE HEADER ────────────────────────────────────────── */}
+                        <header className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200/60 pb-4">
                             <div>
-                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                                    Fleet Overview
-                                </p>
-
-                                <h1 className="mt-1 text-2xl font-black tracking-tight text-slate-900">
-                                    Operational Command Dashboard
+                                <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 uppercase">
+                                    FLEET OVERVIEW
                                 </h1>
-
-                                <p className="mt-1 text-xs text-slate-500">
-                                    Live telemetry, attention management, and utilization metrics
+                                <p className="text-xs text-slate-500 font-medium mt-0.5">
+                                    Real-time fleet operational command and asset telemetry
                                 </p>
                             </div>
 
-                            <div className="flex items-center gap-3">
+                            <div className="flex flex-wrap items-center gap-2.5">
+                                {/* Global Vehicle Group Filter */}
+                                <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
+                                    <Layers className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                                    <span className="text-[11px] font-bold text-slate-400 uppercase">Group:</span>
+                                    <select
+                                        value={selectedGroup}
+                                        onChange={(e) => setSelectedGroup(e.target.value)}
+                                        className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer pr-1"
+                                        aria-label="Filter fleet by group"
+                                    >
+                                        <option value="ALL">All Groups ({availableGroups.length})</option>
+                                        {availableGroups.map(grp => (
+                                            <option key={grp} value={grp}>{grp}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Last Updated Indicator with Live Pulse */}
                                 {lastUpdated && (
-                                    <span className="rounded-full bg-white border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-600 shadow-2xs">
-                                        Last Updated {formatUAETime(lastUpdated)}
-                                    </span>
+                                    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-2xs">
+                                        <span className="relative flex h-2 w-2">
+                                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                                        </span>
+                                        <span className="text-[11px] text-slate-500 font-semibold">
+                                            {formatUAETime(lastUpdated)}
+                                        </span>
+                                    </div>
                                 )}
                             </div>
-                        </div>
-                    </section>
+                        </header>
 
-                    {loading && (
-                        <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center shadow-xs">
-                            <Clock3 className="mx-auto h-8 w-8 animate-pulse text-[#1C5E7A]" />
-                            <p className="mt-3 text-sm font-bold text-slate-800">
-                                Loading live fleet data...
-                            </p>
-                        </div>
-                    )}
+                        {/* Loading State */}
+                        {loading && (
+                            <div className="rounded-xl border border-slate-200/80 bg-white p-12 text-center shadow-xs">
+                                <Loader2 className="mx-auto h-7 w-7 animate-spin text-[#1C5E7A]" />
+                                <p className="mt-3 text-xs font-bold text-slate-800 tracking-wide">
+                                    SYNCHRONIZING LIVE FLEET TELEMETRY...
+                                </p>
+                            </div>
+                        )}
 
-                    {error && (
-                        <div className="rounded-2xl border border-red-200 bg-red-50 p-6 text-sm font-semibold text-red-700">
-                            Failed to load fleet data: {error}
-                        </div>
-                    )}
+                        {/* Error State */}
+                        {error && !loading && (
+                            <div className="mb-6 rounded-xl border border-red-200 bg-red-50 p-4 text-xs font-semibold text-red-700">
+                                {error}
+                            </div>
+                        )}
 
-                    {!loading && !error && (
-                        <div className="space-y-8">
-                            {/* Primary Summary KPIs */}
-                            <section>
-                                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-5">
-                                    {/* Total */}
-                                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                        {!loading && (
+                            <div className="space-y-6">
+                                {/* ─── 2. KPI CARDS SECTION (NO ICONS, TYPOGRAPHY-FIRST) ───── */}
+                                <section aria-label="Key Performance Indicators">
+                                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 sm:gap-4">
+                                        {/* 1. TOTAL VEHICLES */}
+                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                                                     Total Vehicles
-                                                </p>
-                                                <p className="mt-2 text-3xl font-black text-slate-900">
-                                                    {totalVehicles}
+                                                </span>
+                                            </div>
+                                            <div className="my-2">
+                                                <p className="text-3xl lg:text-4xl font-black text-slate-900 tracking-tight">
+                                                    {totalVehiclesCount}
                                                 </p>
                                             </div>
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 border border-slate-200">
-                                                <Truck className="h-5 w-5 text-[#1C5E7A]" />
+                                            <div>
+                                                <span className="text-[10px] font-medium text-slate-400">
+                                                    {selectedGroup === "ALL" ? "Registered units" : "Filtered group units"}
+                                                </span>
                                             </div>
                                         </div>
-                                        <p className="mt-3 text-xs font-medium text-slate-500">
-                                            Live registered fleet units
-                                        </p>
-                                    </div>
 
-                                    {/* Moving */}
-                                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                                        {/* 2. MOVING */}
+                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                                                     Moving
-                                                </p>
-                                                <p className="mt-2 text-3xl font-black text-emerald-600">
+                                                </span>
+                                            </div>
+                                            <div className="my-2">
+                                                <p className="text-3xl lg:text-4xl font-black text-emerald-600 tracking-tight">
                                                     {movingCount}
                                                 </p>
                                             </div>
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-50 border border-emerald-100">
-                                                <CirclePlay className="h-5 w-5 text-emerald-600" />
+                                            <div>
+                                                <span className="text-[10px] font-semibold text-emerald-600">
+                                                    {totalVehiclesCount > 0 ? Math.round((movingCount / totalVehiclesCount) * 100) : 0}% active motion
+                                                </span>
                                             </div>
                                         </div>
-                                        <p className="mt-3 text-xs font-medium text-slate-500">
-                                            Speed &gt; 0 km/h
-                                        </p>
-                                    </div>
 
-                                    {/* Idling */}
-                                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                                        {/* 3. IDLING */}
+                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                                                     Idling
-                                                </p>
-                                                <p className="mt-2 text-3xl font-black text-orange-600">
+                                                </span>
+                                            </div>
+                                            <div className="my-2">
+                                                <p className="text-3xl lg:text-4xl font-black text-amber-600 tracking-tight">
                                                     {idlingCount}
                                                 </p>
                                             </div>
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange-50 border border-orange-100">
-                                                <Clock3 className="h-5 w-5 text-orange-600" />
+                                            <div>
+                                                <span className="text-[10px] font-semibold text-amber-600">
+                                                    {totalVehiclesCount > 0 ? Math.round((idlingCount / totalVehiclesCount) * 100) : 0}% engine on
+                                                </span>
                                             </div>
                                         </div>
-                                        <p className="mt-3 text-xs font-medium text-slate-500">
-                                            Ignition ON, Speed = 0
-                                        </p>
-                                    </div>
 
-                                    {/* Stopped */}
-                                    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs">
-                                        <div className="flex items-start justify-between">
-                                            <div>
-                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                                        {/* 4. STOPPED */}
+                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                                                     Stopped
-                                                </p>
-                                                <p className="mt-2 text-3xl font-black text-slate-600">
+                                                </span>
+                                            </div>
+                                            <div className="my-2">
+                                                <p className="text-3xl lg:text-4xl font-black text-slate-700 tracking-tight">
                                                     {stoppedCount}
                                                 </p>
                                             </div>
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-100 border border-slate-200">
-                                                <Square className="h-5 w-5 text-slate-500" />
-                                            </div>
-                                        </div>
-                                        <p className="mt-3 text-xs font-medium text-slate-500">
-                                            Ignition OFF, Speed = 0
-                                        </p>
-                                    </div>
-
-                                    {/* Offline */}
-                                    <div className="rounded-2xl border border-red-200 bg-white p-5 shadow-xs">
-                                        <div className="flex items-start justify-between">
                                             <div>
-                                                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Offline</p>
-                                                <p className="mt-2 text-3xl font-black text-red-600">{offlineCount}</p>
-                                            </div>
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-red-100 bg-red-50">
-                                                <Wifi className="h-5 w-5 text-red-600" />
+                                                <span className="text-[10px] font-medium text-slate-400">
+                                                    {totalVehiclesCount > 0 ? Math.round((stoppedCount / totalVehiclesCount) * 100) : 0}% parked
+                                                </span>
                                             </div>
                                         </div>
-                                        <p className="mt-3 text-xs font-medium text-slate-500">No Wialon message within configured threshold</p>
+
+                                        {/* 5. OFFLINE */}
+                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                                    Offline
+                                                </span>
+                                            </div>
+                                            <div className="my-2">
+                                                <p className={`text-3xl lg:text-4xl font-black tracking-tight ${offlineCount > 0 ? "text-rose-600" : "text-slate-700"}`}>
+                                                    {offlineCount}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <span className={`text-[10px] font-semibold ${offlineCount > 0 ? "text-rose-600" : "text-slate-400"}`}>
+                                                    {totalVehiclesCount > 0 ? Math.round((offlineCount / totalVehiclesCount) * 100) : 0}% no signal
+                                                </span>
+                                            </div>
+                                        </div>
+
+                                        {/* 6. ACTIVE TODAY (Interactive -> Tracking/Trips) */}
+                                        <Link
+                                            to="/tracking"
+                                            className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs transition-all hover:border-[#1C5E7A]/40 hover:shadow-sm group cursor-pointer"
+                                            title="View active vehicles in Live Tracking"
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-[#1C5E7A] transition-colors">
+                                                    Active Today
+                                                </span>
+                                                <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 group-hover:text-[#1C5E7A] transition-colors" />
+                                            </div>
+                                            <div className="my-2">
+                                                <p className="text-3xl lg:text-4xl font-black text-[#1C5E7A] tracking-tight">
+                                                    {activeTodayCount}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <span className="text-[10px] font-semibold text-[#1C5E7A]">
+                                                    {totalVehiclesCount > 0 ? Math.round((activeTodayCount / totalVehiclesCount) * 100) : 0}% fleet utilized
+                                                </span>
+                                            </div>
+                                        </Link>
+
+                                        {/* 7. ALERTS (Interactive -> Alerts Page) */}
+                                        <Link
+                                            to="/alerts"
+                                            className={`flex flex-col justify-between rounded-xl border p-4 shadow-xs transition-all hover:shadow-sm group cursor-pointer ${
+                                                alertsCount > 0
+                                                    ? "border-rose-200 bg-rose-50/20 hover:border-rose-300"
+                                                    : "border-slate-200/80 bg-white hover:border-slate-300"
+                                            }`}
+                                            title="View alerts in Fleet Alerts"
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-rose-600 transition-colors">
+                                                    Alerts
+                                                </span>
+                                                <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 group-hover:text-rose-600 transition-colors" />
+                                            </div>
+                                            <div className="my-2">
+                                                <p className={`text-3xl lg:text-4xl font-black tracking-tight ${
+                                                    alertsCount > 0 ? "text-rose-600" : "text-slate-700"
+                                                }`}>
+                                                    {alertsCount}
+                                                </p>
+                                            </div>
+                                            <div>
+                                                <span className={`text-[10px] font-semibold ${
+                                                    alertsCount > 0 ? "text-rose-600" : "text-slate-400"
+                                                }`}>
+                                                    {alertsCount > 0 ? "Attention required" : "No pending issues"}
+                                                </span>
+                                            </div>
+                                        </Link>
                                     </div>
+                                </section>
 
-                                </div>
-                            </section>
-
-                            {/* Status Distribution KPI & Vehicles Requiring Attention */}
-                            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                                {/* Fleet Status Distribution KPI */}
-                                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs flex flex-col justify-between">
-                                    <div>
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex items-center gap-2">
-                                                <Activity className="h-5 w-5 text-[#1C5E7A]" />
-                                                <h2 className="text-base font-bold text-slate-900">
-                                                    Fleet Status Distribution
-                                                </h2>
+                                {/* ─── 3. FLEET STATUS / DISTRIBUTION & TODAY'S ACTIVITY ────── */}
+                                <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                    {/* FLEET STATUS & DISTRIBUTION */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div>
+                                                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                        <Activity className="h-4 w-4 text-[#1C5E7A]" />
+                                                        Fleet Status & Live Distribution
+                                                    </h2>
+                                                    <p className="text-[11px] text-slate-400 font-medium">
+                                                        Real-time operational distribution across all monitored units
+                                                    </p>
+                                                </div>
+                                                <span className="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                    {totalVehiclesCount} Units
+                                                </span>
                                             </div>
-                                            <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700">
-                                                Operational KPI
-                                            </span>
-                                        </div>
-                                        <p className="mt-1 text-xs text-slate-500">
-                                             Real-time fleet counts by Wialon connection and activity status
-                                        </p>
 
-                                        {/* Progress Bar */}
-                                        <div className="mt-6">
-                                            <div className="flex h-4 overflow-hidden rounded-full bg-slate-100 p-0.5 border border-slate-200">
-                                                {totalVehicles > 0 && (
+                                            {/* Segmented Distribution Progress Bar */}
+                                            <div className="flex h-3 overflow-hidden rounded-full bg-slate-100 border border-slate-200/60">
+                                                {totalVehiclesCount > 0 ? (
                                                     <>
                                                         <div
-                                                            className="bg-emerald-500 transition-all rounded-l-full"
-                                                            style={{ width: `${(movingCount / totalVehicles) * 100}%` }}
+                                                            className="bg-emerald-500 transition-all"
+                                                            style={{ width: `${(movingCount / totalVehiclesCount) * 100}%` }}
                                                             title={`Moving: ${movingCount}`}
                                                         />
                                                         <div
-                                                            className="bg-orange-500 transition-all"
-                                                            style={{ width: `${(idlingCount / totalVehicles) * 100}%` }}
+                                                            className="bg-amber-500 transition-all"
+                                                            style={{ width: `${(idlingCount / totalVehiclesCount) * 100}%` }}
                                                             title={`Idling: ${idlingCount}`}
                                                         />
                                                         <div
-                                                            className="bg-slate-400 transition-all rounded-r-full"
-                                                            style={{ width: `${(stoppedCount / totalVehicles) * 100}%` }}
+                                                            className="bg-slate-400 transition-all"
+                                                            style={{ width: `${(stoppedCount / totalVehiclesCount) * 100}%` }}
                                                             title={`Stopped: ${stoppedCount}`}
                                                         />
+                                                        <div
+                                                            className="bg-rose-500 transition-all"
+                                                            style={{ width: `${(offlineCount / totalVehiclesCount) * 100}%` }}
+                                                            title={`Offline: ${offlineCount}`}
+                                                        />
                                                     </>
+                                                ) : (
+                                                    <div className="w-full bg-slate-200" />
                                                 )}
                                             </div>
-                                        </div>
 
-                                        {/* Metrics Grid */}
-                                        <div className="mt-6 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
-                                            <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
-                                                <span className="text-[11px] font-bold text-emerald-800">Moving</span>
-                                                <p className="mt-1 text-xl font-black text-emerald-700">{movingCount}</p>
-                                                <p className="text-[10px] text-emerald-600 font-semibold">
-                                                    {totalVehicles > 0 ? Math.round((movingCount / totalVehicles) * 100) : 0}%
-                                                </p>
-                                            </div>
+                                            {/* Status Count Boxes */}
+                                            <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                                                <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-center">
+                                                    <span className="text-[10px] font-bold text-emerald-800 uppercase tracking-wider block">Moving</span>
+                                                    <p className="mt-0.5 text-xl font-black text-emerald-700">{movingCount}</p>
+                                                    <span className="text-[10px] font-semibold text-emerald-600">
+                                                        {totalVehiclesCount > 0 ? Math.round((movingCount / totalVehiclesCount) * 100) : 0}%
+                                                    </span>
+                                                </div>
 
-                                            <div className="rounded-xl border border-orange-200 bg-orange-50/60 p-3">
-                                                <span className="text-[11px] font-bold text-orange-800">Idling</span>
-                                                <p className="mt-1 text-xl font-black text-orange-600">{idlingCount}</p>
-                                                <p className="text-[10px] text-orange-600 font-semibold">
-                                                    {totalVehicles > 0 ? Math.round((idlingCount / totalVehicles) * 100) : 0}%
-                                                </p>
-                                            </div>
+                                                <div className="rounded-lg border border-amber-100 bg-amber-50/40 p-3 text-center">
+                                                    <span className="text-[10px] font-bold text-amber-800 uppercase tracking-wider block">Idling</span>
+                                                    <p className="mt-0.5 text-xl font-black text-amber-600">{idlingCount}</p>
+                                                    <span className="text-[10px] font-semibold text-amber-600">
+                                                        {totalVehiclesCount > 0 ? Math.round((idlingCount / totalVehiclesCount) * 100) : 0}%
+                                                    </span>
+                                                </div>
 
-                                            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                                <span className="text-[11px] font-bold text-slate-700">Stopped</span>
-                                                <p className="mt-1 text-xl font-black text-slate-700">{stoppedCount}</p>
-                                                <p className="text-[10px] text-slate-500 font-semibold">
-                                                    {totalVehicles > 0 ? Math.round((stoppedCount / totalVehicles) * 100) : 0}%
-                                                </p>
-                                            </div>
-                                            <div className="rounded-xl border border-red-200 bg-red-50/60 p-3">
-                                                <span className="text-[11px] font-bold text-red-800">Offline</span>
-                                                <p className="mt-1 text-xl font-black text-red-700">{offlineCount}</p>
-                                                <p className="text-[10px] font-semibold text-red-600">
-                                                    {totalVehicles > 0 ? Math.round((offlineCount / totalVehicles) * 100) : 0}%
-                                                </p>
+                                                <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3 text-center">
+                                                    <span className="text-[10px] font-bold text-slate-700 uppercase tracking-wider block">Stopped</span>
+                                                    <p className="mt-0.5 text-xl font-black text-slate-700">{stoppedCount}</p>
+                                                    <span className="text-[10px] font-semibold text-slate-500">
+                                                        {totalVehiclesCount > 0 ? Math.round((stoppedCount / totalVehiclesCount) * 100) : 0}%
+                                                    </span>
+                                                </div>
+
+                                                <div className="rounded-lg border border-rose-100 bg-rose-50/40 p-3 text-center">
+                                                    <span className="text-[10px] font-bold text-rose-800 uppercase tracking-wider block">Offline</span>
+                                                    <p className="mt-0.5 text-xl font-black text-rose-700">{offlineCount}</p>
+                                                    <span className="text-[10px] font-semibold text-rose-600">
+                                                        {totalVehiclesCount > 0 ? Math.round((offlineCount / totalVehiclesCount) * 100) : 0}%
+                                                    </span>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
 
-                                    <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between items-center text-xs text-slate-500">
-                                        <span>Fleet Utilization Rate: <strong className="text-slate-900">{fleetUtilization}%</strong></span>
-                                        <span>Average Speed: <strong className="text-slate-900">{averageSpeed} km/h</strong></span>
-                                    </div>
-                                </div>
-
-                                {/* Idle Vehicles / Attention Section */}
-                                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs flex flex-col justify-between">
-                                    <div>
-                                        <div className="flex items-center justify-between">
-                                            <div className="flex items-center gap-2">
-                                                <AlertTriangle className="h-5 w-5 text-amber-600" />
-                                                <h2 className="text-base font-bold text-slate-900">
-                                                    Idle Vehicles Requiring Attention
-                                                </h2>
+                                    {/* TODAY'S FLEET ACTIVITY */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div>
+                                                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                        <Route className="h-4 w-4 text-[#1C5E7A]" />
+                                                        Today's Fleet Activity
+                                                    </h2>
+                                                    <p className="text-[11px] text-slate-400 font-medium">
+                                                        Operational performance metrics recorded today
+                                                    </p>
+                                                </div>
+                                                <span className="text-[11px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                    UAE (00:00 → Now)
+                                                </span>
                                             </div>
-                                            <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${
-                                                attentionVehicles.length > 0
-                                                    ? "bg-amber-100 text-amber-800 ring-1 ring-amber-300"
-                                                    : "bg-emerald-100 text-emerald-800"
-                                            }`}>
-                                                {attentionVehicles.length} Flagged
-                                            </span>
-                                        </div>
-                                        <p className="mt-1 text-xs text-slate-500">
-                                            High-priority vehicles idling continuously for more than 5 minutes
-                                        </p>
 
-                                        <div className="mt-4 space-y-2.5 max-h-[200px] overflow-y-auto pr-1">
+                                            {/* 4 Activity Metric Cards */}
+                                            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 text-center">
+                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Distance</span>
+                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-slate-900">
+                                                        {todayFleetActivity.distance}
+                                                    </p>
+                                                    <span className="text-[10px] font-medium text-slate-400">Total covered</span>
+                                                </div>
+
+                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Trips</span>
+                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-[#1C5E7A]">
+                                                        {todayFleetActivity.trips}
+                                                    </p>
+                                                    <span className="text-[10px] font-medium text-slate-400">Recorded trips</span>
+                                                </div>
+
+                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Driving</span>
+                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-emerald-700">
+                                                        {todayFleetActivity.driving}
+                                                    </p>
+                                                    <span className="text-[10px] font-medium text-slate-400">Active motion</span>
+                                                </div>
+
+                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
+                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Idle</span>
+                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-amber-600">
+                                                        {todayFleetActivity.idle}
+                                                    </p>
+                                                    <span className="text-[10px] font-medium text-slate-400">Engine running</span>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end">
+                                            <Link
+                                                to="/trips"
+                                                className="inline-flex items-center gap-1 text-xs font-bold text-[#1C5E7A] hover:underline"
+                                            >
+                                                View Trips & Routes
+                                                <ArrowUpRight className="h-3.5 w-3.5" />
+                                            </Link>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                {/* ─── 4. IDLE VEHICLES & TOP MILEAGE RANKING ───────────────── */}
+                                <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                    {/* IDLE VEHICLES REQUIRING ATTENTION */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between mb-4">
+                                                <div>
+                                                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                        <AlertTriangle className="h-4 w-4 text-amber-600" />
+                                                        Idle Vehicles Requiring Attention
+                                                    </h2>
+                                                    <p className="text-[11px] text-slate-500 font-medium">
+                                                vehicles with stable telemetry idling continuously for more than 5 minutes
+                                                    </p>
+                                                </div>
+
+                                                <Link
+                                                    to="/idle-analytics"
+                                                    className="inline-flex items-center gap-1 text-xs font-bold text-amber-700 hover:underline shrink-0"
+                                                >
+                                                    View all →
+                                                </Link>
+                                            </div>
+
                                             {attentionVehicles.length === 0 ? (
-                                                <div className="flex flex-col items-center justify-center rounded-xl bg-emerald-50/60 py-8 text-center border border-emerald-200">
-                                                    <CirclePlay className="h-7 w-7 text-emerald-600" />
-                                                    <p className="mt-2 text-xs font-bold text-emerald-800">
-                                                        All Vehicles Operating Normally
+                                                <div className="flex flex-col items-center justify-center rounded-lg bg-emerald-50/40 py-8 text-center border border-emerald-100">
+                                                    <CheckCircle2 className="h-6 w-6 text-emerald-600" />
+                                                    <p className="mt-2 text-xs font-bold text-emerald-900">
+                                                        All Vehicles Operating Efficiently
                                                     </p>
                                                     <p className="mt-0.5 text-[11px] text-emerald-700">
-                                                        No critical prolonged idling detected across the fleet
+                                                        No continuous idling exceeding 5 minutes detected
                                                     </p>
                                                 </div>
                                             ) : (
-                                                attentionVehicles.map(vehicle => (
-                                                    <div
-                                                        key={vehicle.vehicle_id}
-                                                        className="flex items-center justify-between rounded-xl border border-amber-200 bg-amber-50/60 px-4 py-3 shadow-2xs"
-                                                    >
-                                                        <div>
-                                                            <div className="flex items-center gap-2">
-                                                                <p className="text-xs font-bold text-slate-900">
-                                                                    {vehicle.vehicle_name}
-                                                                </p>
-                                                                <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[10px] font-semibold text-amber-900">
-                                                                    {vehicle.group || "General Fleet"}
-                                                                </span>
-                                                            </div>
-                                                            <p className="mt-1 text-[11px] font-semibold text-amber-800">
-                                                                Idling for {vehicle.idle_duration_formatted}
-                                                                {vehicle.idle_start ? ` (since ${formatUAETime(vehicle.idle_start)})` : ""}
-                                                            </p>
-                                                        </div>
+                                                <div className="space-y-2">
+                                                    {attentionVehicles.map(vehicle => {
+                                                        const idleMins = Math.round(Number(vehicle.idle_duration || 0) / 60)
+                                                        return (
+                                                            <button
+                                                                key={vehicle.vehicle_id}
+                                                                type="button"
+                                                                onClick={() => setSelectedVehicleId(vehicle.vehicle_id)}
+                                                                className="w-full flex items-center justify-between rounded-lg border border-amber-200/80 bg-amber-50/40 p-3 text-left transition hover:bg-amber-100/60 hover:border-amber-300 cursor-pointer group"
+                                                            >
+                                                                <div className="min-w-0 pr-3">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <span className="font-mono text-xs font-bold text-slate-900 truncate">
+                                                                            {vehicle.vehicle_name}
+                                                                        </span>
+                                                                        <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[9px] font-bold text-amber-900 shrink-0">
+                                                                            {vehicle.group || "General Fleet"}
+                                                                        </span>
+                                                                    </div>
+                                                                    <p className="mt-0.5 text-[11px] font-semibold text-amber-800">
+                                                                        {idleMins} min continuous idle
+                                                                    </p>
+                                                                </div>
 
-                                                        <a
-                                                            href="/idle-analytics"
-                                                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-600 text-white transition hover:bg-amber-700"
-                                                            title="Inspect idle details"
+                                                                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-600 text-white group-hover:bg-amber-700 transition">
+                                                                    <ArrowUpRight className="h-3.5 w-3.5" />
+                                                                </div>
+                                                            </button>
+                                                        )
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* TOP VEHICLES BY MILEAGE */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                                                <div className="flex items-center gap-2">
+                                                    <TrendingUp className="h-4 w-4 text-[#1C5E7A]" />
+                                                    <h2 className="text-sm font-bold text-slate-900">
+                                                        Top Vehicles by Mileage
+                                                    </h2>
+                                                    {mileageLoading && (
+                                                        <span className="flex items-center gap-1 text-[10px] font-semibold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200 animate-pulse">
+                                                            <Loader2 className="h-3 w-3 animate-spin" /> Updating
+                                                        </span>
+                                                    )}
+                                                </div>
+
+                                                {/* Dropdown Filters */}
+                                                <div className="flex items-center gap-2">
+                                                    {/* Timeframe Dropdown */}
+                                                    <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
+                                                        <select
+                                                            value={mileageTimeframe}
+                                                            onChange={(e) => setMileageTimeframe(e.target.value)}
+                                                            className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer text-xs"
+                                                            aria-label="Select mileage timeframe"
                                                         >
-                                                            <ArrowUpRight className="h-4 w-4" />
-                                                        </a>
+                                                            {TIMEFRAME_OPTIONS.map(tf => (
+                                                                <option key={tf.id} value={tf.id}>{tf.label}</option>
+                                                            ))}
+                                                        </select>
                                                     </div>
-                                                ))
-                                            )}
+
+                                                    {/* Limit Dropdown */}
+                                                    <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
+                                                        <Filter className="h-3 w-3 text-slate-400" />
+                                                        <select
+                                                            value={mileageLimit}
+                                                            onChange={(e) => setMileageLimit(e.target.value)}
+                                                            className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer text-xs"
+                                                            aria-label="Select mileage limit"
+                                                        >
+                                                            <option value="5">Top 5</option>
+                                                            <option value="10">Top 10</option>
+                                                            <option value="15">Top 15</option>
+                                                            <option value="ALL">Show All</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            <div className="h-[220px]">
+                                                {filteredMileageList.length === 0 ? (
+                                                    <div className="flex h-full items-center justify-center text-xs text-slate-400">
+                                                        No vehicle mileage data available for selected filter.
+                                                    </div>
+                                                ) : (
+                                                    <ResponsiveContainer width="100%" height="100%">
+                                                        <BarChart
+                                                            data={filteredMileageList}
+                                                            layout="vertical"
+                                                            margin={{ top: 5, right: 30, left: 10, bottom: 5 }}
+                                                        >
+                                                            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F1F5F9" />
+                                                            <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#94a3b8" }} />
+                                                            <YAxis
+                                                                type="category"
+                                                                dataKey="vehicle"
+                                                                tickLine={false}
+                                                                axisLine={false}
+                                                                width={90}
+                                                                tick={{ fontSize: 11, fill: "#0f172a", fontWeight: 700 }}
+                                                            />
+                                                            <Tooltip
+                                                                formatter={(val) => [`${Number(val).toLocaleString()} km`, "Mileage"]}
+                                                                contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }}
+                                                            />
+                                                            <Bar
+                                                                dataKey="mileage"
+                                                                fill="#1C5E7A"
+                                                                radius={[0, 4, 4, 0]}
+                                                                onClick={(entry) => {
+                                                                    if (entry?.vehicle_id) setSelectedVehicleId(entry.vehicle_id)
+                                                                }}
+                                                                cursor="pointer"
+                                                            />
+                                                        </BarChart>
+                                                    </ResponsiveContainer>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
+                                </section>
 
-                                    <div className="mt-4 pt-3 border-t border-slate-100 flex justify-end">
-                                        <Link
-                                            to="/idle-analytics"
-                                            className="inline-flex items-center gap-1 text-xs font-bold text-amber-700 hover:underline"
-                                        >
-                                            Open Full Idle Analytics
-                                            <ArrowUpRight className="h-3.5 w-3.5" />
-                                        </Link>
-                                    </div>
-                                </div>
-                            </section>
-
-                            {/* Top Vehicles by Mileage */}
-                            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
-                                <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between mb-6">
-                                    <div>
-                                        <div className="flex items-center gap-2">
-                                            <h2 className="text-lg font-bold text-slate-900">
-                                                Top Vehicles by Mileage
-                                            </h2>
-                                            {mileageLoading && (
-                                                <span className="flex items-center gap-1 text-[11px] font-semibold text-sky-600 bg-sky-50 px-2 py-0.5 rounded-full border border-sky-200 animate-pulse">
-                                                    <Loader2 className="h-3 w-3 animate-spin" /> Updating...
+                                {/* ─── 5. FLEET BY GROUP & ANALYTICS CHARTS ─────────────────── */}
+                                <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                                    {/* FLEET BY GROUP */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div>
+                                                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                        <Layers className="h-4 w-4 text-[#1C5E7A]" />
+                                                        Fleet by Group
+                                                    </h2>
+                                                    <p className="text-[11px] text-slate-400 font-medium">
+                                                        Distribution across vehicle operational divisions
+                                                    </p>
+                                                </div>
+                                                <span className="text-xs font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md">
+                                                    {selectedGroup === "ALL" ? `${fleetByGroupData.length} Groups` : selectedGroup}
                                                 </span>
+                                            </div>
+
+                                            {selectedGroup === "ALL" ? (
+                                                <div className="space-y-3">
+                                                    {fleetByGroupData.map(grp => (
+                                                        <div key={grp.name} className="space-y-1">
+                                                            <div className="flex items-center justify-between text-xs">
+                                                                <span className="font-bold text-slate-800">{grp.name}</span>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className="text-[11px] font-semibold text-slate-400">
+                                                                        {grp.percent}%
+                                                                    </span>
+                                                                    <span className="font-mono font-bold text-slate-900">
+                                                                        {grp.count} units
+                                                                    </span>
+                                                                </div>
+                                                            </div>
+                                                            <div className="flex h-2 overflow-hidden rounded-full bg-slate-100">
+                                                                <div
+                                                                    className="bg-[#1C5E7A] rounded-full transition-all"
+                                                                    style={{ width: `${grp.percent}%` }}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                <div className="space-y-3">
+                                                    <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3.5">
+                                                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Filtered Category</p>
+                                                        <p className="mt-0.5 text-base font-black text-slate-900">{selectedGroup}</p>
+                                                        <p className="text-[11px] text-slate-500 mt-1">
+                                                            Currently monitoring {totalVehiclesCount} units in this division.
+                                                        </p>
+                                                    </div>
+
+                                                    <div className="grid grid-cols-2 gap-2 text-xs">
+                                                        <div className="rounded-md bg-emerald-50/60 p-2.5 border border-emerald-100">
+                                                            <span className="text-emerald-800 text-[11px] font-semibold block">In Motion</span>
+                                                            <span className="text-base font-black text-emerald-700">{movingCount}</span>
+                                                        </div>
+                                                        <div className="rounded-md bg-amber-50/60 p-2.5 border border-amber-100">
+                                                            <span className="text-amber-800 text-[11px] font-semibold block">Idling</span>
+                                                            <span className="text-base font-black text-amber-700">{idlingCount}</span>
+                                                        </div>
+                                                        <div className="rounded-md bg-slate-100 p-2.5 border border-slate-200">
+                                                            <span className="text-slate-700 text-[11px] font-semibold block">Stopped</span>
+                                                            <span className="text-base font-black text-slate-800">{stoppedCount}</span>
+                                                        </div>
+                                                        <div className="rounded-md bg-rose-50/60 p-2.5 border border-rose-100">
+                                                            <span className="text-rose-800 text-[11px] font-semibold block">Offline</span>
+                                                            <span className="text-base font-black text-rose-700">{offlineCount}</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
                                             )}
                                         </div>
-                                        <p className="mt-0.5 text-xs text-slate-500">
-                                            {timeframeConfig[mileageTimeframe]?.subtitle || "Dynamic mileage rankings"}
-                                        </p>
                                     </div>
 
-                                    {/* Filters Toolbar */}
-                                    <div className="flex flex-wrap items-center gap-3">
-                                        {/* Timeframe Filter Pills */}
-                                        <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-2xs">
-                                            {[
-                                                { id: "today", label: "Today" },
-                                                { id: "yesterday", label: "Yesterday" },
-                                                { id: "week", label: "This Week" },
-                                                { id: "month", label: "This Month" },
-                                                { id: "year", label: "This Year" },
-                                                { id: "all", label: "All Time" },
-                                            ].map((tf) => {
-                                                const isActive = mileageTimeframe === tf.id
-                                                return (
-                                                    <button
-                                                        key={tf.id}
-                                                        type="button"
-                                                        onClick={() => setMileageTimeframe(tf.id)}
-                                                        className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition-all ${
-                                                            isActive
-                                                                ? "bg-[#1C5E7A] text-white shadow-xs"
-                                                                : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
-                                                        }`}
+                                    {/* FLEET UTILIZATION BY CATEGORY */}
+                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                        <div>
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div>
+                                                    <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                        <BarChart3 className="h-4 w-4 text-[#1C5E7A]" />
+                                                        Fleet Utilization by Category
+                                                    </h2>
+                                                    <p className="text-[11px] text-slate-400 font-medium">
+                                                        {selectedGroup === "ALL" ? "Active units percentage by group" : `Utilization for ${selectedGroup}`}
+                                                    </p>
+                                                </div>
+
+                                                {/* Chart Type Selector */}
+                                                <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
+                                                    <select
+                                                        value={utilizationChartType}
+                                                        onChange={(e) => setUtilizationChartType(e.target.value)}
+                                                        className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer text-xs"
+                                                        aria-label="Select utilization chart type"
                                                     >
-                                                        {tf.label}
-                                                    </button>
-                                                )
-                                            })}
-                                        </div>
+                                                        <option value="bar">Bar</option>
+                                                        <option value="horizontal">Horizontal Bar</option>
+                                                        <option value="donut">Donut</option>
+                                                    </select>
+                                                </div>
+                                            </div>
 
-                                        {/* Category Filter */}
-                                        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 shadow-2xs">
-                                            <Layers className="h-3.5 w-3.5 text-slate-500" />
-                                            <select
-                                                value={selectedMileageGroup}
-                                                onChange={(e) => setSelectedMileageGroup(e.target.value)}
-                                                className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
-                                            >
-                                                <option value="ALL">All Fleet Categories</option>
-                                                {availableGroups.map(group => (
-                                                    <option key={group} value={group}>
-                                                        {group}
-                                                    </option>
-                                                ))}
-                                            </select>
-                                        </div>
-
-                                        {/* Limit Filter */}
-                                        <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 shadow-2xs">
-                                            <Filter className="h-3.5 w-3.5 text-slate-500" />
-                                            <select
-                                                value={mileageLimit}
-                                                onChange={(e) => setMileageLimit(e.target.value)}
-                                                className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
-                                            >
-                                                <option value="5">Top 5 Vehicles</option>
-                                                <option value="10">Top 10 Vehicles</option>
-                                                <option value="15">Top 15 Vehicles</option>
-                                                <option value="ALL">Show All Vehicles</option>
-                                            </select>
+                                            <div className="h-[220px]">
+                                                {utilizationChartData.length === 0 ? (
+                                                    <div className="flex h-full items-center justify-center text-xs text-slate-400">
+                                                        No utilization data available.
+                                                    </div>
+                                                ) : utilizationChartType === "bar" ? (
+                                                    <ResponsiveContainer width="100%" height="100%">
+                                                        <BarChart data={utilizationChartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+                                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                                                            <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
+                                                            <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
+                                                            <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                            <Bar dataKey="value" fill="#0284c7" radius={[4, 4, 0, 0]} />
+                                                        </BarChart>
+                                                    </ResponsiveContainer>
+                                                ) : utilizationChartType === "horizontal" ? (
+                                                    <ResponsiveContainer width="100%" height="100%">
+                                                        <BarChart data={utilizationChartData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                                                            <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F1F5F9" />
+                                                            <XAxis type="number" domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
+                                                            <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={90} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
+                                                            <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                            <Bar dataKey="value" fill="#0284c7" radius={[0, 4, 4, 0]} />
+                                                        </BarChart>
+                                                    </ResponsiveContainer>
+                                                ) : (
+                                                    <ResponsiveContainer width="100%" height="100%">
+                                                        <PieChart>
+                                                            <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                            <Pie
+                                                                data={utilizationChartData}
+                                                                dataKey="value"
+                                                                nameKey="name"
+                                                                cx="50%"
+                                                                cy="50%"
+                                                                innerRadius={40}
+                                                                outerRadius={75}
+                                                                paddingAngle={3}
+                                                            >
+                                                                {utilizationChartData.map((entry, index) => (
+                                                                    <Cell key={`util-cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+                                                                ))}
+                                                            </Pie>
+                                                            <Legend wrapperStyle={{ fontSize: "10px" }} />
+                                                        </PieChart>
+                                                    </ResponsiveContainer>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
-                                </div>
+                                </section>
 
-                                <div className="h-[320px]">
-                                    {mileageLoading && (!filteredMileageData || filteredMileageData.length === 0) ? (
-                                        <div className="flex h-full flex-col items-center justify-center gap-2 text-sm font-semibold text-slate-400">
-                                            <Loader2 className="h-6 w-6 animate-spin text-sky-600" />
-                                            <span>Loading vehicle mileage ({timeframeConfig[mileageTimeframe]?.label})...</span>
-                                        </div>
-                                    ) : filteredMileageData.length === 0 ? (
-                                        <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                                            No vehicles found matching selected category filter.
-                                        </div>
-                                    ) : (
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <BarChart
-                                                data={filteredMileageData}
-                                                layout="vertical"
-                                                margin={{ top: 10, right: 30, left: 40, bottom: 10 }}
-                                            >
-                                                <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#E2E8F0" />
-                                                <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#64748b" }} />
-                                                <YAxis type="category" dataKey="vehicle" tickLine={false} axisLine={false} width={110} tick={{ fontSize: 11, fill: "#0f172a", fontWeight: 700 }} />
-                                                <Tooltip
-                                                    formatter={(value) => [`${Number(value).toLocaleString()} km`, timeframeConfig[mileageTimeframe]?.unit || "Mileage"]}
-                                                    contentStyle={{ borderRadius: "12px", borderColor: "#E2E8F0" }}
-                                                />
-                                                <Bar dataKey="mileage" fill="#1C5E7A" radius={[0, 8, 8, 0]} />
-                                            </BarChart>
-                                        </ResponsiveContainer>
-                                    )}
-                                </div>
-                            </section>
-
-                            {/* Category Comparison Bar Charts */}
-                            <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                                {/* Fleet Utilization Bar Chart */}
-                                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
-                                    <div className="mb-4">
-                                        <div className="flex items-center justify-between">
-                                            <h2 className="text-base font-bold text-slate-900">
-                                                Fleet Utilization by Category
-                                            </h2>
-                                            <span className="rounded-full bg-sky-50 px-2.5 py-0.5 text-[10px] font-bold text-sky-700 border border-sky-200">
-                                                Current State Utilization %
-                                            </span>
-                                        </div>
-                                        <p className="mt-1 text-xs text-slate-500">
-                                            Percentage of active (moving/idling) units per dynamic fleet group
-                                        </p>
-                                    </div>
-
-                                    <div className="h-[260px]">
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <BarChart data={categoryMetrics} margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
-                                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                                                <XAxis dataKey="category" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#0f172a", fontWeight: 700 }} />
-                                                <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#64748b" }} />
-                                                <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "12px" }} />
-                                                <Bar dataKey="utilizationPercent" fill="#0284c7" radius={[6, 6, 0, 0]} />
-                                            </BarChart>
-                                        </ResponsiveContainer>
-                                    </div>
-                                </div>
-
-                                {/* Idle Vehicles Bar Chart */}
-                                <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
-                                    <div className="mb-4">
-                                        <div className="flex items-center justify-between">
-                                            <h2 className="text-base font-bold text-slate-900">
+                                {/* ─── 6. IDLE DURATION BY CATEGORY ─────────────────────────── */}
+                                <section className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <div>
+                                            <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                                                <Clock className="h-4 w-4 text-[#1C5E7A]" />
                                                 Idle Duration by Category
                                             </h2>
-                                            <span className="rounded-full bg-orange-50 px-2.5 py-0.5 text-[10px] font-bold text-orange-700 border border-orange-200">
-                                                Idle Minutes by Group
-                                            </span>
+                                            <p className="text-[11px] text-slate-400 font-medium">
+                                                {selectedGroup === "ALL" ? "Current continuous idle minutes by fleet group" : `Current continuous idle minutes for ${selectedGroup}`}
+                                            </p>
                                         </div>
-                                        <p className="mt-1 text-xs text-slate-500">
-                                            Cumulative live idling minutes compared across dynamic fleet categories
-                                        </p>
+
+                                        {/* Chart Type Selector (Bar and Horizontal Bar ONLY) */}
+                                        <div className="flex items-center rounded-md border border-slate-200 bg-slate-50 px-2 py-1 text-xs">
+                                            <select
+                                                value={idleChartType}
+                                                onChange={(e) => setIdleChartType(e.target.value)}
+                                                className="bg-transparent font-bold text-slate-800 outline-none cursor-pointer text-xs"
+                                                aria-label="Select idle duration chart type"
+                                            >
+                                                <option value="bar">Bar</option>
+                                                <option value="horizontal">Horizontal Bar</option>
+                                            </select>
+                                        </div>
                                     </div>
 
-                                    <div className="h-[260px]">
-                                        <ResponsiveContainer width="100%" height="100%">
-                                            <BarChart data={categoryMetrics} margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
-                                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#E2E8F0" />
-                                                <XAxis dataKey="category" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#0f172a", fontWeight: 700 }} />
-                                                <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "#64748b" }} />
-                                                <Tooltip formatter={(val) => [`${val} mins`, "Idle Duration"]} contentStyle={{ borderRadius: "12px" }} />
-                                                <Bar dataKey="totalIdleMinutes" fill="#f97316" radius={[6, 6, 0, 0]} />
-                                            </BarChart>
-                                        </ResponsiveContainer>
+                                    <div className="h-[240px]">
+                                        {idleDurationChartData.length === 0 ? (
+                                            <div className="flex h-full items-center justify-center text-xs text-slate-400">
+                                                No idle duration recorded for this selection.
+                                            </div>
+                                        ) : idleChartType === "horizontal" ? (
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <BarChart data={idleDurationChartData} layout="vertical" margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                                                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F1F5F9" />
+                                                    <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
+                                                    <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={100} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
+                                                    <Tooltip formatter={(val) => [`${val} min`, "Idle Duration"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                    <Bar dataKey="value" fill="#f97316" radius={[0, 4, 4, 0]} />
+                                                </BarChart>
+                                            </ResponsiveContainer>
+                                        ) : (
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <BarChart data={idleDurationChartData} margin={{ top: 10, right: 10, left: -20, bottom: 20 }}>
+                                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                                                    <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
+                                                    <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
+                                                    <Tooltip formatter={(val) => [`${val} min`, "Idle Duration"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                    <Bar dataKey="value" fill="#f97316" radius={[4, 4, 0, 0]} />
+                                                </BarChart>
+                                            </ResponsiveContainer>
+                                        )}
                                     </div>
-                                </div>
-                            </section>
+                                </section>
+                            </div>
+                        )}
+                    </main>
+                </div>
 
-                            {/* Fleet Map Snapshot */}
-                            <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div>
-                                        <h2 className="text-base font-bold text-slate-900">
-                                            Live Fleet Map Snapshot
-                                        </h2>
-                                        <p className="mt-0.5 text-xs text-slate-500">
-                                            Geographic position of active units in real-time
-                                        </p>
-                                    </div>
-
-                                    <Link
-                                        to="/tracking"
-                                        className="inline-flex items-center gap-1 text-xs font-bold text-[#1C5E7A] hover:underline"
-                                    >
-                                        Open Full Map Tracking
-                                        <ArrowUpRight className="h-3.5 w-3.5" />
-                                    </Link>
-                                </div>
-
-                                <div className="h-[400px] overflow-hidden rounded-xl border border-slate-200">
-                                    <FleetMap
-                                        vehicles={mapVehicles}
-                                        selectedVehicleId={selectedVehicleId}
-                                        selectedVehicle={selectedVehicle}
-                                        onVehicleSelect={(vehicle) => {
-                                            setSelectedVehicleId(vehicle.vehicle_id)
-                                        }}
-                                    />
-                                </div>
-                            </section>
-                        </div>
-                    )}
-                </main>
+                {/* ─── 7. VEHICLE DETAILS DRAWER ──────────────────────────────── */}
+                {selectedVehicle && (
+                    <VehicleDetailDrawer
+                        vehicle={selectedVehicle}
+                        onClose={() => setSelectedVehicleId(null)}
+                    />
+                )}
             </div>
-
-            {/* Vehicle Detail Drawer (Live Telemetry + Fuel Performance) */}
-            {selectedVehicle && (
-                <VehicleDetailDrawer
-                    vehicle={selectedVehicle}
-                    onClose={() => setSelectedVehicleId(null)}
-                />
-            )}
-        </div>
         </SidebarProvider>
     )
 }

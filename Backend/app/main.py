@@ -18,7 +18,7 @@ from app.auth import authenticate_access_token
 from app.performance_diagnostics import log_cache_state, log_data_window, new_trace_id, request_trace_id, timed_calculation
 from app.utils.status_config import CONN_DELAYED_SECONDS
 
-from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups
+from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
@@ -102,6 +102,7 @@ async def require_supabase_auth(request: Request, call_next):
         "/api/fleet/utilization",
         "/api/fleet/trips",
         "/api/fleet/groups",
+        "/api/wialon/audit",
     }
     trace_id = new_trace_id() if tracked_path else "-"
     trace_token = request_trace_id.set(trace_id)
@@ -245,6 +246,23 @@ def get_vehicle_details(vehicle_id: int):
         "found": True,
         "vehicle": vehicle
     }
+
+
+@app.get("/api/wialon/audit")
+@timed_calculation("/api/wialon/audit")
+def get_wialon_audit():
+    try:
+        sid = login()
+        audit_data = audit_wialon_fleet(sid)
+        return audit_data
+    except Exception as e:
+        print("ERROR IN /api/wialon/audit:", repr(e))
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=502 if isinstance(e, WialonAPIError) else 500,
+            detail=str(e)
+        )
+
 
 
 

@@ -6,7 +6,8 @@ const FuelFilterContext = createContext(null)
 
 export function FuelFilterProvider({ children }) {
     // Period selection: 'today', '7d', '30d', 'custom', 'all'
-    const [period, setPeriod] = useState("today")
+    // Default to 'all' so that historical imported statements and telematics immediately display upon landing
+    const [period, setPeriod] = useState("all")
     const [customFrom, setCustomFrom] = useState("")
     const [customTo, setCustomTo] = useState("")
     const [vehicle, setVehicle] = useState("")

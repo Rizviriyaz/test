@@ -139,10 +139,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         vehicle_id = vehicle.get("id")
         vehicle_name = vehicle.get("nm", "Unknown")
 
-        calculated = calculated_by_vehicle.get(vehicle_id)
-
-        if not calculated:
-            continue
+        calculated = calculated_by_vehicle.get(vehicle_id) or {}
 
         # ---------------------------------------------------------
         # POSITION
@@ -251,10 +248,6 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         # DRIVING STATUS & CONNECTIVITY
         # ---------------------------------------------------------
 
-        status = calculate_status(
-            speed,
-            ignition_on
-        )
         last_message_ts = (vehicle.get("lmsg") or {}).get("t") or position.get("t")
         seconds_since_update = (current_time - int(last_message_ts)) if last_message_ts else None
 
@@ -265,6 +258,14 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         else:
             connection_status = "STABLE"
         is_offline = (connection_status == "OFFLINE")
+
+        if is_offline:
+            status = "OFFLINE"
+        else:
+            status = calculate_status(
+                speed,
+                ignition_on
+            )
 
         # ---------------------------------------------------------
         # IDLE DURATION

@@ -68,7 +68,7 @@ export default function FuelTrendChart() {
                     Period: {point?.period}
                 </p>
                 <div className="flex items-center justify-between gap-4">
-                    <span className="text-slate-500">Fuel Consumed:</span>
+                    <span className="text-slate-500">Fuel Purchased:</span>
                     <span className="font-bold text-[#1C5E7A]">{Number(point?.litres || 0).toLocaleString()} L</span>
                 </div>
                 <div className="flex items-center justify-between gap-4">

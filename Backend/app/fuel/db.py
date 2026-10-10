@@ -333,10 +333,11 @@ def fetch_fuel_transactions_for_analytics(
     headers = get_headers(None) if service_key else get_headers(bearer_token)
 
     params: Dict[str, str] = {
-        "select": "transaction_date,vehicle_identifier,fuel_type,litres,total_cost,unit_price",
+        "select": "id,transaction_date,vehicle_identifier,fuel_type,litres,total_cost,unit_price,odometer_km,station_name,invoice_number,driver_name,card_number",
         "order": "transaction_date.asc,id.asc",
         "limit": "1000",
     }
+
 
     # Apply normalized filters
     df = normalize_date_filter(filters.get("date_from"), is_end=False)

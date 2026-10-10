@@ -158,8 +158,8 @@ def calculate_vehicle_analytics(
     """Aggregate consumption and cost by vehicle with sorting and pagination."""
     if page < 1:
         raise ValueError("Page number must be greater than or equal to 1.")
-    if page_size < 1 or page_size > 100:
-        raise ValueError("Page size must be between 1 and 100.")
+    if page_size < 1 or page_size > 1000:
+        raise ValueError("Page size must be between 1 and 1000.")
 
     clean_sort_by = sort_by.lower().strip()
     clean_sort_order = sort_order.lower().strip()

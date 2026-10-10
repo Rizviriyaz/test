@@ -432,7 +432,18 @@ export async function getFuelImports(limit = 50, offset = 0) {
     return response.json()
 }
 
+export async function getFuelWaste(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/waste${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
+export async function getVehicleFuelDetail(params = {}) {
+    const response = await apiFetch(`${API_URL}/api/fuel/analytics/vehicle-detail${buildFuelQueryString(params)}`)
+    return response.json()
+}
+
 export async function getFuelTransactions(params = {}) {
     const response = await apiFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`)
     return response.json()
 }
+
