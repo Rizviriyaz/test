@@ -317,11 +317,7 @@ async def get_fuel_analytics_summary(
         bearer_token,
     )
 
-    sid = await run_in_threadpool(login)
-    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
-    summary = await run_in_threadpool(calculate_fuel_summary, matched_transactions)
+    summary = await run_in_threadpool(calculate_fuel_summary, transactions)
     return summary
 
 
@@ -364,11 +360,7 @@ async def get_fuel_analytics_trend(
         bearer_token,
     )
 
-    sid = await run_in_threadpool(login)
-    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
-    trend = await run_in_threadpool(calculate_fuel_trend, matched_transactions, clean_group_by)
+    trend = await run_in_threadpool(calculate_fuel_trend, transactions, clean_group_by)
     return trend
 
 
@@ -421,13 +413,9 @@ async def get_fuel_analytics_vehicles(
         bearer_token,
     )
 
-    sid = await run_in_threadpool(login)
-    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
     result = await run_in_threadpool(
         calculate_vehicle_analytics,
-        matched_transactions,
+        transactions,
         page,
         page_size,
         clean_sort_by,
@@ -465,11 +453,7 @@ async def get_fuel_analytics_fuel_types(
         bearer_token,
     )
 
-    sid = await run_in_threadpool(login)
-    wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
-    result = await run_in_threadpool(calculate_fuel_type_analytics, matched_transactions)
+    result = await run_in_threadpool(calculate_fuel_type_analytics, transactions)
     return result
 
 

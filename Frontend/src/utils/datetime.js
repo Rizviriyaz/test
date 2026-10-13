@@ -45,10 +45,18 @@ export function getUAETodayStr() {
     return date.toLocaleDateString("en-CA", { timeZone: UAE_TIMEZONE })
 }
 
-/**
- * Returns UAE date offset by N days as YYYY-MM-DD.
- */
 export function getUAEDateStr(offsetDays = 0) {
     const date = new Date(Date.now() + offsetDays * 86400 * 1000)
     return date.toLocaleDateString("en-CA", { timeZone: UAE_TIMEZONE })
+}
+
+/**
+ * Returns exact start of today in UAE time (00:00:00 UAE, UTC+4) and current timestamp in UNIX seconds.
+ */
+export function getUAETodayBounds() {
+    const todayStr = getUAETodayStr()
+    const fromTimeMs = new Date(`${todayStr}T00:00:00+04:00`).getTime()
+    const from_time = Math.floor(fromTimeMs / 1000)
+    const to_time = Math.floor(Date.now() / 1000)
+    return { from_time, to_time }
 }

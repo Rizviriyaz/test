@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react"
+import { useEffect, useMemo, useState, useCallback, useRef } from "react"
 import { Link } from "react-router-dom"
 import {
     Activity,
@@ -80,6 +80,10 @@ function Dashboard() {
     // Today's verified idle analytics data
     const [idleAnalyticsData, setIdleAnalyticsData] = useState(null)
 
+    // Today's dedicated mileage data (independent of ranking timeframe)
+    const [todayMileageData, setTodayMileageData] = useState(null)
+    const auxSeqRef = useRef(0)
+
     // Mileage ranking state
     const [mileageTimeframe, setMileageTimeframe] = useState("today")
     const [mileageLimit, setMileageLimit] = useState("5")
@@ -120,20 +124,23 @@ function Dashboard() {
         }
     }, [loadVehicles])
 
-    // ─── 2. Load Alerts, Today Trips & Idle Analytics ───────────────────────
+    // ─── 2. Load Alerts, Today Trips, Idle Analytics & Today Mileage ────────
     useEffect(() => {
         let active = true
         async function fetchAuxiliaryData() {
+            const seq = ++auxSeqRef.current
             try {
-                const [alertsRes, tripsRes, idleRes] = await Promise.allSettled([
+                const [alertsRes, tripsRes, idleRes, todayMileageRes] = await Promise.allSettled([
                     getFleetAlertsAnalytics(),
                     getFleetTripsAnalytics({ timeframe: "today" }),
                     getFleetIdleAnalytics({ timeframe: "today" }),
+                    getDashboardMileage("today"),
                 ])
-                if (!active) return
+                if (!active || seq !== auxSeqRef.current) return
                 if (alertsRes.status === "fulfilled") setAlertsData(alertsRes.value)
                 if (tripsRes.status === "fulfilled") setTripsData(tripsRes.value)
                 if (idleRes.status === "fulfilled") setIdleAnalyticsData(idleRes.value)
+                if (todayMileageRes.status === "fulfilled") setTodayMileageData(todayMileageRes.value)
             } catch (err) {
                 console.error("Failed to fetch dashboard auxiliary data:", err)
             }
@@ -217,6 +224,10 @@ function Dashboard() {
         })
     }, [normalizedVehicles, selectedGroup])
 
+    const filteredVehicleIdSet = useMemo(() => {
+        return new Set(filteredVehicles.map(v => String(v.vehicle_id)))
+    }, [filteredVehicles])
+
     // ─── 7. KPI Calculations (Filtered by Global Group) ─────────────────────
     const totalVehiclesCount = filteredVehicles.length
     const movingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "MOVING"), [filteredVehicles])
@@ -229,7 +240,7 @@ function Dashboard() {
     const stoppedCount = stoppedVehicles.length
     const offlineCount = offlineVehicles.length
 
-    // Active Today Calculation
+    // Active Today Calculation (Scaped strictly to Today)
     const activeTodayCount = useMemo(() => {
         const activeIds = new Set()
         // 1. Currently moving or idling
@@ -238,12 +249,18 @@ function Dashboard() {
                 activeIds.add(v.vehicle_id)
             }
         })
-        // 2. Vehicles with distance today from mileageData
-        if (mileageData?.all_units) {
-            mileageData.all_units.forEach(u => {
+        // 2. Vehicles with distance today from todayMileageData
+        const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
+        if (sourceMileage) {
+            sourceMileage.forEach(u => {
                 if (Number(u.mileage || 0) > 0) {
-                    const matched = filteredVehicles.find(v => v.vehicle_id === u.vehicle_id || v.vehicle_name === u.vehicle_name)
-                    if (matched) activeIds.add(matched.vehicle_id)
+                    const vidStr = String(u.vehicle_id)
+                    if (filteredVehicleIdSet.has(vidStr)) {
+                        activeIds.add(u.vehicle_id)
+                    } else {
+                        const matched = filteredVehicles.find(v => v.vehicle_name === u.vehicle_name)
+                        if (matched) activeIds.add(matched.vehicle_id)
+                    }
                 }
             })
         }
@@ -251,37 +268,46 @@ function Dashboard() {
         if (tripsData?.vehicles) {
             tripsData.vehicles.forEach(tv => {
                 if (Number(tv.trip_count || 0) > 0 || Number(tv.gps_mileage_km || 0) > 0) {
-                    const matched = filteredVehicles.find(v => v.vehicle_id === tv.vehicle_id)
-                    if (matched) activeIds.add(matched.vehicle_id)
+                    const vidStr = String(tv.vehicle_id)
+                    if (filteredVehicleIdSet.has(vidStr)) activeIds.add(tv.vehicle_id)
                 }
             })
         }
         return activeIds.size
-    }, [filteredVehicles, mileageData, tripsData])
+    }, [filteredVehicles, filteredVehicleIdSet, todayMileageData, mileageData, mileageTimeframe, tripsData])
 
-    // Filtered Alerts Count
+    // Filtered Alerts Count (Accurate fleet-wide counts supporting secondary groups)
     const alertsCount = useMemo(() => {
-        if (!alertsData?.alerts) return 0
-        if (selectedGroup === "ALL") return alertsData.total_alerts || alertsData.alerts.length
+        if (!alertsData) return 0
+        if (selectedGroup === "ALL") return alertsData.total_alerts || alertsData.alerts?.length || 0
+        if (alertsData.by_vehicle && filteredVehicles.length > 0) {
+            return filteredVehicles.reduce((sum, v) => sum + (alertsData.by_vehicle[String(v.vehicle_id)] || 0), 0)
+        }
+        if (alertsData.by_group) {
+            const grpKey = Object.keys(alertsData.by_group).find(k => k.trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+            if (grpKey) return alertsData.by_group[grpKey]
+        }
+        if (!alertsData.alerts) return 0
         return alertsData.alerts.filter(a => {
             const grp = (a.group || "").trim().toLowerCase()
             return grp === selectedGroup.trim().toLowerCase()
         }).length
-    }, [alertsData, selectedGroup])
+    }, [alertsData, selectedGroup, filteredVehicles])
 
-    // ─── 8. Today's Fleet Activity Metrics (Filtered by Global Group) ───────
+    // ─── 8. Today's Fleet Activity Metrics (Scaped to Today and filtered by Global Group) ───────
     const todayFleetActivity = useMemo(() => {
-        // Distance
+        // Distance strictly for today
         let distanceKm = 0
-        if (mileageData?.all_units) {
+        const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
+        if (sourceMileage) {
             const filteredUnits = selectedGroup === "ALL"
-                ? mileageData.all_units
-                : mileageData.all_units.filter(u => (u.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase() || (Array.isArray(u.groups) && u.groups.includes(selectedGroup)))
+                ? sourceMileage
+                : sourceMileage.filter(u => filteredVehicleIdSet.has(String(u.vehicle_id)))
             distanceKm = filteredUnits.reduce((sum, u) => sum + Number(u.mileage || 0), 0)
         } else if (tripsData?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
                 ? tripsData.vehicles
-                : tripsData.vehicles.filter(tv => (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+                : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
             distanceKm = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.gps_mileage_km || 0), 0)
         }
 
@@ -290,38 +316,47 @@ function Dashboard() {
         if (tripsData?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
                 ? tripsData.vehicles
-                : tripsData.vehicles.filter(tv => (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+                : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
             trips = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.trip_count || 0), 0)
         } else {
             trips = activeTodayCount
         }
 
-        // Driving time
+        // Driving time (distinguish measured vs estimated)
         let drivingMinutes = 0
+        let hasMeasuredDriving = false
+        let isEstimatedDriving = false
+
         if (tripsData?.vehicles) {
             tripsData.vehicles.forEach(tv => {
-                if (selectedGroup === "ALL" || (tv.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
-                    if (tv.trips && Array.isArray(tv.trips)) {
+                if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(tv.vehicle_id))) {
+                    if (Array.isArray(tv.trips) && tv.trips.length > 0) {
                         tv.trips.forEach(t => {
                             drivingMinutes += Number(t.duration_minutes || 0)
                         })
-                    } else if (tv.gps_mileage_km && tv.avg_speed_kmh) {
-                        drivingMinutes += Math.round((tv.gps_mileage_km / tv.avg_speed_kmh) * 60)
+                        hasMeasuredDriving = true
+                    } else if (tv.gps_mileage_km && tv.avg_speed_kmh && Number(tv.avg_speed_kmh) > 0) {
+                        drivingMinutes += Math.round((Number(tv.gps_mileage_km) / Number(tv.avg_speed_kmh)) * 60)
+                        hasMeasuredDriving = true
                     }
                 }
             })
         }
-        if (drivingMinutes === 0 && distanceKm > 0) {
+        if (!hasMeasuredDriving && distanceKm > 0) {
             drivingMinutes = Math.round((distanceKm / 45) * 60)
+            isEstimatedDriving = true
         }
 
-        // Idle time from verified historical idle data for today
+        // Idle time from verified historical idle data for today (correct field names)
         let idleMinutes = 0
         if (idleAnalyticsData?.by_vehicle) {
             const matchingVehicles = selectedGroup === "ALL"
                 ? idleAnalyticsData.by_vehicle
-                : idleAnalyticsData.by_vehicle.filter(v => (v.group_name || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
-            const totalIdleSecs = matchingVehicles.reduce((sum, v) => sum + Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
+                : idleAnalyticsData.by_vehicle.filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
+            const totalIdleSecs = matchingVehicles.reduce(
+                (sum, v) => sum + Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0)),
+                0
+            )
             idleMinutes = Math.round(totalIdleSecs / 60)
         } else if (idleAnalyticsData?.summary?.total_idle_seconds !== undefined && selectedGroup === "ALL") {
             idleMinutes = Math.round(Number(idleAnalyticsData.summary.total_idle_seconds || 0) / 60)
@@ -335,13 +370,17 @@ function Dashboard() {
             return `${h}h ${m}m`
         }
 
+        const drivingDisplay = isEstimatedDriving
+            ? `~${formatHoursMins(drivingMinutes)} (est.)`
+            : formatHoursMins(drivingMinutes)
+
         return {
             distance: `${Math.round(distanceKm).toLocaleString()} km`,
             trips: trips > 0 ? trips.toLocaleString() : "—",
-            driving: formatHoursMins(drivingMinutes),
+            driving: drivingDisplay,
             idle: formatHoursMins(idleMinutes),
         }
-    }, [mileageData, tripsData, idleAnalyticsData, selectedGroup, activeTodayCount])
+    }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet, activeTodayCount])
 
     // ─── 9. Idle Vehicles Requiring Attention (Historical continuous idle >= 5 mins / 300s today) ──────
     const attentionVehicles = useMemo(() => {
@@ -350,11 +389,11 @@ function Dashboard() {
 
         if (idleAnalyticsData.events && Array.isArray(idleAnalyticsData.events) && idleAnalyticsData.events.length > 0) {
             idleAnalyticsData.events.forEach(ev => {
-                const duration = Number(ev.duration_seconds || 0)
+                const duration = Number(ev.duration ?? ev.duration_seconds ?? 0)
                 if (duration >= 300) {
                     const vid = ev.vehicle_id
                     const grp = ev.group_name || "General Fleet"
-                    if (selectedGroup === "ALL" || grp.trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
+                    if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(vid))) {
                         const existing = vehicleAttentionMap.get(vid)
                         if (!existing || duration > existing.max_duration) {
                             vehicleAttentionMap.set(vid, {
@@ -370,10 +409,10 @@ function Dashboard() {
             })
         } else if (idleAnalyticsData.by_vehicle && Array.isArray(idleAnalyticsData.by_vehicle)) {
             idleAnalyticsData.by_vehicle.forEach(v => {
-                const maxDuration = Number(v.max_idle_seconds || v.idle_seconds || 0)
+                const maxDuration = Number(v.longest_idle_seconds ?? v.max_idle_seconds ?? v.total_idle_seconds ?? v.idle_seconds ?? 0)
                 if (maxDuration >= 300) {
                     const grp = v.group_name || "General Fleet"
-                    if (selectedGroup === "ALL" || grp.trim().toLowerCase() === selectedGroup.trim().toLowerCase()) {
+                    if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(v.vehicle_id))) {
                         vehicleAttentionMap.set(v.vehicle_id, {
                             vehicle_id: v.vehicle_id,
                             vehicle_name: v.vehicle_name || `Vehicle #${v.vehicle_id}`,
@@ -389,7 +428,7 @@ function Dashboard() {
         return Array.from(vehicleAttentionMap.values())
             .sort((a, b) => b.idle_duration - a.idle_duration)
             .slice(0, 5)
-    }, [idleAnalyticsData, selectedGroup])
+    }, [idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
 
     // ─── 10. Top Vehicles by Mileage (Filtered by Group & Timeframe) ────────
     const mileageUnitsSource = useMemo(() => {
@@ -486,11 +525,11 @@ function Dashboard() {
                     const grpVehs = idleAnalyticsData.by_vehicle.filter(v =>
                         (v.group_name || "").trim().toLowerCase() === groupKey
                     )
-                    totalIdleSecs = grpVehs.reduce((sum, v) => sum + Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
+                    totalIdleSecs = grpVehs.reduce((sum, v) => sum + Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
                 } else if (idleAnalyticsData?.by_group) {
                     const grp = idleAnalyticsData.by_group.find(g => (g.group_name || "").trim().toLowerCase() === groupKey)
                     if (grp) {
-                        totalIdleSecs = Number(grp.total_idle_seconds || (grp.total_idle_hours ? grp.total_idle_hours * 3600 : 0))
+                        totalIdleSecs = Number(grp.total_idle_seconds ?? (grp.total_idle_hours ? grp.total_idle_hours * 3600 : 0))
                     }
                 }
                 const idleMins = Math.round(totalIdleSecs / 60)
@@ -501,11 +540,10 @@ function Dashboard() {
             })
         } else {
             if (idleAnalyticsData?.by_vehicle) {
-                const selKey = selectedGroup.trim().toLowerCase()
                 return idleAnalyticsData.by_vehicle
-                    .filter(v => (v.group_name || "").trim().toLowerCase() === selKey)
+                    .filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
                     .map(v => {
-                        const secs = Number(v.idle_seconds || (v.idle_hours ? v.idle_hours * 3600 : 0))
+                        const secs = Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0))
                         return {
                             name: v.vehicle_name,
                             value: Math.round(secs / 60),
@@ -518,7 +556,7 @@ function Dashboard() {
             }
             return []
         }
-    }, [selectedGroup, availableGroups, idleAnalyticsData])
+    }, [selectedGroup, availableGroups, idleAnalyticsData, filteredVehicleIdSet])
 
     // ─── Selected Vehicle Object for Drawer ─────────────────────────────────
     const selectedVehicle = useMemo(() => {

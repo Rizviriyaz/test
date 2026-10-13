@@ -21,7 +21,7 @@ import {
     FileText,
 } from "lucide-react"
 import { getVehicleEfficiencyList, getVehicleTrips } from "../../api/fleetApi"
-import { formatUAETime } from "../../utils/datetime"
+import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import VehicleStatusBadge from "../Fuel/VehicleStatusBadge"
 
 export default function VehicleDetailDrawer({ vehicle, onClose }) {
@@ -38,14 +38,19 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
             try {
                 setLoadingFuel(true)
                 const plate = vehicle.vehicle_name || vehicle.name || vehicle.plate || vehicle.plate_number || ""
+                const vidNum = Number(vehicle.vehicle_id || vehicle.id)
                 const res = await getVehicleEfficiencyList({
                     vehicle_identifier: plate,
                     page: 1,
-                    page_size: 5,
+                    page_size: 10,
                 })
                 if (!active) return
                 if (res?.data && res.data.length > 0) {
-                    setFuelData(res.data[0])
+                    const matchedRecord = res.data.find(item =>
+                        (item.wialon_unit_id && Number(item.wialon_unit_id) === vidNum) ||
+                        (item.vehicle_identifier && plate && item.vehicle_identifier.trim().toLowerCase() === plate.trim().toLowerCase())
+                    )
+                    setFuelData(matchedRecord || null)
                 } else {
                     setFuelData(null)
                 }
@@ -62,7 +67,8 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
             if (!vid) return
             try {
                 setLoadingTrips(true)
-                const res = await getVehicleTrips(vid, { hours: 24 })
+                const { from_time, to_time } = getUAETodayBounds()
+                const res = await getVehicleTrips(vid, { from_time, to_time })
                 if (!active) return
                 setTripsData(res)
             } catch (err) {
@@ -319,7 +325,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                     </h3>
                     <div className="grid grid-cols-2 gap-2">
                         <Link
-                            to={`/tracking?vehicle=${encodeURIComponent(unitId)}`}
+                            to={`/tracking?vehicleId=${encodeURIComponent(unitId)}`}
                             className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 hover:border-slate-300 transition-colors shadow-2xs"
                         >
                             <span>Live Tracking</span>

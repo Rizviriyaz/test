@@ -16,11 +16,19 @@ function Tracking() {
     const [vehicles, setVehicles] = useState([])
 
     const [selectedVehicleId, setSelectedVehicleId] = useState(() => {
-        const param = searchParams.get("vehicleId") || searchParams.get("v")
+        const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
         if (!param) return null
         const numeric = Number(param)
         return Number.isNaN(numeric) ? param : numeric
     })
+
+    useEffect(() => {
+        const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
+        if (param) {
+            const numeric = Number(param)
+            setSelectedVehicleId(Number.isNaN(numeric) ? param : numeric)
+        }
+    }, [searchParams])
 
     const [searchTerm, setSearchTerm] = useState("")
     const [statusFilter, setStatusFilter] = useState("ALL")

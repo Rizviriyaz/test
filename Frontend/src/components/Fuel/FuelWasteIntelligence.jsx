@@ -1,6 +1,7 @@
 import { useState, useMemo } from "react"
 import {
     AlertTriangle,
+    AlertCircle,
     Flame,
     Clock,
     Zap,
@@ -46,6 +47,7 @@ const CATEGORY_TABS = [
 export default function FuelWasteIntelligence({
     wasteData,
     loading,
+    error,
     onSelectVehicle,
     idleThreshold = 5.0,
     onIdleThresholdChange,
@@ -79,6 +81,28 @@ export default function FuelWasteIntelligence({
                     <div className="h-16 bg-slate-100 rounded-xl" />
                     <div className="h-16 bg-slate-100 rounded-xl" />
                 </div>
+            </div>
+        )
+    }
+
+    if (error) {
+        return (
+            <div className="mb-8 rounded-3xl border border-rose-200 bg-rose-50/50 p-6 shadow-xs text-center">
+                <AlertCircle className="mx-auto h-8 w-8 text-rose-500 mb-2" />
+                <h3 className="text-sm font-bold text-rose-900">Fuel Waste Intelligence Unavailable</h3>
+                <p className="text-xs text-rose-600 mt-1 max-w-md mx-auto">{error}</p>
+            </div>
+        )
+    }
+
+    if (!wasteData) {
+        return (
+            <div className="mb-8 rounded-3xl border border-slate-200/80 bg-slate-50/50 p-6 shadow-xs text-center">
+                <Info className="mx-auto h-8 w-8 text-slate-400 mb-2" />
+                <h3 className="text-sm font-bold text-slate-700">No Fuel Waste Report Available</h3>
+                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+                    Select a date period or adjust filters to generate fuel waste and anomaly analytics.
+                </p>
             </div>
         )
     }

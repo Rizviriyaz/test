@@ -69,6 +69,8 @@ export default function FuelPerformance() {
     // Fuel Waste & Anomalies
     const [wasteData, setWasteData] = useState(null)
     const [loadingWaste, setLoadingWaste] = useState(true)
+    const [wasteError, setWasteError] = useState(null)
+    const wasteRequestIdRef = useRef(0)
 
     // Rankings & Outliers State
     const [sortBy, setSortBy] = useState("litres")
@@ -119,18 +121,27 @@ export default function FuelPerformance() {
 
     // 2. Fetch Fuel Waste & Anomaly Intelligence
     const loadWasteData = async () => {
+        const requestId = ++wasteRequestIdRef.current
         try {
             setLoadingWaste(true)
+            setWasteError(null)
             const res = await getFuelWaste({
                 ...queryParams,
                 idle_rate_lph: idleRate,
                 idle_threshold_hours: idleThreshold,
             })
+            if (requestId !== wasteRequestIdRef.current) return
             setWasteData(res)
+            setWasteError(null)
         } catch (err) {
+            if (requestId !== wasteRequestIdRef.current) return
             console.error("Waste intelligence load error:", err)
+            setWasteData(null)
+            setWasteError(err.message || "Failed to load fuel waste intelligence report.")
         } finally {
-            setLoadingWaste(false)
+            if (requestId === wasteRequestIdRef.current) {
+                setLoadingWaste(false)
+            }
         }
     }
 
@@ -419,6 +430,7 @@ export default function FuelPerformance() {
                         <FuelWasteIntelligence
                             wasteData={wasteData}
                             loading={loadingWaste}
+                            error={wasteError}
                             onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
                             idleThreshold={idleThreshold}
                             onIdleThresholdChange={setIdleThreshold}

@@ -16,6 +16,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from app.utils.datetime_helpers import to_iso_uae, now_timestamp
 from app.performance_diagnostics import log_cache_state, log_data_window, map_with_request_context, request_trace_id
+from collections import defaultdict
 from typing import Dict, List, Any, Optional
 
 from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups
@@ -944,11 +945,23 @@ def get_fleet_alerts_analytics() -> Dict[str, Any]:
     warning_count  = sum(1 for a in alerts if a["severity"] == "WARNING")
     info_count     = sum(1 for a in alerts if a["severity"] == "INFO")
 
+    by_vehicle: Dict[str, int] = defaultdict(int)
+    by_group: Dict[str, int] = defaultdict(int)
+    for a in alerts:
+        vid = str(a.get("vehicle_id") or "")
+        if vid:
+            by_vehicle[vid] += 1
+        grp = str(a.get("group") or "").strip()
+        if grp:
+            by_group[grp] += 1
+
     result = {
         "total_alerts": len(alerts),
         "critical_count": critical_count,
         "warning_count": warning_count,
         "info_count": info_count,
+        "by_vehicle": dict(by_vehicle),
+        "by_group": dict(by_group),
         "alerts": alerts[:40]
     }
 
