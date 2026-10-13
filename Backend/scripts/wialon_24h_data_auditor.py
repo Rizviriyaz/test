@@ -288,7 +288,9 @@ def run_24h_audit():
         elif ign_sens_id and ign_sens_id in (raw_unit.get("sensors") or {}):
             curr_ign = ((raw_unit.get("sensors") or {})[ign_sens_id].get("value") == 1)
 
-        is_offline = v_audit["seconds_since_last_msg"] > 3600
+        conn_offline_threshold = int(os.getenv("CONN_DELAYED_SECONDS", "43200"))
+        is_offline = v_audit["seconds_since_last_msg"] > conn_offline_threshold
+
         
         if curr_speed > 0:
             calc_st = "MOVING"

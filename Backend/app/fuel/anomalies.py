@@ -17,13 +17,34 @@ def parse_tx_datetime(date_str: Any) -> Optional[datetime]:
     """Parse transaction date string to datetime."""
     if not date_str:
         return None
+    if isinstance(date_str, datetime):
+        return date_str.replace(tzinfo=None) if date_str.tzinfo is not None else date_str
+    if hasattr(date_str, "year") and hasattr(date_str, "month") and hasattr(date_str, "day"):
+        from datetime import date
+        if isinstance(date_str, date) and not isinstance(date_str, datetime):
+            return datetime.combine(date_str, datetime.min.time())
     s = str(date_str).strip()
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+    if not s:
+        return None
+
+    # Handle standard ISO formats (including 2026-08-03T10:00:00 and offsets)
+    iso_clean = s.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(iso_clean)
+        return parsed.replace(tzinfo=None) if parsed.tzinfo is not None else parsed
+    except (ValueError, TypeError):
+        pass
+
+    # Normalized formats with T replaced by space
+    norm_s = s[:19].replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y"):
         try:
-            return datetime.strptime(s[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S" if " " in s[:19] else "%Y-%m-%d")
-        except ValueError:
+            return datetime.strptime(norm_s, fmt)
+        except (ValueError, TypeError):
             pass
+
     return None
+
 
 
 def detect_fuel_waste_and_anomalies(
@@ -114,11 +135,31 @@ def detect_fuel_waste_and_anomalies(
         if v_status != "matched":
             continue
 
-        # Sort transactions chronologically
+        # Sort transactions chronologically - strictly using successfully parsed datetimes
         valid_date_txns = []
         for t in v_txns:
             dt = parse_tx_datetime(t.get("transaction_date"))
-            valid_date_txns.append((dt or datetime.min, t))
+            if dt is not None:
+                valid_date_txns.append((dt, t))
+            else:
+                data_quality_issues_count += 1
+                anomalies.append(
+                    FuelAnomalyItem(
+                        id=f"invalid-dt-{t.get('id') or vid}",
+                        anomaly_type="invalid_transaction_date",
+                        severity="warning",
+                        finding_type="measured",
+                        vehicle_identifier=vid,
+                        transaction_id=t.get("id"),
+                        transaction_date=str(t.get("transaction_date", "")),
+                        title="Unparseable Transaction Timestamp",
+                        description=f"Transaction timestamp '{t.get('transaction_date')}' could not be parsed.",
+                        recorded_value=str(t.get("transaction_date", "")),
+                        threshold_or_baseline="Valid ISO-8601 or YYYY-MM-DD format",
+                        details={"raw_value": str(t.get("transaction_date", ""))},
+                    )
+                )
+
         valid_date_txns.sort(key=lambda x: x[0])
 
         # Average litres for this vehicle
@@ -165,7 +206,7 @@ def detect_fuel_waste_and_anomalies(
             seen_fingerprints.add(fp)
 
             # B. Rapid Consecutive Refuels (< 24 hours)
-            if last_dt and dt != datetime.min and (dt - last_dt) < timedelta(hours=24) and (dt - last_dt) > timedelta(seconds=1):
+            if last_dt and (dt - last_dt) < timedelta(hours=24) and (dt - last_dt) > timedelta(seconds=1):
                 delta_hrs = (dt - last_dt).total_seconds() / 3600.0
                 refuel_anomalies_count += 1
                 last_l = float(last_tx.get("litres") or 0) if last_tx else 0.0
@@ -242,9 +283,8 @@ def detect_fuel_waste_and_anomalies(
                     )
                 )
 
-            if dt != datetime.min:
-                last_dt = dt
-                last_tx = tx
+            last_dt = dt
+            last_tx = tx
             if odo is not None and odo > 0:
                 last_odo = odo
 

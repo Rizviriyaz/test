@@ -585,14 +585,13 @@ async def get_fleet_fuel_efficiency(
 
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
 
-    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
     telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     result = await run_in_threadpool(
         calculate_fleet_efficiency,
-        matched_transactions,
+        transactions,
         telematics_map,
         wialon_units,
         idle_rate_lph,
@@ -659,14 +658,12 @@ async def get_vehicles_fuel_efficiency(
 
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
-    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
     telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     items = await run_in_threadpool(
         calculate_vehicle_efficiency_records,
-        matched_transactions,
+        transactions,
         telematics_map,
         wialon_units,
         idle_rate_lph,
@@ -787,13 +784,26 @@ async def get_vehicle_fuel_detail(
         "fuel_type": None,
     }
 
-    raw_records, total_txns = await run_in_threadpool(
-        get_fuel_transactions_list,
-        filters,
-        500,
-        0,
-        bearer_token,
-    )
+    all_raw_records: List[Dict[str, Any]] = []
+    page_limit = 100
+    offset = 0
+
+    while True:
+        page_records, total_count = await run_in_threadpool(
+            get_fuel_transactions_list,
+            filters,
+            page_limit,
+            offset,
+            bearer_token,
+        )
+        if not page_records:
+            break
+        all_raw_records.extend(page_records)
+        offset += len(page_records)
+        if offset >= total_count or len(page_records) < page_limit:
+            break
+
+    raw_records = all_raw_records
     tx_items = [FuelTransactionItem(**r) for r in raw_records]
 
     eff_from, eff_to = _resolve_effective_dates(raw_records, date_from, date_to)
@@ -924,14 +934,12 @@ async def get_fuel_efficiency_trend(
 
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_transactions = _filter_wialon_matched_transactions(transactions, wialon_units)
-
-    eff_from, eff_to = _resolve_effective_dates(matched_transactions, date_from, date_to)
+    eff_from, eff_to = _resolve_effective_dates(transactions, date_from, date_to)
     telematics_map = await run_in_threadpool(get_fleet_telematics_map, eff_from, eff_to, sid)
 
     result = await run_in_threadpool(
         calculate_efficiency_trend,
-        matched_transactions,
+        transactions,
         telematics_map,
         wialon_units,
         group_clean,

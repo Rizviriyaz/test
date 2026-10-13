@@ -54,9 +54,68 @@ def _round2(val: Optional[Decimal]) -> Optional[float]:
     return float(val.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
+def _normalize_telematics_entry(t_data: Any) -> Dict[str, Any]:
+    """
+    Safely normalizes telematics entry for a vehicle, supporting both
+    dictionary data and legacy/unit-test float/int mileage values.
+    """
+    if t_data is None:
+        return {
+            "mileage_km": 0.0,
+            "driving_seconds": 0,
+            "idle_seconds": 0,
+            "engine_hours_seconds": 0,
+            "driving_hours": 0.0,
+            "idle_hours": 0.0,
+            "engine_hours": 0.0,
+            "has_telemetry": False,
+        }
+    if isinstance(t_data, (int, float, Decimal)):
+        dist = float(t_data)
+        return {
+            "mileage_km": dist,
+            "driving_seconds": 0,
+            "idle_seconds": 0,
+            "engine_hours_seconds": 0,
+            "driving_hours": 0.0,
+            "idle_hours": 0.0,
+            "engine_hours": 0.0,
+            "has_telemetry": dist > 0,
+        }
+    if isinstance(t_data, dict):
+        dist = float(t_data.get("mileage_km", 0.0) or 0.0)
+        drv_sec = int(t_data.get("driving_seconds", 0) or 0)
+        idle_sec = int(t_data.get("idle_seconds", 0) or 0)
+        eng_sec = int(t_data.get("engine_hours_seconds", 0) or 0)
+        drv_hrs = float(t_data.get("driving_hours", 0.0) or (drv_sec / 3600.0 if drv_sec else 0.0))
+        idle_hrs = float(t_data.get("idle_hours", 0.0) or (idle_sec / 3600.0 if idle_sec else 0.0))
+        eng_hrs = float(t_data.get("engine_hours", 0.0) or (eng_sec / 3600.0 if eng_sec else 0.0))
+        has_tel = bool(t_data.get("has_telemetry", False)) or dist > 0 or eng_sec > 0 or eng_hrs > 0
+        return {
+            "mileage_km": dist,
+            "driving_seconds": drv_sec,
+            "idle_seconds": idle_sec,
+            "engine_hours_seconds": eng_sec,
+            "driving_hours": drv_hrs,
+            "idle_hours": idle_hrs,
+            "engine_hours": eng_hrs,
+            "has_telemetry": has_tel,
+        }
+    return {
+        "mileage_km": 0.0,
+        "driving_seconds": 0,
+        "idle_seconds": 0,
+        "engine_hours_seconds": 0,
+        "driving_hours": 0.0,
+        "idle_hours": 0.0,
+        "engine_hours": 0.0,
+        "has_telemetry": False,
+    }
+
+
 def calculate_fleet_efficiency(
     transactions: List[Dict[str, Any]],
-    telematics_map: Dict[str, Dict[str, Any]],
+    telematics_map: Dict[str, Any],
     wialon_units: List[Dict[str, Any]],
     idle_rate_lph: float = 2.0,
 ) -> FleetEfficiencyResponse:
@@ -114,12 +173,13 @@ def calculate_fleet_efficiency(
         if matched and not matched.get("ambiguous"):
             matched_vehicle_count += 1
             w_name = str(matched.get("nm", "")).strip()
-            t_data = telematics_map.get(w_name, {})
-            dist_km = float(t_data.get("mileage_km", 0.0))
+            raw_t = telematics_map.get(w_name) if isinstance(telematics_map, dict) else None
+            t_data = _normalize_telematics_entry(raw_t)
+            dist_km = t_data["mileage_km"]
             
-            driving_sec = int(t_data.get("driving_seconds", 0))
-            idle_sec = int(t_data.get("idle_seconds", 0))
-            engine_sec = int(t_data.get("engine_hours_seconds", 0))
+            driving_sec = t_data["driving_seconds"]
+            idle_sec = t_data["idle_seconds"]
+            engine_sec = t_data["engine_hours_seconds"]
 
             if dist_km > 0 or engine_sec > 0:
                 vehicles_with_distance += 1
@@ -203,7 +263,7 @@ def calculate_fleet_efficiency(
 
 def calculate_vehicle_efficiency_records(
     transactions: List[Dict[str, Any]],
-    telematics_map: Dict[str, Dict[str, Any]],
+    telematics_map: Dict[str, Any],
     wialon_units: List[Dict[str, Any]],
     idle_rate_lph: float = 2.0,
 ) -> List[VehicleEfficiencyItem]:
@@ -232,19 +292,72 @@ def calculate_vehicle_efficiency_records(
         v_count = f_data["count"]
         avg_price = (v_cost / v_litres) if v_litres > 0 else 0.0
 
-        if not matched or matched.get("ambiguous"):
-            # Exclude unmatched/ambiguous vehicles from displayed efficiency records per strict Wialon matching rule
+        if not matched:
+            results.append(
+                VehicleEfficiencyItem(
+                    vehicle_identifier=vid,
+                    wialon_unit_id=None,
+                    wialon_unit_name=None,
+                    litres=v_litres,
+                    total_cost=v_cost,
+                    transaction_count=v_count,
+                    distance_km=None,
+                    driving_duration_hours=None,
+                    idle_duration_hours=None,
+                    engine_hours=None,
+                    idle_rate_lph=idle_rate_lph,
+                    estimated_idle_fuel_litres=None,
+                    estimated_idle_cost=None,
+                    estimated_driving_fuel_litres=None,
+                    estimated_idle_percentage=None,
+                    estimated_driving_percentage=None,
+                    fuel_efficiency_l_per_100km=None,
+                    fuel_cost_per_km=None,
+                    status="not_tracked",
+                    estimation_status="unavailable",
+                    quality_warnings=["Vehicle identifier not found in Wialon unit registry."],
+                )
+            )
+            continue
+
+        if matched.get("ambiguous"):
+            results.append(
+                VehicleEfficiencyItem(
+                    vehicle_identifier=vid,
+                    wialon_unit_id=None,
+                    wialon_unit_name=None,
+                    litres=v_litres,
+                    total_cost=v_cost,
+                    transaction_count=v_count,
+                    distance_km=None,
+                    driving_duration_hours=None,
+                    idle_duration_hours=None,
+                    engine_hours=None,
+                    idle_rate_lph=idle_rate_lph,
+                    estimated_idle_fuel_litres=None,
+                    estimated_idle_cost=None,
+                    estimated_driving_fuel_litres=None,
+                    estimated_idle_percentage=None,
+                    estimated_driving_percentage=None,
+                    fuel_efficiency_l_per_100km=None,
+                    fuel_cost_per_km=None,
+                    status="ambiguous",
+                    estimation_status="unavailable",
+                    quality_warnings=["Multiple Wialon units matched identifier. Cannot resolve distance."],
+                )
+            )
             continue
 
         w_id = int(matched["id"])
         w_name = str(matched.get("nm", "")).strip()
-        t_data = telematics_map.get(w_name, {})
+        raw_t = telematics_map.get(w_name) if isinstance(telematics_map, dict) else None
+        t_data = _normalize_telematics_entry(raw_t)
         
-        dist_km = float(t_data.get("mileage_km", 0.0))
-        driving_hrs = float(t_data.get("driving_hours", 0.0))
-        idle_hrs = float(t_data.get("idle_hours", 0.0))
-        eng_hrs = float(t_data.get("engine_hours", 0.0))
-        has_tel = t_data.get("has_telemetry", False)
+        dist_km = t_data["mileage_km"]
+        driving_hrs = t_data["driving_hours"]
+        idle_hrs = t_data["idle_hours"]
+        eng_hrs = t_data["engine_hours"]
+        has_tel = t_data["has_telemetry"]
 
         if not has_tel and dist_km <= 0 and eng_hrs <= 0:
             results.append(
@@ -401,7 +514,7 @@ def paginate_and_sort_vehicle_efficiency(
 
 def calculate_efficiency_trend(
     transactions: List[Dict[str, Any]],
-    telematics_map: Dict[str, Dict[str, Any]],
+    telematics_map: Dict[str, Any],
     wialon_units: List[Dict[str, Any]],
     group_by: str = "day",
 ) -> EfficiencyTrendResponse:
@@ -436,8 +549,9 @@ def calculate_efficiency_trend(
             m = match_fuel_vehicle_to_wialon(vid, wialon_units)
             if m and not m.get("ambiguous"):
                 w_name = str(m.get("nm", "")).strip()
-                t_info = telematics_map.get(w_name, {})
-                dist = float(t_info.get("mileage_km", 0.0))
+                raw_t = telematics_map.get(w_name) if isinstance(telematics_map, dict) else None
+                t_info = _normalize_telematics_entry(raw_t)
+                dist = t_info["mileage_km"]
                 if dist > 0:
                     tracked_vids.add(vid)
                     total_tracked_dist += Decimal(str(dist))

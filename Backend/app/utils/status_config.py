@@ -9,4 +9,6 @@ def _positive_int_from_env(name: str, default: int) -> int:
         return default
 
 
-CONN_DELAYED_SECONDS = _positive_int_from_env("CONN_DELAYED_SECONDS", 3600)
+# Default offline threshold: 12 hours (12 * 3600 = 43200 seconds)
+CONN_DELAYED_SECONDS = _positive_int_from_env("CONN_DELAYED_SECONDS", 43200)
+
