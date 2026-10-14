@@ -14,10 +14,12 @@ import {
     Users,
     MapPin,
     ArrowUpRight,
+    ExternalLink,
 } from "lucide-react"
 
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
+import FleetStatusBadge from "./Common/FleetStatusBadge"
 
 export function isValidCoordinate(lat, lng) {
     if (lat === null || lat === undefined || lng === null || lng === undefined) return false
@@ -39,7 +41,7 @@ function getMarkerIcon(status, selected = false) {
 
     const color = colors[status] || "#64748b"
     const size = selected ? 24 : 18
-    const border = selected ? 4 : 3
+    const border = selected ? 3 : 2.5
     const anchor = size / 2
 
     return L.divIcon({
@@ -60,10 +62,19 @@ function getMarkerIcon(status, selected = false) {
                                 style="
                                     position: absolute;
                                     inset: -6px;
-                                    border: 2px solid ${color};
+                                    border: 2px solid #33758F;
                                     border-radius: 9999px;
-                                    opacity: 0.45;
+                                    opacity: 0.7;
                                     animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+                                "
+                            ></div>
+                            <div
+                                style="
+                                    position: absolute;
+                                    inset: -4px;
+                                    border: 2px solid #33758F;
+                                    border-radius: 9999px;
+                                    box-shadow: 0 0 6px rgba(51, 117, 143, 0.5);
                                 "
                             ></div>
                         `
@@ -79,7 +90,7 @@ function getMarkerIcon(status, selected = false) {
                                     inset: -4px;
                                     border: 2px solid ${color};
                                     border-radius: 9999px;
-                                    opacity: 0.25;
+                                    opacity: 0.3;
                                 "
                             ></div>
                         `
@@ -95,7 +106,7 @@ function getMarkerIcon(status, selected = false) {
                         border: ${border}px solid white;
                         border-radius: 9999px;
                         box-sizing: border-box;
-                        box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+                        box-shadow: 0 2px 6px rgba(0,0,0,0.3);
                     "
                 ></div>
             </div>
@@ -163,7 +174,7 @@ function FleetMapControls({ vehicles }) {
                 type="button"
                 onClick={resetView}
                 title="Reset map view to fit all vehicles"
-                className="rounded-lg border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur-xs transition hover:bg-slate-50 active:scale-95"
+                className="rounded-lg border border-slate-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs backdrop-blur-xs transition hover:border-[#33758F] hover:text-[#33758F] hover:bg-white active:scale-95 cursor-pointer"
             >
                 Fit All Units
             </button>
@@ -176,33 +187,18 @@ function formatDriver(vehicle) {
     return driverId ? String(driverId) : "Unassigned"
 }
 
-function formatStatusBadge(status) {
-    switch (String(status || "").toUpperCase()) {
-        case "MOVING":
-            return { label: "Moving", bg: "bg-emerald-50", text: "text-emerald-700", border: "border-emerald-200", dot: "bg-emerald-500" }
-        case "IDLING":
-            return { label: "Idling", bg: "bg-orange-50", text: "text-orange-700", border: "border-orange-200", dot: "bg-orange-500" }
-        case "STOPPED":
-            return { label: "Stopped", bg: "bg-slate-100", text: "text-slate-600", border: "border-slate-200", dot: "bg-slate-400" }
-        case "OFFLINE":
-            return { label: "Offline", bg: "bg-red-50", text: "text-red-700", border: "border-red-200", dot: "bg-red-500" }
-        default:
-            return { label: "Unknown", bg: "bg-slate-50", text: "text-slate-500", border: "border-slate-200", dot: "bg-slate-400" }
-    }
-}
-
-function VehiclePopupCard({ vehicle }) {
-    const statusInfo = formatStatusBadge(vehicle.status)
+function VehiclePopupCard({ vehicle, onInspect }) {
+    const statusStr = String(vehicle.status || (vehicle.is_offline ? "OFFLINE" : "STOPPED")).toUpperCase()
     const driverName = formatDriver(vehicle)
     const hasCoords = isValidCoordinate(vehicle.latitude, vehicle.longitude)
 
     return (
-        <div className="p-3.5 text-slate-900 select-none min-w-[220px]">
+        <div className="p-3.5 text-slate-900 select-none min-w-[230px]">
             {/* Header */}
             <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-2.5">
                 <div className="min-w-0">
                     <div className="flex items-center gap-1.5">
-                        <Truck className="h-3.5 w-3.5 text-[#1C5E7A] shrink-0" />
+                        <Truck className="h-3.5 w-3.5 text-[#33758F] shrink-0" />
                         <h4 className="truncate text-sm font-bold text-slate-900 leading-tight">
                             {vehicle.vehicle_name || `Unit #${vehicle.vehicle_id}`}
                         </h4>
@@ -212,17 +208,14 @@ function VehiclePopupCard({ vehicle }) {
                     </p>
                 </div>
 
-                <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold border ${statusInfo.bg} ${statusInfo.text} ${statusInfo.border} shrink-0`}>
-                    <span className={`h-1.5 w-1.5 rounded-full ${statusInfo.dot}`} />
-                    {statusInfo.label}
-                </span>
+                <FleetStatusBadge status={statusStr} size="xs" />
             </div>
 
             {/* Metrics 2x2 Grid */}
             <div className="mt-2.5 grid grid-cols-2 gap-2 text-xs">
                 {/* Speed */}
                 <div className="rounded-lg bg-slate-50 border border-slate-100 p-2">
-                    <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold text-slate-400 uppercase">
                         <Gauge className="h-3 w-3 text-slate-400" />
                         <span>Speed</span>
                     </div>
@@ -233,29 +226,29 @@ function VehiclePopupCard({ vehicle }) {
 
                 {/* Ignition */}
                 <div className="rounded-lg bg-slate-50 border border-slate-100 p-2">
-                    <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold text-slate-400 uppercase">
                         <Power className="h-3 w-3 text-slate-400" />
                         <span>Ignition</span>
                     </div>
                     <p className={`mt-0.5 text-xs font-bold ${vehicle.ignition ? "text-emerald-600" : "text-slate-500"}`}>
-                        {vehicle.ignition ? "ON (Active)" : "OFF"}
+                        {vehicle.ignition ? "ON" : "OFF"}
                     </p>
                 </div>
 
                 {/* Idle Time */}
                 <div className="rounded-lg bg-slate-50 border border-slate-100 p-2">
-                    <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold text-slate-400 uppercase">
                         <Clock3 className="h-3 w-3 text-slate-400" />
                         <span>Idle Time</span>
                     </div>
-                    <p className="mt-0.5 text-xs font-bold text-orange-600 truncate">
+                    <p className="mt-0.5 text-xs font-bold text-amber-600 truncate">
                         {vehicle.idle_duration_formatted || "00:00:00"}
                     </p>
                 </div>
 
                 {/* Driver */}
                 <div className="rounded-lg bg-slate-50 border border-slate-100 p-2">
-                    <div className="flex items-center gap-1 text-[10px] font-medium text-slate-400">
+                    <div className="flex items-center gap-1 text-[10px] font-semibold text-slate-400 uppercase">
                         <Users className="h-3 w-3 text-slate-400" />
                         <span>Driver</span>
                     </div>
@@ -265,12 +258,12 @@ function VehiclePopupCard({ vehicle }) {
                 </div>
             </div>
 
-            {/* Coordinates & Location Link */}
+            {/* Coordinates & Google Maps Link */}
             {hasCoords && (
                 <div className="mt-2.5 flex items-center justify-between rounded-lg bg-slate-50 border border-slate-100 px-2.5 py-1.5 text-[11px]">
-                    <div className="flex items-center gap-1 text-slate-500">
+                    <div className="flex items-center gap-1 text-slate-500 min-w-0">
                         <MapPin className="h-3 w-3 text-amber-600 shrink-0" />
-                        <span className="font-medium">
+                        <span className="font-mono text-[10px] font-medium truncate">
                             {Number(vehicle.latitude).toFixed(4)}, {Number(vehicle.longitude).toFixed(4)}
                         </span>
                     </div>
@@ -278,11 +271,22 @@ function VehiclePopupCard({ vehicle }) {
                         href={`https://www.google.com/maps?q=${vehicle.latitude},${vehicle.longitude}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="inline-flex items-center gap-0.5 text-[10px] font-bold text-[#1C5E7A] hover:underline"
+                        className="inline-flex items-center gap-0.5 text-[10px] font-bold text-[#33758F] hover:underline shrink-0 ml-2"
                     >
                         Map <ArrowUpRight className="h-2.5 w-2.5" />
                     </a>
                 </div>
+            )}
+
+            {/* Inspect details action */}
+            {onInspect && (
+                <button
+                    type="button"
+                    onClick={() => onInspect(vehicle)}
+                    className="mt-2.5 w-full rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white py-1.5 text-xs font-bold transition shadow-2xs cursor-pointer text-center"
+                >
+                    View Vehicle Details
+                </button>
             )}
         </div>
     )
@@ -293,6 +297,7 @@ function FleetMap({
     selectedVehicleId = null,
     selectedVehicle = null,
     onVehicleSelect = () => {},
+    onInspectVehicle = null,
 }) {
     const vehiclesWithLocation = useMemo(() => {
         return (vehicles || []).filter(v => isValidCoordinate(v?.latitude, v?.longitude))
@@ -349,7 +354,10 @@ function FleetMap({
                                 autoPan={true}
                                 autoPanPadding={[50, 50]}
                             >
-                                <VehiclePopupCard vehicle={vehicle} />
+                                <VehiclePopupCard
+                                    vehicle={vehicle}
+                                    onInspect={onInspectVehicle}
+                                />
                             </Popup>
                         </Marker>
                     )

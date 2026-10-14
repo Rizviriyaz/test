@@ -64,7 +64,7 @@ export default function FuelOverview() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900">
+            <div className="flex h-screen overflow-hidden bg-white text-slate-900">
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col">
@@ -128,7 +128,7 @@ export default function FuelOverview() {
                         <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
                             <div className="flex items-center justify-between pb-4 border-b border-slate-100">
                                 <div className="flex items-center gap-2">
-                                    <div className="rounded-xl bg-[#1C5E7A]/10 p-1.5 text-[#1C5E7A]">
+                                    <div className="rounded-xl bg-[#33758F]/10 p-1.5 text-[#33758F]">
                                         <Award className="h-4 w-4" />
                                     </div>
                                     <div>
@@ -142,7 +142,7 @@ export default function FuelOverview() {
                                 </div>
                                 <Link
                                     to="/fuel/ranking"
-                                    className="inline-flex items-center gap-1.5 text-xs font-bold text-[#1C5E7A] hover:text-[#16495f] transition-colors"
+                                    className="inline-flex items-center gap-1.5 text-xs font-bold text-[#33758F] hover:text-[#285d73] transition-colors"
                                 >
                                     <span>Full Rankings</span>
                                     <ArrowRight className="h-3.5 w-3.5" />
@@ -174,7 +174,7 @@ export default function FuelOverview() {
                                                     </span>
                                                     {v.wialon_unit_name && (
                                                         <span className="ml-2 text-[11px] text-slate-400 font-medium">
-                                                            ({v.wialon_unit_name})
+                                                             ({v.wialon_unit_name})
                                                         </span>
                                                     )}
                                                 </div>
@@ -201,7 +201,7 @@ export default function FuelOverview() {
                                                     <span className="block text-[10px] text-slate-400">Distance</span>
                                                 </div>
                                                 <div className="text-right min-w-[75px]">
-                                                    <span className="text-[#1C5E7A] font-bold">
+                                                    <span className="text-[#33758F] font-bold">
                                                         {v.fuel_efficiency_l_per_100km !== null ? `${v.fuel_efficiency_l_per_100km.toFixed(1)} L/100km` : "—"}
                                                     </span>
                                                     <span className="block text-[10px] text-slate-400">Efficiency</span>

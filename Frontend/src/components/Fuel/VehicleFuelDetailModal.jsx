@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react"
+import { createPortal } from "react-dom"
 import {
     X,
     Droplets,
@@ -100,13 +101,13 @@ export default function VehicleFuelDetailModal({
 
     const isMatched = summary?.status === "matched"
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto">
-            <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-3xl border border-slate-200 bg-white shadow-2xl overflow-hidden my-auto">
+    return createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto" onClick={onClose}>
+            <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-3xl border border-slate-200 bg-white shadow-2xl overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
                 {/* ─── MODAL HEADER ────────────────────────────────────────── */}
                 <div className="flex items-center justify-between px-6 py-4.5 border-b border-slate-100 bg-slate-50/70">
                     <div className="flex items-center gap-3">
-                        <div className="rounded-2xl bg-[#1C5E7A]/10 p-2.5 text-[#1C5E7A] border border-[#1C5E7A]/20">
+                        <div className="rounded-2xl bg-[#33758F]/10 p-2.5 text-[#33758F] border border-[#33758F]/20">
                             <Fuel className="h-5 w-5" />
                         </div>
                         <div>
@@ -141,7 +142,7 @@ export default function VehicleFuelDetailModal({
                 <div className="flex-1 overflow-y-auto p-6 space-y-6">
                     {loading ? (
                         <div className="py-16 text-center text-xs text-slate-500">
-                            <Loader2 className="mx-auto h-8 w-8 animate-spin text-[#1C5E7A] mb-3" />
+                            <Loader2 className="mx-auto h-8 w-8 animate-spin text-[#33758F] mb-3" />
                             <span>Aggregating fuel transactions and Wialon activity telemetry…</span>
                         </div>
                     ) : error ? (
@@ -165,7 +166,7 @@ export default function VehicleFuelDetailModal({
                                         onClick={() => setActiveTab(t.id)}
                                         className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all cursor-pointer ${
                                             activeTab === t.id
-                                                ? "bg-[#1C5E7A] text-white shadow-xs"
+                                                ? "bg-[#33758F] text-white shadow-xs"
                                                 : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
                                         }`}
                                     >
@@ -219,7 +220,7 @@ export default function VehicleFuelDetailModal({
                                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                                                 Fuel Efficiency [Calc]
                                             </span>
-                                            <span className="text-xl font-black text-[#1C5E7A] block">
+                                            <span className="text-xl font-black text-[#33758F] block">
                                                 {efficiency !== null && efficiency !== undefined ? `${efficiency.toFixed(1)}` : "—"} <span className="text-xs font-semibold text-slate-400">L/100km</span>
                                             </span>
                                             <span className="text-[11px] text-slate-500 mt-1 block">
@@ -309,7 +310,7 @@ export default function VehicleFuelDetailModal({
                                     {/* Transparency & Assumptions Note */}
                                     <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 text-xs space-y-2">
                                         <div className="flex items-center gap-1.5 font-bold text-slate-800">
-                                            <Info className="h-4 w-4 text-[#1C5E7A]" />
+                                            <Info className="h-4 w-4 text-[#33758F]" />
                                             <span>Calculation Transparency & Data Sources</span>
                                         </div>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600 pt-1">
@@ -506,6 +507,7 @@ export default function VehicleFuelDetailModal({
                     </button>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     )
 }

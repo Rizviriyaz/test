@@ -1,4 +1,5 @@
 import { useEffect } from "react"
+import { createPortal } from "react-dom"
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet"
 import { X, MapPin, Truck, Clock3, Users, ArrowUpRight } from "lucide-react"
 import L from "leaflet"
@@ -59,12 +60,13 @@ export default function IdleMapModal({ event, onClose }) {
     const mapPosition = [Number(lat), Number(lng)]
     const googleMapsUrl = `https://www.google.com/maps?q=${lat},${lng}`
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs animate-in fade-in duration-200">
+    return createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs animate-in fade-in duration-200" onClick={onClose}>
             <div
                 className="relative flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
                 role="dialog"
                 aria-modal="true"
+                onClick={(e) => e.stopPropagation()}
             >
                 {/* Modal Header */}
                 <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
@@ -179,7 +181,7 @@ export default function IdleMapModal({ event, onClose }) {
                             href={googleMapsUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#1C5E7A] px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-[#15475d]"
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#33758F] px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-[#285d73]"
                         >
                             Open in Google Maps
                             <ArrowUpRight className="h-3.5 w-3.5" />
@@ -187,6 +189,7 @@ export default function IdleMapModal({ event, onClose }) {
                     </div>
                 </div>
             </div>
-        </div>
+        </div>,
+        document.body
     )
 }

@@ -74,22 +74,8 @@ const exportToCSV = (events) => {
     URL.revokeObjectURL(url)
 }
 
-// ─── KPI Card ────────────────────────────────────────────────
-
-function KpiCard({ icon: Icon, iconBg, iconColor, label, value, sub }) {
-    return (
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex items-start justify-between">
-                <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${iconBg}`}>
-                    <Icon className={`h-4 w-4 ${iconColor}`} />
-                </div>
-                {sub && <span className="text-[10px] font-medium text-slate-400">{sub}</span>}
-            </div>
-            <p className="mt-4 text-xs font-medium uppercase tracking-wider text-slate-400">{label}</p>
-            <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
-        </div>
-    )
-}
+import KpiCard from "../components/Common/KpiCard"
+import SearchInput from "../components/Common/SearchInput"
 
 // ─── Filter Bar ───────────────────────────────────────────────
 
@@ -302,7 +288,7 @@ export default function IdleAnalytics() {
 
     const SortIcon = ({ col }) => {
         if (sortBy !== col) return <span className="ml-0.5 text-slate-300">↕</span>
-        return <span className="ml-0.5 text-[#1C5E7A]">{sortDir === "asc" ? "↑" : "↓"}</span>
+        return <span className="ml-0.5 text-[#33758F] font-bold">{sortDir === "asc" ? "↑" : "↓"}</span>
     }
 
     const resetFilters = () => {
@@ -325,34 +311,34 @@ export default function IdleAnalytics() {
 
     return (
         <SidebarProvider>
-        <div className="flex min-h-screen bg-[#F8FAFC]">
+        <div className="flex min-h-screen bg-white">
             <Sidebar />
-            <div className="flex min-w-0 flex-1 flex-col">
-                <main className="flex-1 space-y-6 p-6 lg:p-8">
+            <div className="flex min-w-0 flex-1 flex-col bg-white">
+                <main className="flex-1 space-y-6 p-6 lg:p-8 bg-white">
 
                     {/* ── Header ── */}
-                    <section className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <section className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-slate-200 pb-5">
                         <div>
                             <div className="flex items-center gap-2">
-                                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-orange-50">
-                                    <Clock3 className="h-4.5 w-4.5 text-orange-500" />
+                                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#33758F]/10">
+                                    <Clock3 className="h-5 w-5 text-[#33758F]" />
                                 </div>
                                 <h1 className="text-xl font-bold text-slate-900">Idle Analytics</h1>
                             </div>
-                            <p className="mt-1 text-sm text-slate-500">
+                            <p className="mt-1 text-xs text-slate-500">
                                 Fleet-wide idling analysis, customer groups & location hotspots
                             </p>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
                             {/* Time Range Switcher */}
-                            <div className="flex items-center rounded-xl border border-slate-200 bg-slate-100 p-1 shadow-sm">
+                            <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-2xs">
                                 {["preset", "custom"].map((mode) => (
                                     <button
                                         key={mode}
                                         type="button"
                                         onClick={() => setRangeMode(mode)}
-                                        className={`rounded-lg px-3 py-1.5 text-xs font-semibold capitalize transition ${rangeMode === mode ? "bg-white text-slate-900 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+                                        className={`rounded-lg px-3 py-1.5 text-xs font-bold capitalize transition cursor-pointer ${rangeMode === mode ? "bg-[#33758F] text-white shadow-2xs" : "text-slate-600 hover:text-slate-900"}`}
                                     >
                                         {mode === "preset" ? "Presets" : "Custom Range"}
                                     </button>
@@ -360,7 +346,7 @@ export default function IdleAnalytics() {
                             </div>
 
                             {rangeMode === "preset" ? (
-                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
                                     <Timer className="h-4 w-4 text-slate-400" />
                                     <select
                                         value={selectedTimeframe === "today" ? "today" : hours}
@@ -373,7 +359,7 @@ export default function IdleAnalytics() {
                                                 setHours(Number(val))
                                             }
                                         }}
-                                        className="bg-transparent text-sm font-semibold text-slate-800 outline-none"
+                                        className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
                                     >
                                         {PRESET_OPTIONS.map((o) => (
                                             <option key={o.timeframe || o.hours} value={o.timeframe || o.hours}>{o.label}</option>
@@ -381,7 +367,7 @@ export default function IdleAnalytics() {
                                     </select>
                                 </div>
                             ) : (
-                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 shadow-sm">
+                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
                                     <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="bg-transparent text-xs font-semibold text-slate-800 outline-none" />
                                     <span className="text-xs text-slate-400">to</span>
                                     <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="bg-transparent text-xs font-semibold text-slate-800 outline-none" />
@@ -392,12 +378,12 @@ export default function IdleAnalytics() {
                             <button
                                 type="button"
                                 onClick={() => setFiltersOpen(!filtersOpen)}
-                                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold shadow-sm transition ${filtersOpen || activeFilterCount > 0 ? "border-[#1C5E7A] bg-[#1C5E7A]/5 text-[#1C5E7A]" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+                                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold shadow-2xs transition cursor-pointer ${filtersOpen || activeFilterCount > 0 ? "border-[#33758F] bg-[#33758F]/10 text-[#33758F]" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
                             >
                                 <SlidersHorizontal className="h-3.5 w-3.5" />
                                 Filters
                                 {activeFilterCount > 0 && (
-                                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#1C5E7A] text-[9px] font-bold text-white">
+                                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#33758F] text-[9px] font-bold text-white">
                                         {activeFilterCount}
                                     </span>
                                 )}
@@ -408,7 +394,7 @@ export default function IdleAnalytics() {
                                 type="button"
                                 onClick={() => exportToCSV(filteredEvents)}
                                 disabled={filteredEvents.length === 0}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-40"
+                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50 cursor-pointer disabled:opacity-40"
                             >
                                 <Download className="h-3.5 w-3.5" />
                                 Export CSV
@@ -419,9 +405,9 @@ export default function IdleAnalytics() {
                                 type="button"
                                 onClick={load}
                                 disabled={loading}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:opacity-50"
+                                className="inline-flex items-center gap-1.5 rounded-xl bg-[#33758F] hover:bg-[#285E73] text-white px-3.5 py-2 text-xs font-bold shadow-xs transition cursor-pointer disabled:opacity-50"
                             >
-                                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin text-[#1C5E7A]" : ""}`} />
+                                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
                                 {loading ? "Loading…" : "Refresh"}
                             </button>
                         </div>
@@ -509,7 +495,7 @@ export default function IdleAnalytics() {
                                             placeholder="Search vehicle number, ID or group…"
                                             value={searchText}
                                             onChange={(e) => setSearchText(e.target.value)}
-                                            className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-[#1C5E7A] focus:bg-white"
+                                            className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-[#33758F] focus:bg-white"
                                         />
                                         {searchText && (
                                             <button
@@ -609,7 +595,7 @@ export default function IdleAnalytics() {
                                                         setSelectedGroupId(isSelected ? null : g.group_id)
                                                         setDrillVehicleId(null)
                                                     }}
-                                                    className={`rounded-xl border p-5 text-left shadow-sm transition ${isSelected ? "border-[#1C5E7A] bg-[#1C5E7A]/5 ring-2 ring-[#1C5E7A]/20" : "border-slate-200 bg-white hover:border-slate-300"}`}
+                                                    className={`rounded-xl border p-5 text-left shadow-sm transition ${isSelected ? "border-[#33758F] bg-[#33758F]/5 ring-2 ring-[#33758F]/20" : "border-slate-200 bg-white hover:border-slate-300"}`}
                                                 >
                                                     <div className="flex items-start justify-between">
                                                         <div>
@@ -646,10 +632,10 @@ export default function IdleAnalytics() {
 
                             {/* ── Group Drill-Down Vehicle List ── */}
                             {selectedGroupData && (
-                                <section className="rounded-xl border border-[#1C5E7A]/30 bg-[#1C5E7A]/5 p-5 shadow-sm">
+                                <section className="rounded-xl border border-[#33758F]/30 bg-[#33758F]/5 p-5 shadow-sm">
                                     <div className="mb-4 flex items-center justify-between">
                                         <div className="flex items-center gap-2">
-                                            <ChevronRight className="h-4 w-4 text-[#1C5E7A]" />
+                                            <ChevronRight className="h-4 w-4 text-[#33758F]" />
                                             <h3 className="text-sm font-semibold text-slate-900">{selectedGroupData.group_name} — Vehicles</h3>
                                         </div>
                                         <button type="button" onClick={() => setSelectedGroupId(null)} className="text-xs text-slate-500 hover:text-slate-900">
@@ -660,7 +646,7 @@ export default function IdleAnalytics() {
                                         {selectedGroupData.vehicles.map((v) => (
                                             <div
                                                 key={v.vehicle_id}
-                                                className={`flex items-center justify-between rounded-lg border px-4 py-3 transition ${drillVehicleId === v.vehicle_id ? "border-[#1C5E7A] bg-white" : "border-slate-200 bg-white/70 hover:bg-white"}`}
+                                                className={`flex items-center justify-between rounded-lg border px-4 py-3 transition ${drillVehicleId === v.vehicle_id ? "border-[#33758F] bg-white" : "border-slate-200 bg-white/70 hover:bg-white"}`}
                                                 role="button"
                                                 onClick={() => setDrillVehicleId(drillVehicleId === v.vehicle_id ? null : v.vehicle_id)}
                                             >
@@ -776,7 +762,7 @@ export default function IdleAnalytics() {
                                                 placeholder="Filter vehicle number…"
                                                 value={searchText}
                                                 onChange={(e) => setSearchText(e.target.value)}
-                                                className="w-44 rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-[#1C5E7A] focus:bg-white"
+                                                className="w-44 rounded-lg border border-slate-200 bg-slate-50 py-1.5 pl-8 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-[#33758F] focus:bg-white"
                                             />
                                             {searchText && (
                                                 <button
@@ -797,14 +783,14 @@ export default function IdleAnalytics() {
 
                                 {/* Active Search / Filter Banner */}
                                 {activeSearchStats && (
-                                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-[#1C5E7A]/5 px-5 py-2.5 text-xs text-[#1C5E7A]">
+                                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 bg-[#33758F]/5 px-5 py-2.5 text-xs text-[#33758F]">
                                         <div className="flex items-center gap-2">
                                             <Truck className="h-4 w-4 shrink-0" />
                                             <span className="font-semibold">
                                                 {searchText ? `Vehicle Search: "${searchText}"` : "Filtered Vehicle"}
                                             </span>
                                             <span className="text-slate-600">
-                                                — {activeSearchStats.eventCount} event{activeSearchStats.eventCount !== 1 ? "s" : ""} · Total: <strong className="text-slate-900">{formatDuration(activeSearchStats.totalSeconds)}</strong> · Longest: <strong className="text-slate-900">{formatDuration(activeSearchStats.longestSeconds)}</strong>
+                                                 — {activeSearchStats.eventCount} event{activeSearchStats.eventCount !== 1 ? "s" : ""} · Total: <strong className="text-slate-900">{formatDuration(activeSearchStats.totalSeconds)}</strong> · Longest: <strong className="text-slate-900">{formatDuration(activeSearchStats.longestSeconds)}</strong>
                                             </span>
                                         </div>
                                         <button
@@ -814,7 +800,7 @@ export default function IdleAnalytics() {
                                                 setDrillVehicleId(null)
                                                 setFilterVehicleId("")
                                             }}
-                                            className="inline-flex items-center gap-1 font-semibold text-[#1C5E7A] hover:underline"
+                                            className="inline-flex items-center gap-1 font-semibold text-[#33758F] hover:underline"
                                         >
                                             <X className="h-3.5 w-3.5" />
                                             Clear vehicle filter
@@ -826,7 +812,7 @@ export default function IdleAnalytics() {
                                     <div className="px-5 py-16 text-center">
                                         <CheckCircle2 className="mx-auto h-8 w-8 text-green-400" />
                                         <p className="mt-3 text-sm font-medium text-slate-700">No idle events match your filters</p>
-                                        <button type="button" onClick={resetFilters} className="mt-2 text-xs text-[#1C5E7A] underline">Reset filters</button>
+                                        <button type="button" onClick={resetFilters} className="mt-2 text-xs text-[#33758F] underline">Reset filters</button>
                                     </div>
                                 ) : (
                                     <div className="overflow-x-auto">
@@ -864,8 +850,8 @@ export default function IdleAnalytics() {
                                                                     className="group flex items-center gap-2 text-left"
                                                                     title="Click to view all idle events for this vehicle"
                                                                 >
-                                                                    <Truck className="h-3.5 w-3.5 shrink-0 text-slate-400 group-hover:text-[#1C5E7A]" />
-                                                                    <span className="text-sm font-medium text-slate-800 transition group-hover:text-[#1C5E7A] group-hover:underline">
+                                                                    <Truck className="h-3.5 w-3.5 shrink-0 text-slate-400 group-hover:text-[#33758F]" />
+                                                                    <span className="text-sm font-medium text-slate-800 transition group-hover:text-[#33758F] group-hover:underline">
                                                                         {ev.vehicle_name}
                                                                     </span>
                                                                 </button>
@@ -882,7 +868,7 @@ export default function IdleAnalytics() {
                                                                         <button
                                                                             type="button"
                                                                             onClick={() => setMapEvent(ev)}
-                                                                            className="group inline-flex w-[260px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#1C5E7A] hover:bg-slate-50 text-center"
+                                                                            className="group inline-flex w-[260px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#33758F] hover:bg-slate-50 text-center"
                                                                             title="View on Interactive Map"
                                                                         >
                                                                             <MapPin className="h-3.5 w-3.5 shrink-0 text-amber-500 transition-transform group-hover:scale-110" />
@@ -939,7 +925,7 @@ export default function IdleAnalytics() {
                                                             <button
                                                                 type="button"
                                                                 onClick={() => setMapEvent(loc)}
-                                                                className="group inline-flex w-[260px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#1C5E7A] hover:bg-slate-50 text-center"
+                                                                className="group inline-flex w-[260px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#33758F] hover:bg-slate-50 text-center"
                                                                 title="View on Interactive Map"
                                                             >
                                                                 <MapPin className="h-3.5 w-3.5 shrink-0 text-amber-500 transition-transform group-hover:scale-110" />

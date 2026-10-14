@@ -149,7 +149,7 @@ export default function FuelVehicles() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900">
+            <div className="flex h-screen overflow-hidden bg-white text-slate-900">
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col">
@@ -166,7 +166,7 @@ export default function FuelVehicles() {
                             <div className="lg:col-span-4 rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs flex flex-col h-[750px]">
                                 <div className="pb-3 border-b border-slate-100">
                                     <h3 className="text-sm font-bold text-slate-900 mb-2 flex items-center gap-2">
-                                        <Truck className="h-4 w-4 text-[#1C5E7A]" />
+                                        <Truck className="h-4 w-4 text-[#33758F]" />
                                         Fleet Vehicles ({filteredVehicles.length})
                                     </h3>
                                     <div className="relative">
@@ -176,7 +176,7 @@ export default function FuelVehicles() {
                                             placeholder="Filter by plate number…"
                                             value={vehicleSearch}
                                             onChange={(e) => setVehicleSearch(e.target.value)}
-                                            className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#1C5E7A] focus:bg-white focus:outline-hidden"
+                                            className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#33758F] focus:bg-white focus:outline-hidden"
                                         />
                                     </div>
                                 </div>
@@ -185,7 +185,7 @@ export default function FuelVehicles() {
                                 <div className="flex-1 overflow-y-auto divide-y divide-slate-100 py-2 pr-1 space-y-1">
                                     {loadingList ? (
                                         <div className="py-12 text-center text-xs text-slate-400">
-                                            <Loader2 className="mx-auto h-5 w-5 animate-spin text-[#1C5E7A] mb-2" />
+                                            <Loader2 className="mx-auto h-5 w-5 animate-spin text-[#33758F] mb-2" />
                                             Loading vehicles…
                                         </div>
                                     ) : filteredVehicles.length === 0 ? (
@@ -205,7 +205,7 @@ export default function FuelVehicles() {
                                                     }}
                                                     className={`w-full text-left rounded-xl p-3 transition-colors cursor-pointer ${
                                                         isSelected
-                                                            ? "bg-[#1C5E7A]/10 border border-[#1C5E7A]/30"
+                                                            ? "bg-[#33758F]/10 border border-[#33758F]/30"
                                                             : "hover:bg-slate-50 border border-transparent"
                                                     }`}
                                                 >
@@ -295,7 +295,7 @@ export default function FuelVehicles() {
                                                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
                                                         Fuel Efficiency
                                                     </span>
-                                                    <div className="text-lg font-black text-[#1C5E7A]">
+                                                    <div className="text-lg font-black text-[#33758F]">
                                                         {selectedVehicle.fuel_efficiency_l_per_100km !== null
                                                             ? `${selectedVehicle.fuel_efficiency_l_per_100km.toFixed(1)} L/100km`
                                                             : "—"}
@@ -345,7 +345,7 @@ export default function FuelVehicles() {
                                                             type="button"
                                                             onClick={() => setTrendMetric("fuel")}
                                                             className={`rounded-lg px-2.5 py-1 cursor-pointer transition-colors ${
-                                                                trendMetric === "fuel" ? "bg-white text-[#1C5E7A] font-bold shadow-xs" : "text-slate-600"
+                                                                trendMetric === "fuel" ? "bg-white text-[#33758F] font-bold shadow-xs" : "text-slate-600"
                                                             }`}
                                                         >
                                                             Fuel (L)
@@ -390,7 +390,7 @@ export default function FuelVehicles() {
                                             <div className="pt-4 h-[240px] w-full">
                                                 {loadingDetails ? (
                                                     <div className="h-full flex items-center justify-center text-slate-400 text-xs">
-                                                        <Loader2 className="h-5 w-5 animate-spin text-[#1C5E7A] mr-2" />
+                                                        <Loader2 className="h-5 w-5 animate-spin text-[#33758F] mr-2" />
                                                         Loading vehicle telemetry…
                                                     </div>
                                                 ) : formattedTrendData.length === 0 ? (
@@ -402,15 +402,15 @@ export default function FuelVehicles() {
                                                         <AreaChart data={formattedTrendData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                                                             <defs>
                                                                 <linearGradient id="vFuelGrad" x1="0" y1="0" x2="0" y2="1">
-                                                                    <stop offset="5%" stopColor="#1C5E7A" stopOpacity={0.4} />
-                                                                    <stop offset="95%" stopColor="#1C5E7A" stopOpacity={0.0} />
+                                                                    <stop offset="5%" stopColor="#33758F" stopOpacity={0.4} />
+                                                                    <stop offset="95%" stopColor="#33758F" stopOpacity={0.0} />
                                                                 </linearGradient>
                                                             </defs>
                                                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
                                                             <XAxis dataKey="displayPeriod" tick={{ fontSize: 10, fill: "#64748B" }} tickLine={false} axisLine={{ stroke: "#E2E8F0" }} />
                                                             <YAxis tick={{ fontSize: 10, fill: "#64748B" }} tickLine={false} axisLine={false} />
                                                             <Tooltip />
-                                                            <Area type="monotone" dataKey="litres" stroke="#1C5E7A" strokeWidth={2} fill="url(#vFuelGrad)" name="Fuel (L)" />
+                                                            <Area type="monotone" dataKey="litres" stroke="#33758F" strokeWidth={2} fill="url(#vFuelGrad)" name="Fuel (L)" />
                                                         </AreaChart>
                                                     </ResponsiveContainer>
                                                 ) : trendMetric === "distance" ? (
@@ -447,7 +447,7 @@ export default function FuelVehicles() {
                                         <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
                                             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                                                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                    <Receipt className="h-4 w-4 text-[#1C5E7A]" />
+                                                    <Receipt className="h-4 w-4 text-[#33758F]" />
                                                     Recent Refuel Transactions ({transactions.length})
                                                 </h3>
                                                 <span className="text-[11px] text-slate-400 font-medium">Logged Receipts</span>

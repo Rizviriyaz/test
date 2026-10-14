@@ -5,7 +5,7 @@ import { getFuelTypes } from "../../api/fleetApi"
 import { useFuelFilters } from "../../context/FuelFilterContext"
 
 const PALETTE = [
-    "#1C5E7A", // Deep Petrol Blue
+    "#33758F", // Deep ATS Brand Teal-Blue
     "#0284C7", // Bright Sky Blue
     "#10B981", // Emerald
     "#F59E0B", // Amber
@@ -83,7 +83,7 @@ export default function FuelTypeDonut() {
                 </div>
                 <div className="flex items-center justify-between gap-4">
                     <span className="text-slate-500">Fleet Share:</span>
-                    <span className="font-bold text-[#1C5E7A]">{data.percentage}%</span>
+                    <span className="font-bold text-[#33758F]">{data.percentage}%</span>
                 </div>
             </div>
         )
@@ -93,7 +93,7 @@ export default function FuelTypeDonut() {
         <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
-                    <div className="rounded-xl bg-[#1C5E7A]/10 p-1.5 text-[#1C5E7A]">
+                    <div className="rounded-xl bg-[#33758F]/10 p-1.5 text-[#33758F]">
                         <PieIcon className="h-4 w-4" />
                     </div>
                     <h3 className="text-sm font-bold text-slate-900">
@@ -108,7 +108,7 @@ export default function FuelTypeDonut() {
             <div className="my-3 flex-1 min-h-[190px] flex items-center justify-center">
                 {loading ? (
                     <div className="flex flex-col items-center justify-center text-slate-400">
-                        <Loader2 className="h-5 w-5 animate-spin text-[#1C5E7A] mb-1" />
+                        <Loader2 className="h-5 w-5 animate-spin text-[#33758F] mb-1" />
                         <span className="text-xs">Loading breakdown…</span>
                     </div>
                 ) : error ? (

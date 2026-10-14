@@ -136,9 +136,9 @@ export default function Sidebar() {
                                                 collapsed ? "justify-center px-0" : "gap-2.5 px-2.5"
                                             }`}
                                         >
-                                            <Icon className="h-4 w-4 shrink-0 text-[#1C5E7A]" />
+                                            <Icon className="h-4 w-4 shrink-0 text-[#33758F]" />
                                             {!collapsed && (
-                                                <span className="whitespace-nowrap font-bold text-[#1C5E7A]">
+                                                <span className="whitespace-nowrap font-bold text-[#33758F]">
                                                     {item.name}
                                                 </span>
                                             )}
@@ -156,7 +156,7 @@ export default function Sidebar() {
                                                 collapsed ? "justify-center px-0" : "gap-2.5 px-2.5"
                                             } ${
                                                 isActive
-                                                    ? "bg-[#1C5E7A] text-white shadow-xs"
+                                                    ? "bg-[#33758F] text-white shadow-xs"
                                                     : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                                             }`
                                         }
@@ -184,7 +184,7 @@ export default function Sidebar() {
                             collapsed ? "justify-center px-0" : "gap-2.5 px-2.5"
                         } ${
                             isActive
-                                ? "bg-[#1C5E7A] text-white shadow-xs"
+                                ? "bg-[#33758F] text-white shadow-xs"
                                 : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                         }`
                     }

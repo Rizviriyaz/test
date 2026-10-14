@@ -39,10 +39,11 @@ import {
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import KpiCard from "../components/Common/KpiCard"
 
-// Curated SaaS colors for donut / multi-category charts
+// Curated enterprise palette starting with ATS brand blue
 const CHART_COLORS = [
-    "#1C5E7A",
+    "#33758F",
     "#0284c7",
     "#059669",
     "#d97706",
@@ -379,6 +380,7 @@ function Dashboard() {
             trips: trips > 0 ? trips.toLocaleString() : "—",
             driving: drivingDisplay,
             idle: formatHoursMins(idleMinutes),
+            isEstimatedDriving,
         }
     }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet, activeTodayCount])
 
@@ -566,16 +568,16 @@ function Dashboard() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900 font-sans antialiased">
+            <div className="flex h-screen overflow-hidden bg-white text-slate-900 font-sans antialiased">
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col">
                     <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-8 sm:py-8">
                         {/* ─── 1. PAGE HEADER ────────────────────────────────────────── */}
-                        <header className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200/60 pb-4">
+                        <header className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200 pb-4">
                             <div>
                                 <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 uppercase">
-                                    FLEET OVERVIEW
+                                    Fleet Overview
                                 </h1>
                                 <p className="text-xs text-slate-500 font-medium mt-0.5">
                                     Real-time fleet operational command and asset telemetry
@@ -585,7 +587,7 @@ function Dashboard() {
                             <div className="flex flex-wrap items-center gap-2.5">
                                 {/* Global Vehicle Group Filter */}
                                 <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
-                                    <Layers className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                                    <Layers className="h-3.5 w-3.5 text-[#33758F]" />
                                     <span className="text-[11px] font-bold text-slate-400 uppercase">Group:</span>
                                     <select
                                         value={selectedGroup}
@@ -617,10 +619,10 @@ function Dashboard() {
 
                         {/* Loading State */}
                         {loading && (
-                            <div className="rounded-xl border border-slate-200/80 bg-white p-12 text-center shadow-xs">
-                                <Loader2 className="mx-auto h-7 w-7 animate-spin text-[#1C5E7A]" />
-                                <p className="mt-3 text-xs font-bold text-slate-800 tracking-wide">
-                                    SYNCHRONIZING LIVE FLEET TELEMETRY...
+                            <div className="rounded-xl border border-slate-200 bg-white p-12 text-center shadow-xs">
+                                <Loader2 className="mx-auto h-7 w-7 animate-spin text-[#33758F]" />
+                                <p className="mt-3 text-xs font-bold text-slate-800 tracking-wide uppercase">
+                                    Synchronizing live fleet telemetry…
                                 </p>
                             </div>
                         )}
@@ -634,159 +636,79 @@ function Dashboard() {
 
                         {!loading && (
                             <div className="space-y-6">
-                                {/* ─── 2. KPI CARDS SECTION (NO ICONS, TYPOGRAPHY-FIRST) ───── */}
+                                {/* ─── 2. KPI CARDS SECTION (ENTERPRISE WHITE CARDS) ───── */}
                                 <section aria-label="Key Performance Indicators">
                                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7 sm:gap-4">
                                         {/* 1. TOTAL VEHICLES */}
-                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                    Total Vehicles
-                                                </span>
-                                            </div>
-                                            <div className="my-2">
-                                                <p className="text-3xl lg:text-4xl font-black text-slate-900 tracking-tight">
-                                                    {totalVehiclesCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-medium text-slate-400">
-                                                    {selectedGroup === "ALL" ? "Registered units" : "Filtered group units"}
-                                                </span>
-                                            </div>
-                                        </div>
+                                        <KpiCard
+                                            label="Total Vehicles"
+                                            value={totalVehiclesCount}
+                                            sub={selectedGroup === "ALL" ? "All registered units" : "Filtered group units"}
+                                            to="/tracking"
+                                            title="View all units in Live Tracking"
+                                        />
 
                                         {/* 2. MOVING */}
-                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                    Moving
-                                                </span>
-                                            </div>
-                                            <div className="my-2">
-                                                <p className="text-3xl lg:text-4xl font-black text-emerald-600 tracking-tight">
-                                                    {movingCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-semibold text-emerald-600">
-                                                    {totalVehiclesCount > 0 ? Math.round((movingCount / totalVehiclesCount) * 100) : 0}% active motion
-                                                </span>
-                                            </div>
-                                        </div>
+                                        <KpiCard
+                                            label="Moving"
+                                            value={movingCount}
+                                            valueColor="text-emerald-600"
+                                            sub={`${totalVehiclesCount > 0 ? Math.round((movingCount / totalVehiclesCount) * 100) : 0}% in motion`}
+                                            to="/tracking?status=MOVING"
+                                            title="View moving vehicles"
+                                        />
 
                                         {/* 3. IDLING */}
-                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                    Idling
-                                                </span>
-                                            </div>
-                                            <div className="my-2">
-                                                <p className="text-3xl lg:text-4xl font-black text-amber-600 tracking-tight">
-                                                    {idlingCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-semibold text-amber-600">
-                                                    {totalVehiclesCount > 0 ? Math.round((idlingCount / totalVehiclesCount) * 100) : 0}% engine on
-                                                </span>
-                                            </div>
-                                        </div>
+                                        <KpiCard
+                                            label="Idling"
+                                            value={idlingCount}
+                                            valueColor="text-amber-600"
+                                            sub={`${totalVehiclesCount > 0 ? Math.round((idlingCount / totalVehiclesCount) * 100) : 0}% engine on`}
+                                            to="/tracking?status=IDLING"
+                                            title="View idling vehicles"
+                                        />
 
                                         {/* 4. STOPPED */}
-                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                    Stopped
-                                                </span>
-                                            </div>
-                                            <div className="my-2">
-                                                <p className="text-3xl lg:text-4xl font-black text-slate-700 tracking-tight">
-                                                    {stoppedCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-medium text-slate-400">
-                                                    {totalVehiclesCount > 0 ? Math.round((stoppedCount / totalVehiclesCount) * 100) : 0}% parked
-                                                </span>
-                                            </div>
-                                        </div>
+                                        <KpiCard
+                                            label="Stopped"
+                                            value={stoppedCount}
+                                            valueColor="text-slate-700"
+                                            sub={`${totalVehiclesCount > 0 ? Math.round((stoppedCount / totalVehiclesCount) * 100) : 0}% parked`}
+                                            to="/tracking?status=STOPPED"
+                                            title="View stopped vehicles"
+                                        />
 
                                         {/* 5. OFFLINE */}
-                                        <div className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs">
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                                    Offline
-                                                </span>
-                                            </div>
-                                            <div className="my-2">
-                                                <p className={`text-3xl lg:text-4xl font-black tracking-tight ${offlineCount > 0 ? "text-rose-600" : "text-slate-700"}`}>
-                                                    {offlineCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className={`text-[10px] font-semibold ${offlineCount > 0 ? "text-rose-600" : "text-slate-400"}`}>
-                                                    {totalVehiclesCount > 0 ? Math.round((offlineCount / totalVehiclesCount) * 100) : 0}% no signal
-                                                </span>
-                                            </div>
-                                        </div>
+                                        <KpiCard
+                                            label="Offline"
+                                            value={offlineCount}
+                                            valueColor={offlineCount > 0 ? "text-rose-600" : "text-slate-700"}
+                                            sub={`${totalVehiclesCount > 0 ? Math.round((offlineCount / totalVehiclesCount) * 100) : 0}% no signal`}
+                                            to="/tracking?status=OFFLINE"
+                                            title="View offline vehicles"
+                                        />
 
-                                        {/* 6. ACTIVE TODAY (Interactive -> Tracking/Trips) */}
-                                        <Link
+                                        {/* 6. ACTIVE TODAY */}
+                                        <KpiCard
+                                            label="Active Today"
+                                            value={activeTodayCount}
+                                            valueColor="text-[#33758F]"
+                                            sub={`${totalVehiclesCount > 0 ? Math.round((activeTodayCount / totalVehiclesCount) * 100) : 0}% utilized`}
                                             to="/tracking"
-                                            className="flex flex-col justify-between rounded-xl border border-slate-200/80 bg-white p-4 shadow-xs transition-all hover:border-[#1C5E7A]/40 hover:shadow-sm group cursor-pointer"
-                                            title="View active vehicles in Live Tracking"
-                                        >
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-[#1C5E7A] transition-colors">
-                                                    Active Today
-                                                </span>
-                                                <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 group-hover:text-[#1C5E7A] transition-colors" />
-                                            </div>
-                                            <div className="my-2">
-                                                <p className="text-3xl lg:text-4xl font-black text-[#1C5E7A] tracking-tight">
-                                                    {activeTodayCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className="text-[10px] font-semibold text-[#1C5E7A]">
-                                                    {totalVehiclesCount > 0 ? Math.round((activeTodayCount / totalVehiclesCount) * 100) : 0}% fleet utilized
-                                                </span>
-                                            </div>
-                                        </Link>
+                                            title="View active vehicles today"
+                                        />
 
-                                        {/* 7. ALERTS (Interactive -> Alerts Page) */}
-                                        <Link
+                                        {/* 7. ALERTS */}
+                                        <KpiCard
+                                            label="Alerts"
+                                            value={alertsCount}
+                                            valueColor={alertsCount > 0 ? "text-rose-600" : "text-slate-700"}
+                                            sub={alertsCount > 0 ? "Attention required" : "No active issues"}
                                             to="/alerts"
-                                            className={`flex flex-col justify-between rounded-xl border p-4 shadow-xs transition-all hover:shadow-sm group cursor-pointer ${
-                                                alertsCount > 0
-                                                    ? "border-rose-200 bg-rose-50/20 hover:border-rose-300"
-                                                    : "border-slate-200/80 bg-white hover:border-slate-300"
-                                            }`}
-                                            title="View alerts in Fleet Alerts"
-                                        >
-                                            <div className="flex items-center justify-between">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 group-hover:text-rose-600 transition-colors">
-                                                    Alerts
-                                                </span>
-                                                <ArrowUpRight className="h-3.5 w-3.5 text-slate-300 group-hover:text-rose-600 transition-colors" />
-                                            </div>
-                                            <div className="my-2">
-                                                <p className={`text-3xl lg:text-4xl font-black tracking-tight ${
-                                                    alertsCount > 0 ? "text-rose-600" : "text-slate-700"
-                                                }`}>
-                                                    {alertsCount}
-                                                </p>
-                                            </div>
-                                            <div>
-                                                <span className={`text-[10px] font-semibold ${
-                                                    alertsCount > 0 ? "text-rose-600" : "text-slate-400"
-                                                }`}>
-                                                    {alertsCount > 0 ? "Attention required" : "No pending issues"}
-                                                </span>
-                                            </div>
-                                        </Link>
+                                            badge={alertsCount > 0 ? "Action" : undefined}
+                                            badgeCls="bg-rose-50 text-rose-700 border-rose-200"
+                                            title="View fleet alerts"
+                                        />
                                     </div>
                                 </section>
 
@@ -798,7 +720,7 @@ function Dashboard() {
                                             <div className="flex items-center justify-between mb-4">
                                                 <div>
                                                     <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                        <Activity className="h-4 w-4 text-[#1C5E7A]" />
+                                                        <Activity className="h-4 w-4 text-[#33758F]" />
                                                         Fleet Status & Live Distribution
                                                     </h2>
                                                     <p className="text-[11px] text-slate-400 font-medium">
@@ -883,7 +805,7 @@ function Dashboard() {
                                             <div className="flex items-center justify-between mb-4">
                                                 <div>
                                                     <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                        <Route className="h-4 w-4 text-[#1C5E7A]" />
+                                                        <Route className="h-4 w-4 text-[#33758F]" />
                                                         Today's Fleet Activity
                                                     </h2>
                                                     <p className="text-[11px] text-slate-400 font-medium">
@@ -897,32 +819,41 @@ function Dashboard() {
 
                                             {/* 4 Activity Metric Cards */}
                                             <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 text-center">
-                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
-                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Distance</span>
+                                                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
+                                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Distance</span>
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-slate-900">
                                                         {todayFleetActivity.distance}
                                                     </p>
                                                     <span className="text-[10px] font-medium text-slate-400">Total covered</span>
                                                 </div>
 
-                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
-                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Trips</span>
-                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-[#1C5E7A]">
+                                                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
+                                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Trips</span>
+                                                    <p className="mt-0.5 text-lg sm:text-xl font-black text-[#33758F]">
                                                         {todayFleetActivity.trips}
                                                     </p>
                                                     <span className="text-[10px] font-medium text-slate-400">Recorded trips</span>
                                                 </div>
 
-                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
-                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Driving</span>
+                                                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
+                                                    <div className="flex items-center justify-center gap-1">
+                                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Driving</span>
+                                                        {todayFleetActivity.isEstimatedDriving && (
+                                                            <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1" title="Estimated duration based on distance & ~45 km/h">
+                                                                Est.
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-emerald-700">
                                                         {todayFleetActivity.driving}
                                                     </p>
-                                                    <span className="text-[10px] font-medium text-slate-400">Active motion</span>
+                                                    <span className="text-[10px] font-medium text-slate-400">
+                                                        {todayFleetActivity.isEstimatedDriving ? "Estimated motion" : "Active motion"}
+                                                    </span>
                                                 </div>
 
-                                                <div className="rounded-lg border border-slate-100 bg-slate-50/60 p-3">
-                                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">Idle</span>
+                                                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
+                                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Idle</span>
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-amber-600">
                                                         {todayFleetActivity.idle}
                                                     </p>
@@ -934,7 +865,7 @@ function Dashboard() {
                                         <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-end">
                                             <Link
                                                 to="/trips"
-                                                className="inline-flex items-center gap-1 text-xs font-bold text-[#1C5E7A] hover:underline"
+                                                className="inline-flex items-center gap-1 text-xs font-bold text-[#33758F] hover:underline"
                                             >
                                                 View Trips & Routes
                                                 <ArrowUpRight className="h-3.5 w-3.5" />
@@ -1014,11 +945,11 @@ function Dashboard() {
                                     </div>
 
                                     {/* TOP VEHICLES BY MILEAGE */}
-                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
                                         <div>
                                             <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                                                 <div className="flex items-center gap-2">
-                                                    <TrendingUp className="h-4 w-4 text-[#1C5E7A]" />
+                                                    <TrendingUp className="h-4 w-4 text-[#33758F]" />
                                                     <h2 className="text-sm font-bold text-slate-900">
                                                         Top Vehicles by Mileage
                                                     </h2>
@@ -1091,7 +1022,7 @@ function Dashboard() {
                                                             />
                                                             <Bar
                                                                 dataKey="mileage"
-                                                                fill="#1C5E7A"
+                                                                fill="#33758F"
                                                                 radius={[0, 4, 4, 0]}
                                                                 onClick={(entry) => {
                                                                     if (entry?.vehicle_id) setSelectedVehicleId(entry.vehicle_id)
@@ -1109,12 +1040,12 @@ function Dashboard() {
                                 {/* ─── 5. FLEET BY GROUP & ANALYTICS CHARTS ─────────────────── */}
                                 <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                                     {/* FLEET BY GROUP */}
-                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
                                         <div>
                                             <div className="flex items-center justify-between mb-4">
                                                 <div>
                                                     <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                        <Layers className="h-4 w-4 text-[#1C5E7A]" />
+                                                        <Layers className="h-4 w-4 text-[#33758F]" />
                                                         Fleet by Group
                                                     </h2>
                                                     <p className="text-[11px] text-slate-400 font-medium">
@@ -1143,7 +1074,7 @@ function Dashboard() {
                                                             </div>
                                                             <div className="flex h-2 overflow-hidden rounded-full bg-slate-100">
                                                                 <div
-                                                                    className="bg-[#1C5E7A] rounded-full transition-all"
+                                                                    className="bg-[#33758F] rounded-full transition-all"
                                                                     style={{ width: `${grp.percent}%` }}
                                                                 />
                                                             </div>
@@ -1184,12 +1115,12 @@ function Dashboard() {
                                     </div>
 
                                     {/* FLEET UTILIZATION BY CATEGORY */}
-                                    <div className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+                                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
                                         <div>
                                             <div className="flex items-center justify-between mb-4">
                                                 <div>
                                                     <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                        <BarChart3 className="h-4 w-4 text-[#1C5E7A]" />
+                                                        <BarChart3 className="h-4 w-4 text-[#33758F]" />
                                                         Fleet Utilization by Category
                                                     </h2>
                                                     <p className="text-[11px] text-slate-400 font-medium">
@@ -1224,7 +1155,7 @@ function Dashboard() {
                                                             <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
                                                             <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
                                                             <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
-                                                            <Bar dataKey="value" fill="#0284c7" radius={[4, 4, 0, 0]} />
+                                                            <Bar dataKey="value" fill="#33758F" radius={[4, 4, 0, 0]} />
                                                         </BarChart>
                                                     </ResponsiveContainer>
                                                 ) : utilizationChartType === "horizontal" ? (
@@ -1234,7 +1165,7 @@ function Dashboard() {
                                                             <XAxis type="number" domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
                                                             <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={90} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
                                                             <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
-                                                            <Bar dataKey="value" fill="#0284c7" radius={[0, 4, 4, 0]} />
+                                                            <Bar dataKey="value" fill="#33758F" radius={[0, 4, 4, 0]} />
                                                         </BarChart>
                                                     </ResponsiveContainer>
                                                 ) : (
@@ -1265,11 +1196,11 @@ function Dashboard() {
                                 </section>
 
                                 {/* ─── 6. IDLE DURATION BY CATEGORY ─────────────────────────── */}
-                                <section className="rounded-xl border border-slate-200/80 bg-white p-5 shadow-xs">
+                                <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs">
                                     <div className="flex items-center justify-between mb-4">
                                         <div>
                                             <h2 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                                                <Clock className="h-4 w-4 text-[#1C5E7A]" />
+                                                <Clock className="h-4 w-4 text-[#33758F]" />
                                                 Idle Duration by Category
                                             </h2>
                                             <p className="text-[11px] text-slate-400 font-medium">

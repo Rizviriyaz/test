@@ -241,7 +241,7 @@ export default function FuelWasteIntelligence({
                                 onClick={() => setSelectedTab(tab.id)}
                                 className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-bold transition-all cursor-pointer ${
                                     isActive
-                                        ? "bg-[#1C5E7A] text-white shadow-xs"
+                                        ? "bg-[#33758F] text-white shadow-xs"
                                         : "bg-slate-100 text-slate-600 hover:bg-slate-200/70 hover:text-slate-900"
                                 }`}
                             >
@@ -266,7 +266,7 @@ export default function FuelWasteIntelligence({
                         placeholder="Search vehicle or anomaly…"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-1.5 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#1C5E7A] focus:bg-white focus:outline-hidden"
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-1.5 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#33758F] focus:bg-white focus:outline-hidden"
                     />
                 </div>
             </div>
@@ -349,7 +349,7 @@ export default function FuelWasteIntelligence({
                                     <button
                                         type="button"
                                         onClick={() => onSelectVehicle?.(item.vehicle_identifier)}
-                                        className="inline-flex items-center gap-1 self-start sm:self-center shrink-0 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-[#1C5E7A] hover:text-white transition-colors cursor-pointer"
+                                        className="inline-flex items-center gap-1 self-start sm:self-center shrink-0 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-[#33758F] hover:text-white transition-colors cursor-pointer"
                                     >
                                         <span>Inspect</span>
                                         <ArrowUpRight className="h-3.5 w-3.5" />

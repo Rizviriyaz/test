@@ -29,7 +29,7 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
-                    <div className="rounded-xl bg-[#1C5E7A]/10 p-1.5 text-[#1C5E7A]">
+                    <div className="rounded-xl bg-[#33758F]/10 p-1.5 text-[#33758F]">
                         <Gauge className="h-4 w-4" />
                     </div>
                     <div>
@@ -74,7 +74,7 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
                 <div className="space-y-1">
                     <div className="h-3 w-full rounded-full bg-slate-100 overflow-hidden relative border border-slate-200/60">
                         <div
-                            className="h-full rounded-full bg-gradient-to-r from-[#1C5E7A] to-[#0284C7] transition-all duration-500"
+                            className="h-full rounded-full bg-gradient-to-r from-[#33758F] to-[#0284C7] transition-all duration-500"
                             style={{ width: `${gaugePercent}%` }}
                         />
                     </div>

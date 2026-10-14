@@ -326,7 +326,7 @@ export default function AnalyticsChart({
                             className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-2xs transition hover:bg-slate-100 hover:text-slate-900 active:scale-95"
                             title="Change visualization type"
                         >
-                            <ActiveIcon className="h-3.5 w-3.5 text-[#1C5E7A]" />
+                            <ActiveIcon className="h-3.5 w-3.5 text-[#33758F]" />
                             <span className="capitalize">{TYPE_CONFIG[activeType]?.label || activeType}</span>
                         </button>
 

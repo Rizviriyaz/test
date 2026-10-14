@@ -279,12 +279,12 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     </div>
 
                     {/* 8. Fleet Fuel Efficiency */}
-                    <div className="relative overflow-hidden rounded-2xl border border-[#1C5E7A]/30 bg-gradient-to-br from-[#1C5E7A]/5 to-white p-4.5 shadow-xs hover:shadow-md transition-shadow">
+                    <div className="relative overflow-hidden rounded-2xl border border-[#33758F]/30 bg-gradient-to-br from-[#33758F]/5 to-white p-4.5 shadow-xs hover:shadow-md transition-shadow">
                         <div className="flex items-center justify-between mb-2">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-[#1C5E7A]">
+                            <span className="text-[11px] font-bold uppercase tracking-wider text-[#33758F]">
                                 Fleet Efficiency
                             </span>
-                            <div className="rounded-xl bg-[#1C5E7A]/10 p-2 text-[#1C5E7A] border border-[#1C5E7A]/20">
+                            <div className="rounded-xl bg-[#33758F]/10 p-2 text-[#33758F] border border-[#33758F]/20">
                                 <Gauge className="h-4 w-4" />
                             </div>
                         </div>
@@ -298,7 +298,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                             <span>
                                 {costPerKm !== null && costPerKm !== undefined ? `AED ${formatNumber(costPerKm, 2)} / km` : "Weighted burn"}
                             </span>
-                            <span className="text-[10px] font-black text-[#1C5E7A] bg-[#1C5E7A]/10 px-1.5 py-0.5 rounded">
+                            <span className="text-[10px] font-black text-[#33758F] bg-[#33758F]/10 px-1.5 py-0.5 rounded">
                                 Weighted
                             </span>
                         </div>
