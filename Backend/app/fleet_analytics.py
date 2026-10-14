@@ -117,7 +117,15 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
     battery_status = "UNKNOWN"
     system_type = "Unknown"
 
-    if voltage is not None and isinstance(voltage, (int, float)) and voltage > 0:
+    try:
+        if voltage is not None and is_valid_sensor_value(voltage):
+            voltage = float(voltage)
+        else:
+            voltage = None
+    except (ValueError, TypeError):
+        voltage = None
+
+    if voltage is not None and voltage > 0:
         if voltage > 18.0:
             system_type = "24V Commercial"
             if voltage < HEALTH_THRESHOLDS["BATTERY_24V_CRITICAL"]:
@@ -962,7 +970,7 @@ def get_fleet_alerts_analytics() -> Dict[str, Any]:
         "info_count": info_count,
         "by_vehicle": dict(by_vehicle),
         "by_group": dict(by_group),
-        "alerts": alerts[:40]
+        "alerts": alerts
     }
 
     set_cached("fleet_alerts_analytics", result)
@@ -988,7 +996,7 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
     fleet_by_id = {v["vehicle_id"]: v for v in fleet}
     trips_data = get_trips_mileage_analytics(hours=24)
     trips_by_veh = {v["vehicle_id"]: v for v in trips_data.get("vehicles", [])}
-    safety_data = get_cached("safety_analytics_24") or {}
+    safety_data = get_safety_analytics(hours=24)
     safety_by_grp = {g["group"]: g["total"] for g in safety_data.get("by_group", [])}
 
     groups_summary = []
@@ -1093,7 +1101,7 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
                 "datetime": to_iso_uae(p.get("timestamp", 0)) if p.get("timestamp") else "",
                 "latitude": loc.get("latitude"),
                 "longitude": loc.get("longitude"),
-                "speed": st.get("speed", 0),
+                "speed": round(float(st.get("speed") or 0), 1),
                 "state": st.get("state", "STOPPED"),
             })
 

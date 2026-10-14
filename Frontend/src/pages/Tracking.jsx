@@ -117,10 +117,10 @@ function Tracking() {
 
                 const vStatus = String(vehicle.status || "").toUpperCase()
                 const isOffline = vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || vStatus === "OFFLINE"
+                const normalizedStatus = isOffline ? "OFFLINE" : (vStatus === "MOVING" ? "MOVING" : (vStatus === "IDLING" ? "IDLING" : "STOPPED"))
 
                 const matchesStatus =
-                    statusFilter === "ALL" ||
-                    (statusFilter === "OFFLINE" ? isOffline : vStatus === statusFilter)
+                    statusFilter === "ALL" || normalizedStatus === statusFilter
 
                 return matchesSearch && matchesStatus
             }
@@ -137,15 +137,29 @@ function Tracking() {
     }, [filteredVehicles])
 
     /*
-        Status counts
+        Status counts: clean mutually exclusive partitions
     */
-    const counts = useMemo(() => ({
-        ALL: vehicles.length,
-        MOVING: vehicles.filter(v => String(v.status || "").toUpperCase() === "MOVING").length,
-        IDLING: vehicles.filter(v => String(v.status || "").toUpperCase() === "IDLING").length,
-        STOPPED: vehicles.filter(v => String(v.status || "").toUpperCase() === "STOPPED").length,
-        OFFLINE: vehicles.filter(v => v.connection_status === "OFFLINE" || Boolean(v.is_offline) || String(v.status || "").toUpperCase() === "OFFLINE").length,
-    }), [vehicles])
+    const counts = useMemo(() => {
+        let moving = 0, idling = 0, stopped = 0, offline = 0
+        vehicles.forEach(v => {
+            const isOff = v.connection_status === "OFFLINE" || Boolean(v.is_offline) || String(v.status || "").toUpperCase() === "OFFLINE"
+            if (isOff) {
+                offline++
+            } else {
+                const s = String(v.status || "").toUpperCase()
+                if (s === "MOVING") moving++
+                else if (s === "IDLING") idling++
+                else stopped++
+            }
+        })
+        return {
+            ALL: vehicles.length,
+            MOVING: moving,
+            IDLING: idling,
+            STOPPED: stopped,
+            OFFLINE: offline,
+        }
+    }, [vehicles])
 
     /*
         Select vehicle

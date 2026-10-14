@@ -146,11 +146,11 @@ export default function FleetAlerts() {
     }, [allAlerts, sevFilter, search])
 
     const counts = useMemo(() => ({
-        total:    allAlerts.length,
-        critical: allAlerts.filter(a => a.severity === "CRITICAL").length,
-        warning:  allAlerts.filter(a => a.severity === "WARNING").length,
-        info:     allAlerts.filter(a => a.severity === "INFO").length,
-    }), [allAlerts])
+        total:    data?.total_alerts ?? allAlerts.length,
+        critical: data?.critical_count ?? allAlerts.filter(a => a.severity === "CRITICAL").length,
+        warning:  data?.warning_count ?? allAlerts.filter(a => a.severity === "WARNING").length,
+        info:     data?.info_count ?? allAlerts.filter(a => a.severity === "INFO").length,
+    }), [data, allAlerts])
 
     return (
         <SidebarProvider>

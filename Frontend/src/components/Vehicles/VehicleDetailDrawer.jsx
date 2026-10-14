@@ -113,9 +113,12 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
     const driverId = vehicle.driver?.id || vehicle.driver_id || vehicle.sensors?.driver_id || null
     const cleanDriverId = driverId && !["0000000000000000", "0", "---", "none", "null"].includes(String(driverId).toLowerCase().trim()) ? String(driverId) : null
 
-    // Activity metrics
-    const tripCount = tripsData?.trip_count ?? vehicle.trip_count ?? vehicle.trips_count ?? null
-    const todayDistance = vehicle.today_mileage ?? vehicle.mileage ?? (tripsData?.trips ? tripsData.trips.reduce((sum, t) => sum + Number(t.distance_km || 0), 0) : null)
+    // Activity metrics: use actual trip distance today, never the lifetime hardware odometer
+    const tripCount = tripsData?.trip_count ?? (tripsData?.trips ? tripsData.trips.length : (vehicle.trip_count ?? vehicle.trips_count ?? null))
+    const tripsDistance = tripsData?.trips && tripsData.trips.length > 0
+        ? tripsData.trips.reduce((sum, t) => sum + Number(t.distance_km || 0), 0)
+        : (tripsData?.summary?.total_distance_km ?? (tripsData ? 0 : null))
+    const todayDistance = vehicle.today_mileage ?? tripsDistance
     const idleMinutes = vehicle.idle_duration ? Math.round(vehicle.idle_duration / 60) : null
 
     return (
@@ -276,7 +279,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                         <div className="rounded-lg bg-white p-2.5 border border-slate-100">
                             <span className="text-[10px] font-semibold text-slate-400 uppercase block">Distance Today</span>
                             <span className="font-bold text-slate-900 text-sm">
-                                {todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—"}
+                                {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—")}
                             </span>
                         </div>
                         <div className="rounded-lg bg-white p-2.5 border border-slate-100">

@@ -221,7 +221,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             else 0
         )
 
-        ignition_on = (ignition_value == 1) or (isinstance(ignition_value, (int, float)) and ignition_value > 12.8)
+        ignition_on = (ignition_value == 1) or str(ignition_value).strip().lower() in ["1", "true", "on"]
 
         battery_voltage = (
             battery_sensor.get("value")

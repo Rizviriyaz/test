@@ -26,8 +26,55 @@ GROUP_ID_ALL_UNITS = 601817480
 _report_lock = threading.Lock()
 
 
+def extract_cell_value(cell: Any) -> Any:
+    """Extract numeric or primitive value from Wialon report cell (dict or primitive)."""
+    if isinstance(cell, dict):
+        return cell.get("v") if cell.get("v") is not None else cell.get("t")
+    return cell
+
+
+def extract_cell_text(cell: Any) -> str:
+    """Extract string text representation from Wialon report cell."""
+    if isinstance(cell, dict):
+        return str(cell.get("t") if cell.get("t") is not None else cell.get("v", ""))
+    return str(cell or "")
+
+
+def parse_float_safe(val: Any, default: float = 0.0) -> float:
+    """
+    Safely parse float from Wialon cell (primitive, dict, or string with units/separators).
+    Handles comma/dot decimal separators, thousand separators, and units like 'km', 'km/h'.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, dict):
+        raw = val.get("v") if val.get("v") is not None else val.get("t")
+        return parse_float_safe(raw, default=default)
+
+    clean_str = str(val).replace("km/h", "").replace("km", "").replace(" ", "").strip()
+    if not clean_str or clean_str in ("---", "N/A", "null", "none"):
+        return default
+
+    # Handle thousand and decimal separators: "1,234.56" vs "12,5"
+    if "," in clean_str and "." in clean_str:
+        clean_str = clean_str.replace(",", "")
+    elif "," in clean_str and "." not in clean_str:
+        clean_str = clean_str.replace(",", ".")
+
+    try:
+        return float(clean_str)
+    except (ValueError, TypeError):
+        return default
+
+
 def parse_duration_to_seconds(dur_str: Any) -> int:
     """Parse Wialon duration string (HH:MM:SS or MM:SS) to total seconds."""
+    if isinstance(dur_str, (int, float)):
+        return int(dur_str)
+    if isinstance(dur_str, dict):
+        dur_str = dur_str.get("v") if dur_str.get("v") is not None else dur_str.get("t", "0")
     try:
         parts = str(dur_str).strip().split(":")
         if len(parts) == 3:
@@ -108,15 +155,10 @@ def execute_wialon_unit_trips_report(
                             end_loc_obj = cols[4] if isinstance(cols[4], dict) else {}
                             max_spd_obj = cols[8] if isinstance(cols[8], dict) else {}
 
-                            dist_raw = cols[9] if len(cols) > 9 else "0"
-                            dist_str = str(dist_raw).replace("km", "").strip()
-                            try:
-                                dist_km = float(dist_str)
-                            except ValueError:
-                                dist_km = 0.0
+                            dist_km = parse_float_safe(extract_cell_value(cols[9]) if len(cols) > 9 else 0.0)
 
-                            dur_str = str(cols[5])
-                            mov_str = str(cols[6])
+                            dur_str = extract_cell_text(cols[5])
+                            mov_str = extract_cell_text(cols[6])
                             dur_mins = parse_duration_to_minutes(dur_str)
 
                             trips.append(
@@ -324,24 +366,14 @@ def execute_wialon_group_trips_report(
                         cols = r.get("c", [])
                         # Table 0 columns: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Mileage', 'Total time', 'Engine hours', 'Avg. speed', 'Max. speed', 'Driver']
                         if len(cols) >= 6:
-                            vehicle_name = str(cols[0]).strip()
-                            dist_raw = cols[5] if len(cols) > 5 else "0"
-                            dist_str = str(dist_raw).replace("km", "").strip()
-                            try:
-                                dist_km = float(dist_str)
-                            except ValueError:
-                                dist_km = 0.0
+                            vehicle_name = extract_cell_text(cols[0]).strip()
+                            dist_km = parse_float_safe(extract_cell_value(cols[5]) if len(cols) > 5 else 0.0)
 
-                            total_time_str = str(cols[6]) if len(cols) > 6 else "0:00:00"
-                            engine_hours_str = str(cols[7]) if len(cols) > 7 else "0:00:00"
-                            avg_spd_str = str(cols[8]) if len(cols) > 8 else "0 km/h"
-                            max_spd_col = cols[9] if len(cols) > 9 else "0 km/h"
-                            max_spd_str = (
-                                max_spd_col.get("t")
-                                if isinstance(max_spd_col, dict)
-                                else str(max_spd_col)
-                            )
-                            driver_col = str(cols[10]).strip() if len(cols) > 10 else ""
+                            total_time_str = extract_cell_text(cols[6]) if len(cols) > 6 else "0:00:00"
+                            engine_hours_str = extract_cell_text(cols[7]) if len(cols) > 7 else "0:00:00"
+                            avg_spd_str = extract_cell_text(cols[8]) if len(cols) > 8 else "0 km/h"
+                            max_spd_str = extract_cell_text(cols[9]) if len(cols) > 9 else "0 km/h"
+                            driver_col = extract_cell_text(cols[10]).strip() if len(cols) > 10 else ""
 
                             unit_summaries.append({
                                 "vehicle_name": vehicle_name,

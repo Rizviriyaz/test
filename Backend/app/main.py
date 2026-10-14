@@ -335,7 +335,7 @@ def get_vehicle_trips(
     sid = login()
 
     native_rep = execute_wialon_unit_trips_report(sid, vehicle_id, eff_from, eff_to)
-    if native_rep and native_rep.get("trips"):
+    if native_rep is not None and "trips" in native_rep:
         w_trips = native_rep["trips"]
         return {
             "vehicle_id": vehicle_id,
@@ -726,12 +726,12 @@ def get_drivers():
 
 
 @app.get("/api/dashboard/summary")
-def get_dashboard_summary(hours: int = 24):
+def get_dashboard_summary(hours: int = 24, timeframe: str = None):
     """
     Authoritative single-source-of-truth dashboard summary.
-    Reconciles live fleet state with validated 24h historical analytics.
+    Reconciles live fleet state with validated historical analytics.
     """
-    cache_key = f"summary-{hours}"
+    cache_key = f"summary-{timeframe}-{hours}"
     hit = cached(cache_key, ttl_seconds=60)
     if hit:
         return hit
@@ -756,7 +756,7 @@ def get_dashboard_summary(hours: int = 24):
         offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
         # Authoritative analytics
-        trips_data = get_trips_mileage_analytics(hours=hours)
+        trips_data = get_trips_mileage_analytics(hours=hours, timeframe=timeframe)
         safety_data = get_safety_analytics(hours=hours)
         util_data = get_fleet_utilization_analytics(hours=hours)
 
@@ -1150,13 +1150,17 @@ def get_dashboard_trends(hours: int = 24):
                     previous_odometer is not None
                     and current_odometer is not None
                 ):
-                    distance = (
-                        float(current_odometer)
-                        - float(previous_odometer)
-                    )
+                    try:
+                        distance = (
+                            float(current_odometer)
+                            - float(previous_odometer)
+                        )
 
-                    if 0 <= distance <= 100:
-                        bucket["mileage_km"] += distance
+                        # Odometer is explicitly normalized in kilometers
+                        if 0 <= distance <= 120.0:
+                            bucket["mileage_km"] += distance
+                    except (ValueError, TypeError):
+                        pass
 
                 status = point.get("status") or {}
                 state = str(
@@ -1353,7 +1357,9 @@ def get_fleet_idle_analytics(
         v_idle_st = v.get("idle_start")
         v_lat = v.get("latitude")
         v_lng = v.get("longitude")
-        v_addr = v.get("address") or v.get("location")
+        v_addr = v.get("address")
+        if not isinstance(v_addr, str) or not v_addr.strip():
+            v_addr = "Current Location"
 
         w_veh = wialon_vehicle_map.get(vname, {})
         v_idle_sec = w_veh.get("total_idle_seconds", 0)
@@ -1399,7 +1405,7 @@ def get_fleet_idle_analytics(
                         "latitude": v_lat,
                         "longitude": v_lng
                     },
-                    "address": str(v_addr) if v_addr else "Current Location",
+                    "address": v_addr,
                     "is_active": True
                 }
                 processed_v_events.append(act_event)
@@ -1483,7 +1489,7 @@ def get_fleet_idle_analytics(
             "location_key": key,
             "latitude": c["lat"],
             "longitude": c["lng"],
-            "label": c["address"] if c["address"] and c["address"] != "Unknown Location" else f"Coordinates ({key})",
+            "label": c["address"] if c["address"] and c["address"] != "Unknown Location" and not c["address"].startswith("{") else f"Coordinates ({key})",
             "total_idle_seconds": c["total_idle_seconds"],
             "idle_minutes": round(c["total_idle_seconds"] / 60.0, 2),
             "event_count": c["event_count"],

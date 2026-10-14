@@ -5,9 +5,21 @@ import logging
 import requests
 from app.performance_diagnostics import request_trace_id
 from app.utils.datetime_helpers import now_timestamp
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+_backend_dir = Path(__file__).resolve().parent.parent
+_env_file = _backend_dir / ".env"
+if _env_file.exists():
+    load_dotenv(_env_file)
+else:
+    load_dotenv()
+
+def get_wialon_token():
+    return os.getenv("WIALON_TOKEN") or TOKEN
+
+def get_wialon_api():
+    return os.getenv("WIALON_API") or API_URL
 
 TOKEN = os.getenv("WIALON_TOKEN")
 API_URL = os.getenv("WIALON_API")
@@ -39,7 +51,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
         request_started = time.perf_counter()
         try:
             response = requests.post(
-                API_URL,
+                get_wialon_api(),
                 data=data,
                 timeout=timeout
             )
@@ -93,7 +105,7 @@ def login(force=False):
         login_data = wialon_request(
             "token/login",
             {
-                "token": TOKEN
+                "token": get_wialon_token()
             },
             sid=None,
             is_retry=True
