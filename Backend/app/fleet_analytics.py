@@ -252,7 +252,7 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 # =============================================================================
 
 def get_fleet_health_analytics() -> Dict[str, Any]:
-    cached = get_cached("fleet_health_analytics", ttl_seconds=60)
+    cached = get_cached("fleet_health_analytics", ttl_seconds=180)
     log_cache_state("/api/fleet/health", cached is not None)
     if cached:
         return cached
@@ -446,17 +446,40 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
 # 3. TRIPS & MILEAGE SERVICE
 # =============================================================================
 
-def get_trips_mileage_analytics(hours: int = 24, from_time: int = None, to_time: int = None, timeframe: str = None) -> Dict[str, Any]:
+def get_trips_mileage_analytics(
+    hours: int = 24,
+    from_time: int = None,
+    to_time: int = None,
+    timeframe: str = None,
+    from_date: str = None,
+    to_date: str = None
+) -> Dict[str, Any]:
     from app.utils.datetime_helpers import get_timeframe_timestamps
-    if timeframe or from_time is not None:
-        eff_from, eff_to = get_timeframe_timestamps(timeframe=timeframe, from_time=from_time, to_time=to_time)
+    if timeframe or from_date or from_time is not None:
+        eff_from, eff_to = get_timeframe_timestamps(
+            timeframe=timeframe,
+            from_time=from_time,
+            to_time=to_time,
+            from_date=from_date,
+            to_date=to_date
+        )
     else:
         now_ts = int(time.time())
         eff_from, eff_to = now_ts - hours * 3600, now_ts
 
     eff_hours = max(1, int((eff_to - eff_from) / 3600))
     log_data_window("/api/fleet/trips", eff_from, eff_to)
-    cache_key = f"trips_mileage_v2_{timeframe}_{eff_from}_{eff_to}_uae"
+
+    if from_date:
+        window_spec = f"dates-{from_date}-{to_date or from_date}"
+    elif timeframe:
+        window_spec = f"tf-{timeframe.lower().strip()}"
+    elif from_time is not None and to_time is not None:
+        window_spec = f"exact-{from_time}-{to_time}"
+    else:
+        window_spec = f"hours-{hours or 24}"
+
+    cache_key = f"trips_mileage_v3_{window_spec}_uae"
     cached = get_cached(cache_key, ttl_seconds=180)
     log_cache_state("/api/fleet/trips", cached is not None)
     if cached:
@@ -629,7 +652,7 @@ def get_trips_mileage_analytics(hours: int = 24, from_time: int = None, to_time:
                 logging.exception("Wialon trip data failed for vehicle %s", vid)
                 raise
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor(max_workers=3) as executor:
             vehicle_trips = list(map_with_request_context(executor, _process_trips, fleet))
 
     total_trips = sum(v["trip_count"] for v in vehicle_trips)
@@ -771,7 +794,7 @@ def get_safety_analytics(hours: int = 168) -> Dict[str, Any]:
             logging.exception("Wialon safety data failed for vehicle %s", vid)
             raise
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         nested_events = list(map_with_request_context(executor, _fetch_safety_events, fleet))
 
     all_events = [ev for sub in nested_events for ev in sub]
@@ -825,7 +848,7 @@ def get_safety_analytics(hours: int = 168) -> Dict[str, Any]:
 # =============================================================================
 
 def get_fleet_alerts_analytics() -> Dict[str, Any]:
-    cached = get_cached("fleet_alerts_analytics", ttl_seconds=60)
+    cached = get_cached("fleet_alerts_analytics", ttl_seconds=180)
     if cached:
         return cached
 

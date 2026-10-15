@@ -174,34 +174,29 @@ def health_check():
 @app.get("/api/vehicles")
 @timed_calculation("/api/vehicles")
 def get_vehicles():
+    hit = cached("fleet-vehicles-live", ttl_seconds=5)
+    if hit:
+        return hit
 
     try:
-
         # Login to Wialon
         sid = login()
 
         # Get all vehicles
-        vehicles = get_all_vehicles(
-            sid
-        )
+        vehicles = get_all_vehicles(sid)
 
         # Get latest calculated data
-        calculated_data = get_calculated_data(
-            sid,
-            vehicles
-        )
+        calculated_data = get_calculated_data(sid, vehicles)
 
         # Build final vehicle data
-        fleet = get_vehicle_live_data(
-            sid,
-            vehicles,
-            calculated_data
-        )
+        fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
 
-        return {
+        result = {
             "count": len(fleet),
             "vehicles": fleet
         }
+        set_cache("fleet-vehicles-live", result)
+        return result
 
     except Exception as e:
         print("ERROR IN /api/vehicles:", repr(e))
@@ -214,16 +209,15 @@ def get_vehicles():
 
 @app.get("/api/vehicles/{vehicle_id}")
 def get_vehicle_details(vehicle_id: int):
-    sid = login()
+    cached_fleet_res = cached("fleet-vehicles-live", ttl_seconds=5)
+    fleet = cached_fleet_res.get("vehicles") if cached_fleet_res else None
 
-    vehicles = get_all_vehicles(sid)
-    calculated_data = get_calculated_data(sid, vehicles)
-
-    fleet = get_vehicle_live_data(
-        sid,
-        vehicles,
-        calculated_data
-    )
+    if not fleet:
+        sid = login()
+        vehicles = get_all_vehicles(sid)
+        calculated_data = get_calculated_data(sid, vehicles)
+        fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
+        set_cache("fleet-vehicles-live", {"count": len(fleet), "vehicles": fleet})
 
     vehicle = next(
         (
@@ -268,6 +262,10 @@ def get_wialon_audit():
 
 @app.get("/api/groups")
 def get_groups():
+    hit = cached("fleet-groups-live", ttl_seconds=15)
+    if hit:
+        return hit
+
     try:
         sid = login()
         raw_groups = get_vehicle_groups(sid)
@@ -304,10 +302,12 @@ def get_groups():
                 "vehicles": group_vehicles
             })
 
-        return {
+        result = {
             "count": len(group_summaries),
             "groups": group_summaries
         }
+        set_cache("fleet-groups-live", result)
+        return result
     except Exception as e:
         print("ERROR IN /api/groups:", repr(e))
         traceback.print_exc()
@@ -328,16 +328,23 @@ def get_vehicle_trips(
         if from_time > to_time:
             raise HTTPException(status_code=400, detail="End timestamp must be on or after start timestamp")
         eff_from, eff_to = from_time, to_time
+        window_spec = f"exact-{from_time}-{to_time}"
     else:
         now_ts = int(time.time())
         eff_from, eff_to = now_ts - hours * 3600, now_ts
+        window_spec = f"hours-{hours or 24}"
+
+    cache_key = f"vehicle-trips-v3-{vehicle_id}-{window_spec}-uae"
+    hit = cached(cache_key, ttl_seconds=60)
+    if hit:
+        return hit
 
     sid = login()
 
     native_rep = execute_wialon_unit_trips_report(sid, vehicle_id, eff_from, eff_to)
     if native_rep is not None and "trips" in native_rep:
         w_trips = native_rep["trips"]
-        return {
+        res = {
             "vehicle_id": vehicle_id,
             "hours": hours,
             "from_time": eff_from,
@@ -345,6 +352,8 @@ def get_vehicle_trips(
             "trip_count": len(w_trips),
             "trips": w_trips
         }
+        set_cache(cache_key, res)
+        return res
 
     vehicles = get_all_vehicles(sid)
     target_vehicle = next((v for v in vehicles if v.get("id") == vehicle_id), None)
@@ -379,7 +388,7 @@ def get_vehicle_trips(
             "end_location": trip["end_location"]
         })
 
-    return {
+    result = {
         "vehicle_id": vehicle_id,
         "hours": hours,
         "from_time": eff_from,
@@ -387,6 +396,8 @@ def get_vehicle_trips(
         "trip_count": len(trips),
         "trips": trips
     }
+    set_cache(cache_key, result)
+    return result
 
 
 @app.get("/api/vehicles/{vehicle_id}/history")
@@ -449,7 +460,16 @@ def get_vehicle_idle(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    cache_key = f"vehicle-idle-v5-{vehicle_id}-{timeframe}-{hours}-{eff_from}-{eff_to}-uae"
+    if from_time is not None and to_time is not None:
+        window_spec = f"exact-{from_time}-{to_time}"
+    elif from_date and to_date:
+        window_spec = f"dates-{from_date}-{to_date}"
+    elif timeframe:
+        window_spec = f"tf-{timeframe.lower().strip()}"
+    else:
+        window_spec = f"hours-{hours or 24}"
+
+    cache_key = f"vehicle-idle-v6-{vehicle_id}-{window_spec}-uae"
     hit = cached(cache_key, ttl_seconds=60)
     if hit:
         return hit
@@ -903,8 +923,14 @@ def get_dashboard_mileage(
 
     log_data_window("/api/dashboard/mileage", eff_from, eff_to)
 
-    # Cache key uniquely includes timeframe, effective UTC timestamps, group, and timezone
-    cache_key = f"dashboard-mileage-v2-{timeframe_norm}-{eff_from}-{eff_to}-{group_id}-uae"
+    if from_time is not None and to_time is not None:
+        window_spec = f"exact-{from_time}-{to_time}"
+    elif from_date:
+        window_spec = f"dates-{from_date}-{to_date or from_date}"
+    else:
+        window_spec = f"tf-{timeframe_norm}"
+
+    cache_key = f"dashboard-mileage-v3-{window_spec}-{group_id}-uae"
     hit = cached(cache_key, ttl_seconds=60)
     log_cache_state("/api/dashboard/mileage", hit is not None)
     if hit:
@@ -1225,7 +1251,8 @@ def get_fleet_idle_analytics(
     from_time: int = None,
     to_time: int = None,
     group_id: int = None,
-    vehicle_id: int = None
+    vehicle_id: int = None,
+    include_events: bool = True
 ):
     """
     Authoritative Fleet-wide Idle Analytics endpoint backed directly by Wialon Engine Hours Report (Template 2).
@@ -1246,8 +1273,18 @@ def get_fleet_idle_analytics(
 
     log_data_window("/api/idle/fleet-analytics", eff_from, eff_to)
 
-    cache_key = f"fleet-idle-v5-{timeframe}-{hours}-{eff_from}-{eff_to}-{group_id}-{vehicle_id}-uae"
-    hit = cached(cache_key, ttl_seconds=60)
+    if from_time is not None and to_time is not None:
+        window_spec = f"exact-{from_time}-{to_time}"
+    elif from_date:
+        window_spec = f"dates-{from_date}-{to_date or from_date}"
+    elif timeframe:
+        window_spec = f"tf-{timeframe.lower().strip()}"
+    else:
+        window_spec = f"hours-{hours or 24}"
+
+    events_tag = "full" if include_events else "summary"
+    cache_key = f"fleet-idle-v6-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
+    hit = cached(cache_key, ttl_seconds=180)
     log_cache_state("/api/idle/fleet-analytics", hit is not None)
     if hit:
         return hit
@@ -1292,7 +1329,7 @@ def get_fleet_idle_analytics(
         eff_from,
         eff_to,
         group_id=GROUP_ID_ALL_UNITS,
-        include_events=True
+        include_events=include_events
     )
 
     if rep_res is None:
@@ -1668,7 +1705,13 @@ def api_fleet_trips(
                 from_date=from_date,
                 to_date=to_date
             )
-            return get_trips_mileage_analytics(from_time=eff_from, to_time=eff_to, timeframe=timeframe)
+            return get_trips_mileage_analytics(
+                from_time=eff_from,
+                to_time=eff_to,
+                timeframe=timeframe,
+                from_date=from_date,
+                to_date=to_date
+            )
         return get_trips_mileage_analytics(hours=hours, from_time=from_time, to_time=to_time)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

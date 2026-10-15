@@ -26,6 +26,12 @@ API_URL = os.getenv("WIALON_API")
 SID = None
 
 import threading
+
+_wialon_http_session = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=30)
+_wialon_http_session.mount("https://", _http_adapter)
+_wialon_http_session.mount("http://", _http_adapter)
+
 # Session refresh can call login() while handling Wialon's expired-session
 # response. Re-entrant locking keeps refresh serialized without self-deadlocking.
 _login_lock = threading.RLock()
@@ -50,7 +56,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
     for attempt in range(max_retries):
         request_started = time.perf_counter()
         try:
-            response = requests.post(
+            response = _wialon_http_session.post(
                 get_wialon_api(),
                 data=data,
                 timeout=timeout

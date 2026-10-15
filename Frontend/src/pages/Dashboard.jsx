@@ -116,41 +116,85 @@ function Dashboard() {
     }, [])
 
     useEffect(() => {
-        const mountedRef = { current: true }
-        loadVehicles(mountedRef)
-        const interval = setInterval(() => loadVehicles(mountedRef), 10000)
-        return () => {
-            mountedRef.current = false
-            clearInterval(interval)
+        let mounted = true
+        let timerId = null
+        let isFetching = false
+
+        const fetchVehiclesPeriodic = async () => {
+            if (isFetching || !mounted) return
+            isFetching = true
+            try {
+                const data = await getVehicles()
+                if (mounted) {
+                    setVehicles(data.vehicles || [])
+                    setLastUpdated(new Date())
+                    setError(null)
+                }
+            } catch (err) {
+                if (mounted) {
+                    console.error("Failed to load vehicle data:", err)
+                    setError("Failed to load vehicle data")
+                }
+            } finally {
+                isFetching = false
+                if (mounted) {
+                    setLoading(false)
+                    timerId = setTimeout(fetchVehiclesPeriodic, 10000)
+                }
+            }
         }
-    }, [loadVehicles])
+
+        fetchVehiclesPeriodic()
+
+        return () => {
+            mounted = false
+            if (timerId) clearTimeout(timerId)
+        }
+    }, [])
 
     // ─── 2. Load Alerts, Today Trips, Idle Analytics & Today Mileage ────────
+    const mileageTimeframeRef = useRef(mileageTimeframe)
+    mileageTimeframeRef.current = mileageTimeframe
+
     useEffect(() => {
         let active = true
+        let isFetching = false
+        let timerId = null
+
         async function fetchAuxiliaryData() {
+            if (isFetching || !active) return
+            isFetching = true
             const seq = ++auxSeqRef.current
             try {
                 const [alertsRes, tripsRes, idleRes, todayMileageRes] = await Promise.allSettled([
                     getFleetAlertsAnalytics(),
                     getFleetTripsAnalytics({ timeframe: "today" }),
-                    getFleetIdleAnalytics({ timeframe: "today" }),
+                    getFleetIdleAnalytics({ timeframe: "today", include_events: false }),
                     getDashboardMileage("today"),
                 ])
                 if (!active || seq !== auxSeqRef.current) return
                 if (alertsRes.status === "fulfilled") setAlertsData(alertsRes.value)
                 if (tripsRes.status === "fulfilled") setTripsData(tripsRes.value)
                 if (idleRes.status === "fulfilled") setIdleAnalyticsData(idleRes.value)
-                if (todayMileageRes.status === "fulfilled") setTodayMileageData(todayMileageRes.value)
+                if (todayMileageRes.status === "fulfilled") {
+                    setTodayMileageData(todayMileageRes.value)
+                    if (mileageTimeframeRef.current === "today") {
+                        setMileageData(todayMileageRes.value)
+                    }
+                }
             } catch (err) {
                 console.error("Failed to fetch dashboard auxiliary data:", err)
+            } finally {
+                isFetching = false
+                if (active) {
+                    timerId = setTimeout(fetchAuxiliaryData, 30000)
+                }
             }
         }
         fetchAuxiliaryData()
-        const interval = setInterval(fetchAuxiliaryData, 30000)
         return () => {
             active = false
-            clearInterval(interval)
+            if (timerId) clearTimeout(timerId)
         }
     }, [])
 

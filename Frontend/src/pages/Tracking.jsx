@@ -87,39 +87,37 @@ function Tracking() {
 
     useEffect(() => {
         let mounted = true
+        let timerId = null
+        let isFetching = false
 
-        const runInitialLoad = async () => {
-            try {
-                const data = await getVehicles()
-                if (!mounted) return
-                setVehicles(data?.vehicles || [])
-                setError(null)
-                setLastSyncTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }))
-            } catch (err) {
-                if (!mounted) return
-                setError(err.message || "Failed to load vehicle telemetry")
-            } finally {
-                if (mounted) setLoading(false)
-            }
-        }
-
-        runInitialLoad()
-        const interval = setInterval(async () => {
-            if (!mounted) return
+        const fetchTelemetry = async () => {
+            if (isFetching || !mounted) return
+            isFetching = true
             try {
                 const data = await getVehicles()
                 if (mounted) {
                     setVehicles(data?.vehicles || [])
+                    setError(null)
                     setLastSyncTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }))
                 }
             } catch (err) {
-                console.warn("Telemetry refresh poll failed:", err.message)
+                if (mounted) {
+                    setError(err.message || "Failed to load vehicle telemetry")
+                }
+            } finally {
+                isFetching = false
+                if (mounted) {
+                    setLoading(false)
+                    timerId = setTimeout(fetchTelemetry, 10000)
+                }
             }
-        }, 10000)
+        }
+
+        fetchTelemetry()
 
         return () => {
             mounted = false
-            clearInterval(interval)
+            if (timerId) clearTimeout(timerId)
         }
     }, [])
 

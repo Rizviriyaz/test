@@ -1,13 +1,27 @@
 """Server-side Supabase authentication for operational API requests."""
 
 import os
+import time
 
 import requests
 from fastapi import HTTPException
 
+_auth_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=15)
+_auth_session.mount("https://", _adapter)
+_auth_session.mount("http://", _adapter)
+
+# In-memory cache for validated tokens: token -> {"user": dict, "timestamp": float}
+_token_cache = {}
+
 
 def authenticate_access_token(token: str) -> dict:
     """Validate a bearer token with Supabase and load its database profile."""
+    now = time.time()
+    cached = _token_cache.get(token)
+    if cached and (now - cached["timestamp"]) < 60:
+        return cached["user"]
+
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
     anon_key = os.getenv("SUPABASE_ANON_KEY", "")
     if not supabase_url or not anon_key:
@@ -15,10 +29,11 @@ def authenticate_access_token(token: str) -> dict:
 
     headers = {"apikey": anon_key, "Authorization": f"Bearer {token}"}
     try:
-        response = requests.get(f"{supabase_url}/auth/v1/user", headers=headers, timeout=8)
+        response = _auth_session.get(f"{supabase_url}/auth/v1/user", headers=headers, timeout=8)
     except requests.RequestException as exc:
         raise HTTPException(status_code=503, detail="Authentication service is unavailable") from exc
     if response.status_code in (400, 401, 403):
+        _token_cache.pop(token, None)
         raise HTTPException(status_code=401, detail="Invalid or expired access token")
     if not response.ok:
         raise HTTPException(status_code=503, detail="Authentication service could not validate the token")
@@ -31,7 +46,7 @@ def authenticate_access_token(token: str) -> dict:
 
     # The profile request uses the user's own token, so Supabase RLS remains active.
     try:
-        profile_response = requests.get(
+        profile_response = _auth_session.get(
             f"{supabase_url}/rest/v1/profiles",
             params={"id": f"eq.{user_id}", "select": "id,role"},
             headers={**headers, "Accept": "application/json"},
@@ -53,4 +68,7 @@ def authenticate_access_token(token: str) -> dict:
     allowed_roles = {"admin", "manager", "fleet_manager", "viewer"}
     if role not in allowed_roles:
         raise HTTPException(status_code=403, detail="User profile has no permitted fleet role")
-    return {"id": user_id, "email": user.get("email"), "role": role}
+
+    result = {"id": user_id, "email": user.get("email"), "role": role}
+    _token_cache[token] = {"user": result, "timestamp": now}
+    return result
