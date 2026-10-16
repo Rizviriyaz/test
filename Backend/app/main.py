@@ -1387,6 +1387,7 @@ def get_fleet_idle_analytics(
     for v in target_vehicles:
         vid = v.get("vehicle_id") or v.get("id")
         vname = v.get("vehicle_name") or v.get("nm") or f"Vehicle {vid}"
+        v_reg_plate = v.get("registration_plate") or v.get("plate") or None
         v_grps = unit_groups_map.get(vid, [{"id": 0, "name": "General Fleet"}])
         primary_grp = v_grps[0]
         live_st = v.get("status", "STOPPED")
@@ -1412,6 +1413,7 @@ def get_fleet_idle_analytics(
                 "id": f"{vid}-{ev.get('start_time', idx)}",
                 "vehicle_id": vid,
                 "vehicle_name": vname,
+                "registration_plate": v_reg_plate,
                 "group_id": primary_grp["id"],
                 "group_name": primary_grp["name"],
                 "start_time": ev.get("start_time", 0),
@@ -1432,6 +1434,7 @@ def get_fleet_idle_analytics(
                     "id": f"{vid}-active",
                     "vehicle_id": vid,
                     "vehicle_name": vname,
+                    "registration_plate": v_reg_plate,
                     "group_id": primary_grp["id"],
                     "group_name": primary_grp["name"],
                     "start_time": act_start,
@@ -1456,6 +1459,7 @@ def get_fleet_idle_analytics(
         by_vehicle.append({
             "vehicle_id": vid,
             "vehicle_name": vname,
+            "registration_plate": v_reg_plate,
             "group_id": primary_grp["id"],
             "group_name": primary_grp["name"],
             "total_idle_seconds": v_idle_sec,
@@ -1580,6 +1584,13 @@ def get_fleet_idle_analytics(
     total_fleet_vehicles = len(target_vehicles)
     avg_idle_sec = round(total_idle_seconds / total_events_count, 2) if total_events_count > 0 else 0
 
+    longest_idle_vehicle = None
+    if longest_idle_seconds > 0 and by_vehicle:
+        for bv in by_vehicle:
+            if bv.get("longest_idle_seconds", 0) == longest_idle_seconds:
+                longest_idle_vehicle = bv
+                break
+
     response_payload = {
         "timeframe": {
             "hours": hours,
@@ -1596,6 +1607,9 @@ def get_fleet_idle_analytics(
             "total_idle_hours": round(total_idle_seconds / 3600.0, 2),
             "average_idle_seconds": avg_idle_sec,
             "longest_idle_seconds": longest_idle_seconds,
+            "longest_idle_vehicle_id": longest_idle_vehicle.get("vehicle_id") if longest_idle_vehicle else None,
+            "longest_idle_vehicle_name": longest_idle_vehicle.get("vehicle_name") if longest_idle_vehicle else None,
+            "longest_idle_registration_plate": longest_idle_vehicle.get("registration_plate") if longest_idle_vehicle else None,
             "idle_event_count": total_events_count,
             "idling_fleet_ratio": round((currently_idling / total_fleet_vehicles) * 100, 1) if total_fleet_vehicles > 0 else 0
         },

@@ -40,6 +40,7 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import KpiCard from "../components/Common/KpiCard"
+import LiveIdleTimer from "../components/Common/LiveIdleTimer"
 
 // Curated enterprise palette starting with ATS brand blue
 const CHART_COLORS = [
@@ -428,55 +429,34 @@ function Dashboard() {
         }
     }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet, activeTodayCount])
 
-    // ─── 9. Idle Vehicles Requiring Attention (Historical continuous idle >= 5 mins / 300s today) ──────
+    // ─── 9. Idle Vehicles Requiring Attention (Active continuous idle >= 5 mins / 300s) ──────
     const attentionVehicles = useMemo(() => {
-        if (!idleAnalyticsData) return []
-        const vehicleAttentionMap = new Map()
+        if (!vehicles || vehicles.length === 0) return []
 
-        if (idleAnalyticsData.events && Array.isArray(idleAnalyticsData.events) && idleAnalyticsData.events.length > 0) {
-            idleAnalyticsData.events.forEach(ev => {
-                const duration = Number(ev.duration ?? ev.duration_seconds ?? 0)
-                if (duration >= 300) {
-                    const vid = ev.vehicle_id
-                    const grp = ev.group_name || "General Fleet"
-                    if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(vid))) {
-                        const existing = vehicleAttentionMap.get(vid)
-                        if (!existing || duration > existing.max_duration) {
-                            vehicleAttentionMap.set(vid, {
-                                vehicle_id: vid,
-                                vehicle_name: ev.vehicle_name || `Vehicle #${vid}`,
-                                registration_plate: ev.registration_plate || ev.plate || null,
-                                group: grp,
-                                idle_duration: duration,
-                                max_duration: duration,
-                            })
-                        }
-                    }
+        return vehicles
+            .filter(v => {
+                const isIdling = v.status === "IDLING"
+                const dur = Number(v.idle_duration || 0)
+                const passesThreshold = dur >= 300
+                const vidStr = String(v.vehicle_id || v.id)
+                const passesGroup = selectedGroup === "ALL" || (v.group || "General Fleet") === selectedGroup || filteredVehicleIdSet.has(vidStr)
+                return isIdling && passesThreshold && passesGroup
+            })
+            .map(v => {
+                const vid = v.vehicle_id || v.id
+                return {
+                    vehicle_id: vid,
+                    vehicle_name: v.vehicle_name || `Vehicle #${vid}`,
+                    registration_plate: v.registration_plate || v.plate || null,
+                    group: v.group || "General Fleet",
+                    status: v.status,
+                    idle_duration: Number(v.idle_duration || 0),
+                    idle_start: v.idle_start || null,
                 }
             })
-        } else if (idleAnalyticsData.by_vehicle && Array.isArray(idleAnalyticsData.by_vehicle)) {
-            idleAnalyticsData.by_vehicle.forEach(v => {
-                const maxDuration = Number(v.longest_idle_seconds ?? v.max_idle_seconds ?? v.total_idle_seconds ?? v.idle_seconds ?? 0)
-                if (maxDuration >= 300) {
-                    const grp = v.group_name || "General Fleet"
-                    if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(v.vehicle_id))) {
-                        vehicleAttentionMap.set(v.vehicle_id, {
-                            vehicle_id: v.vehicle_id,
-                            vehicle_name: v.vehicle_name || `Vehicle #${v.vehicle_id}`,
-                            registration_plate: v.registration_plate || v.plate || null,
-                            group: grp,
-                            idle_duration: maxDuration,
-                            max_duration: maxDuration,
-                        })
-                    }
-                }
-            })
-        }
-
-        return Array.from(vehicleAttentionMap.values())
             .sort((a, b) => b.idle_duration - a.idle_duration)
             .slice(0, 5)
-    }, [idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
+    }, [vehicles, selectedGroup, filteredVehicleIdSet])
 
     // ─── 10. Top Vehicles by Mileage (Filtered by Group & Timeframe) ────────
     const mileageUnitsSource = useMemo(() => {
@@ -957,7 +937,6 @@ function Dashboard() {
                                             ) : (
                                                 <div className="space-y-2">
                                                     {attentionVehicles.map(vehicle => {
-                                                        const idleMins = Math.round(Number(vehicle.idle_duration || 0) / 60)
                                                         return (
                                                             <button
                                                                 key={vehicle.vehicle_id}
@@ -974,9 +953,21 @@ function Dashboard() {
                                                                             {vehicle.group || "General Fleet"}
                                                                         </span>
                                                                     </div>
-                                                                    <p className="mt-0.5 text-[11px] font-semibold text-amber-800">
-                                                                        {idleMins} min continuous idle
-                                                                    </p>
+                                                                    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[11px] font-semibold text-amber-900">
+                                                                        <span className="inline-flex items-center gap-1">
+                                                                            <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                                                            <LiveIdleTimer
+                                                                                startTime={vehicle.idle_start}
+                                                                                baseDuration={vehicle.idle_duration}
+                                                                                status={vehicle.status}
+                                                                                className="text-amber-950 font-bold"
+                                                                            />
+                                                                        </span>
+                                                                        <span className="text-amber-400">·</span>
+                                                                        <span className="text-amber-800 text-[10px]">
+                                                                            {vehicle.idle_start ? `Idling since ${formatUAETime(vehicle.idle_start)}` : "Start time unavailable"}
+                                                                        </span>
+                                                                    </div>
                                                                 </div>
 
                                                                 <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-600 text-white group-hover:bg-amber-700 transition">

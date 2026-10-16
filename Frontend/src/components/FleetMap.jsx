@@ -298,6 +298,7 @@ function FleetMap({
     selectedVehicle = null,
     onVehicleSelect = () => {},
     onInspectVehicle = null,
+    className = "",
 }) {
     const vehiclesWithLocation = useMemo(() => {
         return (vehicles || []).filter(v => isValidCoordinate(v?.latitude, v?.longitude))
@@ -317,11 +318,11 @@ function FleetMap({
     }, [vehiclesWithLocation])
 
     return (
-        <div className="relative h-full w-full overflow-hidden">
+        <div className={`relative h-full w-full overflow-hidden rounded-xl border border-slate-200/90 bg-white shadow-xs ${className}`}>
             <MapContainer
                 center={center}
                 zoom={10}
-                className="h-full w-full"
+                className="h-full w-full rounded-xl"
                 scrollWheelZoom={true}
             >
                 <SelectedVehicleFocus selectedVehicle={selectedVehicle} />

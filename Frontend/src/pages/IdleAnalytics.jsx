@@ -14,15 +14,17 @@ import {
     X,
     SlidersHorizontal,
     ChevronRight,
-    Users,
-    TrendingUp,
     Search,
+    ChevronLeft,
+    TrendingUp,
+    Users,
 } from "lucide-react"
 
 import { getFleetIdleAnalytics } from "../api/fleetApi"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import AnalyticsChart from "../components/Analytics/AnalyticsChart"
 import IdleMapModal from "../components/Analytics/IdleMapModal"
+import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import { LocationName } from "../utils/reverseGeocode"
 
 import { formatUAEDateTime, getUAETodayStr, getUAEDateStr } from "../utils/datetime"
@@ -128,8 +130,11 @@ export default function IdleAnalytics() {
     const [selectedGroupId, setSelectedGroupId] = useState(null)
     const [drillVehicleId, setDrillVehicleId] = useState(null)
     const [mapEvent, setMapEvent] = useState(null)
+    const [drawerVehicle, setDrawerVehicle] = useState(null)
     const [sortBy, setSortBy] = useState("start_time")
     const [sortDir, setSortDir] = useState("desc")
+    const [page, setPage] = useState(1)
+    const [pageSize, setPageSize] = useState(10)
 
     // ── Load analytics ──
     const load = useCallback(async () => {
@@ -178,6 +183,11 @@ export default function IdleAnalytics() {
     const byLocation = useMemo(() => analytics?.by_location || [], [analytics])
     const trend = useMemo(() => analytics?.trend || [], [analytics])
 
+    // Reset page to 1 whenever any filter or sort changes
+    useEffect(() => {
+        setPage(1)
+    }, [drillVehicleId, filterVehicleId, filterGroupId, filterMinIdle, searchText, sortBy, sortDir, rangeMode, selectedTimeframe, startDate, endDate])
+
     // Client-side filters applied to event list
     const filteredEvents = useMemo(() => {
         let evs = allEvents
@@ -193,21 +203,54 @@ export default function IdleAnalytics() {
         if (searchText.trim()) {
             const q = searchText.trim().toLowerCase()
             evs = evs.filter((e) => {
+                const vPlate = (e.registration_plate || e.plate || "").toLowerCase()
                 const vName = (e.vehicle_name || "").toLowerCase()
                 const vId = String(e.vehicle_id || "")
                 const gName = (e.group_name || "").toLowerCase()
-                return vName.includes(q) || vId.includes(q) || gName.includes(q)
+                return vPlate.includes(q) || vName.includes(q) || vId.includes(q) || gName.includes(q)
             })
         }
-        // Sort
+        // Deterministic Sort
         evs = [...evs].sort((a, b) => {
             let aVal = a[sortBy] ?? 0
             let bVal = b[sortBy] ?? 0
-            if (sortDir === "asc") return aVal > bVal ? 1 : -1
-            return aVal < bVal ? 1 : -1
+            if (aVal !== bVal) {
+                if (sortDir === "asc") return aVal > bVal ? 1 : -1
+                return aVal < bVal ? 1 : -1
+            }
+            // Deterministic secondary tie-breaker
+            return (b.start_time || 0) - (a.start_time || 0) || String(b.id || "").localeCompare(String(a.id || ""))
         })
         return evs
     }, [allEvents, drillVehicleId, filterVehicleId, filterMinIdle, searchText, sortBy, sortDir])
+
+    // Pagination calculations
+    const totalEvents = filteredEvents.length
+    const totalPages = Math.max(1, Math.ceil(totalEvents / pageSize))
+    const safePage = Math.min(page, totalPages)
+    const startIndex = (safePage - 1) * pageSize
+    const paginatedEvents = useMemo(() => {
+        return filteredEvents.slice(startIndex, startIndex + pageSize)
+    }, [filteredEvents, startIndex, pageSize])
+    const visibleStart = totalEvents === 0 ? 0 : startIndex + 1
+    const visibleEnd = Math.min(startIndex + pageSize, totalEvents)
+
+    // Longest idle vehicle resolution for interactive KPI card
+    const longestIdleVehicle = useMemo(() => {
+        if (!analytics?.by_vehicle || analytics.by_vehicle.length === 0) return null
+        const longestSec = Number(analytics?.kpis?.longest_idle_seconds || 0)
+        if (longestSec <= 0) return null
+
+        if (analytics?.kpis?.longest_idle_vehicle_id) {
+            const match = analytics.by_vehicle.find(v => String(v.vehicle_id) === String(analytics.kpis.longest_idle_vehicle_id))
+            if (match) return match
+        }
+
+        const exact = analytics.by_vehicle.find(v => Number(v.longest_idle_seconds || 0) === longestSec)
+        if (exact) return exact
+
+        return analytics.by_vehicle.reduce((max, v) => (Number(v.longest_idle_seconds || 0) > Number(max?.longest_idle_seconds || 0) ? v : max), null)
+    }, [analytics])
 
     // Stats for active vehicle search / filter
     const activeSearchStats = useMemo(() => {
@@ -569,10 +612,15 @@ export default function IdleAnalytics() {
                                 />
                                 <KpiCard
                                     icon={AlertTriangle}
-                                    iconBg="bg-red-50"
+                                    iconBg="bg-red-50 text-red-600 border border-red-100"
                                     iconColor="text-red-500"
                                     label="Longest Idle"
                                     value={formatDuration(kpis.longest_idle_seconds)}
+                                    sub={longestIdleVehicle ? `${longestIdleVehicle.registration_plate || longestIdleVehicle.vehicle_name} · Click for details` : "No idling recorded"}
+                                    badge={longestIdleVehicle ? "Inspect" : undefined}
+                                    badgeCls="bg-red-100/70 text-red-800 border-red-200"
+                                    onClick={longestIdleVehicle ? () => setDrawerVehicle(longestIdleVehicle) : undefined}
+                                    title={longestIdleVehicle ? `Inspect longest idle vehicle: ${longestIdleVehicle.registration_plate || longestIdleVehicle.vehicle_name}` : "Longest idle"}
                                 />
                             </section>
 
@@ -839,36 +887,44 @@ export default function IdleAnalytics() {
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-100">
-                                                {filteredEvents.slice(0, 100).map((ev, idx) => {
+                                                {paginatedEvents.map((ev, idx) => {
                                                     const hasLoc = ev.location?.latitude != null && ev.location?.longitude != null
+                                                    const displayPlate = ev.registration_plate || ev.plate || null
                                                     return (
                                                         <tr key={ev.id || idx} className="transition hover:bg-slate-50">
                                                             <td className="px-5 py-3.5">
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setSearchText(ev.vehicle_name)}
-                                                                    className="group flex items-center gap-2 text-left"
-                                                                    title="Click to view all idle events for this vehicle"
+                                                                    onClick={() => setDrawerVehicle(ev)}
+                                                                    className="group flex items-center gap-2 text-left cursor-pointer"
+                                                                    title="Click to inspect vehicle details & idle history"
                                                                 >
                                                                     <Truck className="h-3.5 w-3.5 shrink-0 text-slate-400 group-hover:text-[#33758F]" />
-                                                                    <span className="text-sm font-medium text-slate-800 transition group-hover:text-[#33758F] group-hover:underline">
-                                                                        {ev.vehicle_name}
-                                                                    </span>
+                                                                    <div className="min-w-0">
+                                                                        <span className="text-xs font-bold font-mono text-slate-900 block truncate group-hover:text-[#33758F]">
+                                                                            {displayPlate || ev.vehicle_name}
+                                                                        </span>
+                                                                        <span className="text-[10px] text-slate-400 block truncate">
+                                                                            {displayPlate && ev.vehicle_name ? `${ev.vehicle_name} · ` : ""}ID {ev.vehicle_id}
+                                                                        </span>
+                                                                    </div>
                                                                 </button>
                                                             </td>
-                                                            <td className="px-5 py-3.5 text-sm text-slate-600">{ev.group_name || "—"}</td>
-                                                            <td className="px-5 py-3.5 text-sm text-slate-600">{formatDateTime(ev.start_time)}</td>
-                                                            <td className="px-5 py-3.5 text-sm text-slate-600">{formatDateTime(ev.end_time)}</td>
+                                                            <td className="px-5 py-3.5 text-xs text-slate-600 font-medium">{ev.group_name || "—"}</td>
+                                                            <td className="px-5 py-3.5 text-xs font-mono text-slate-700">{formatDateTime(ev.start_time)}</td>
+                                                            <td className="px-5 py-3.5 text-xs font-mono text-slate-700">{formatDateTime(ev.end_time)}</td>
                                                             <td className="px-5 py-3.5">
-                                                                <span className="text-sm font-semibold text-slate-800">{formatDuration(ev.duration)}</span>
+                                                                <span className="text-xs font-bold font-mono text-amber-700 bg-amber-50 border border-amber-200/60 px-2 py-0.5 rounded">
+                                                                    {formatDuration(ev.duration)}
+                                                                </span>
                                                             </td>
-                                                                                                                  <td className="px-5 py-3.5">
+                                                            <td className="px-5 py-3.5">
                                                                 {hasLoc ? (
                                                                     <div className="flex items-center gap-1.5">
                                                                         <button
                                                                             type="button"
                                                                             onClick={() => setMapEvent(ev)}
-                                                                            className="group inline-flex w-[260px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-sm transition hover:border-[#33758F] hover:bg-slate-50 text-center"
+                                                                            className="group inline-flex w-[240px] items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 shadow-2xs transition hover:border-[#33758F] hover:bg-slate-50 text-center"
                                                                             title="View on Interactive Map"
                                                                         >
                                                                             <MapPin className="h-3.5 w-3.5 shrink-0 text-amber-500 transition-transform group-hover:scale-110" />
@@ -895,11 +951,60 @@ export default function IdleAnalytics() {
                                                 })}
                                             </tbody>
                                         </table>
-                                        {filteredEvents.length > 100 && (
-                                            <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
-                                                Showing first 100 of {filteredEvents.length} events. Use Export CSV to get all records.
+
+                                        {/* ── Deterministic Pagination Bar ── */}
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-t border-slate-200 px-5 py-3.5 bg-slate-50/50">
+                                            <div className="flex items-center gap-3 text-xs text-slate-500">
+                                                <span>
+                                                    Showing <strong className="font-semibold text-slate-800">{visibleStart}</strong> to <strong className="font-semibold text-slate-800">{visibleEnd}</strong> of <strong className="font-semibold text-slate-800">{totalEvents}</strong> idle events
+                                                </span>
+                                                <div className="hidden sm:flex items-center gap-1.5 border-l border-slate-200 pl-3">
+                                                    <span className="text-slate-400">Rows:</span>
+                                                    <select
+                                                        value={pageSize}
+                                                        onChange={(e) => {
+                                                            setPageSize(Number(e.target.value))
+                                                            setPage(1)
+                                                        }}
+                                                        className="rounded border border-slate-200 bg-white px-1.5 py-0.5 text-xs font-semibold text-slate-700 outline-none cursor-pointer"
+                                                        aria-label="Rows per page"
+                                                    >
+                                                        <option value={10}>10</option>
+                                                        <option value={25}>25</option>
+                                                        <option value={50}>50</option>
+                                                        <option value={100}>100</option>
+                                                    </select>
+                                                </div>
                                             </div>
-                                        )}
+
+                                            {totalPages > 1 && (
+                                                <div className="flex items-center gap-1">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                                                        disabled={safePage <= 1}
+                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                    >
+                                                        <ChevronLeft className="h-3.5 w-3.5" />
+                                                        <span>Prev</span>
+                                                    </button>
+                                                    
+                                                    <div className="flex items-center px-2 text-xs font-semibold text-slate-600">
+                                                        Page {safePage} of {totalPages}
+                                                    </div>
+
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                                                        disabled={safePage >= totalPages}
+                                                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                                                    >
+                                                        <span>Next</span>
+                                                        <ChevronRight className="h-3.5 w-3.5" />
+                                                    </button>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 )}
                             </section>
@@ -962,6 +1067,13 @@ export default function IdleAnalytics() {
                 </main>
             </div>
             {mapEvent && <IdleMapModal event={mapEvent} onClose={() => setMapEvent(null)} />}
+            {drawerVehicle && (
+                <VehicleDetailDrawer
+                    vehicle={drawerVehicle}
+                    idleEvents={analytics?.events}
+                    onClose={() => setDrawerVehicle(null)}
+                />
+            )}
         </div>
         </SidebarProvider>
     )

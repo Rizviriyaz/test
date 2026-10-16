@@ -16,8 +16,16 @@ export default function PageHeader({
     children,
     className = "",
 }) {
+    const hasCustomMargin = className.includes("mb-") || className.includes("m-") || className.includes("my-")
+    const hasCustomPadding = className.includes("pb-") || className.includes("p-") || className.includes("py-")
+    const hasCustomBorder = className.includes("border-b-0") || className.includes("border-none")
+
+    const defaultBorder = !hasCustomBorder ? "border-b border-slate-200/80" : ""
+    const defaultPadding = !hasCustomPadding ? "pb-4" : ""
+    const defaultMargin = !hasCustomMargin ? "mb-6" : ""
+
     return (
-        <header className={`flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-slate-200/80 pb-4 mb-6 ${className}`}>
+        <header className={`flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between ${defaultBorder} ${defaultPadding} ${defaultMargin} ${className}`}>
             <div>
                 <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 uppercase flex items-center gap-2.5">
                     {Icon && <Icon className="h-6 w-6 text-[#33758F] shrink-0" />}

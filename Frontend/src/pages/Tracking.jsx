@@ -242,7 +242,7 @@ function Tracking() {
 
                 <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
                     {/* Header Bar */}
-                    <div className="shrink-0 border-b border-slate-200 bg-white px-6 py-4">
+                    <div className="shrink-0 border-b border-slate-200 bg-white px-5 py-2.5 sm:px-6 sm:py-3">
                         <PageHeader
                             title="Live Fleet Tracking"
                             subtitle="Real-time GPS telemetry, status monitoring, and asset location"
@@ -291,7 +291,7 @@ function Tracking() {
                             }`}
                         >
                             {/* Controls: Search & Filter Tabs */}
-                            <div className="p-4 border-b border-slate-200/90 bg-white space-y-3 shrink-0">
+                            <div className="p-3.5 border-b border-slate-200/90 bg-white space-y-2.5 shrink-0">
                                 <SearchInput
                                     value={searchTerm}
                                     onChange={setSearchTerm}
@@ -513,7 +513,7 @@ function Tracking() {
 
                         {/* ─── RIGHT PANEL: INTERACTIVE FLEET MAP ───────────────────────── */}
                         <div
-                            className={`flex-1 relative h-full bg-slate-50 overflow-hidden ${
+                            className={`flex-1 relative h-full bg-slate-100/60 p-2.5 sm:p-3 lg:p-4 overflow-hidden ${
                                 mobileTab === "map" ? "flex" : "hidden lg:flex"
                             }`}
                         >
@@ -523,6 +523,7 @@ function Tracking() {
                                 selectedVehicle={selectedVehicle}
                                 onVehicleSelect={selectVehicle}
                                 onInspectVehicle={(v) => setDrawerVehicle(v)}
+                                className="border border-slate-200/90 shadow-xs"
                             />
 
                             {/* Floating Map Status Overlay (Bottom Left) */}

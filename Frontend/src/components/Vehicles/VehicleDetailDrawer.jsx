@@ -21,16 +21,19 @@ import {
     HeartPulse,
     FileText,
 } from "lucide-react"
-import { getVehicleEfficiencyList, getVehicleTrips } from "../../api/fleetApi"
-import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
+import { getVehicleEfficiencyList, getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
+import { formatUAETime, formatUAEDateTime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
 import VehicleStatusBadge from "../Fuel/VehicleStatusBadge"
+import LiveIdleTimer, { formatElapsedDuration } from "../Common/LiveIdleTimer"
 
-export default function VehicleDetailDrawer({ vehicle, onClose }) {
+export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = null }) {
     const [fuelData, setFuelData] = useState(null)
     const [loadingFuel, setLoadingFuel] = useState(false)
     const [tripsData, setTripsData] = useState(null)
     const [loadingTrips, setLoadingTrips] = useState(false)
+    const [vehicleIdleEvents, setVehicleIdleEvents] = useState(null)
+    const [loadingIdleEvents, setLoadingIdleEvents] = useState(false)
 
     useEffect(() => {
         if (!vehicle) return
@@ -82,10 +85,32 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
             }
         }
 
+        async function fetchVehicleIdleEvents() {
+            const vid = vehicle.vehicle_id || vehicle.id
+            if (!vid) return
+            if (idleEvents && Array.isArray(idleEvents)) {
+                setVehicleIdleEvents(idleEvents.filter(e => String(e.vehicle_id) === String(vid)))
+                return
+            }
+            try {
+                setLoadingIdleEvents(true)
+                const res = await getFleetIdleAnalytics({ vehicle_id: vid, timeframe: "today", include_events: true })
+                if (!active) return
+                const evs = (res?.events || []).filter(e => String(e.vehicle_id) === String(vid))
+                setVehicleIdleEvents(evs)
+            } catch (err) {
+                console.error("Failed to fetch vehicle idle events:", err)
+                if (active) setVehicleIdleEvents([])
+            } finally {
+                if (active) setLoadingIdleEvents(false)
+            }
+        }
+
         fetchVehicleFuel()
         fetchVehicleTripsData()
+        fetchVehicleIdleEvents()
         return () => { active = false }
-    }, [vehicle])
+    }, [vehicle, idleEvents])
 
     if (!vehicle) return null
 
@@ -298,10 +323,99 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                                 {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (tripCount !== null ? tripCount : "—")}
                             </span>
                         </div>
-                        {idleMinutes !== null && idleMinutes > 0 && (
-                            <div className="col-span-2 rounded-lg bg-amber-50/60 p-2.5 border border-amber-200 flex items-center justify-between">
-                                <span className="text-[11px] font-semibold text-amber-800">Current Idle Duration</span>
-                                <span className="font-bold text-amber-900 text-xs">{idleMinutes} minutes</span>
+                    </div>
+                </section>
+
+                {/* ─── 5. IDLE METRICS & EVENT HISTORY ─────────────────────────────── */}
+                <section className="rounded-xl border border-slate-200 bg-white p-4 space-y-3 shadow-2xs">
+                    <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                            <Clock className="h-3.5 w-3.5 text-amber-600" />
+                            Idle Status & Diagnostics
+                        </h3>
+                        <span className="text-[10px] font-semibold text-slate-400">
+                            UAE Timezone
+                        </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-lg bg-amber-50/60 p-2.5 border border-amber-200">
+                            <span className="text-[10px] font-semibold text-amber-800 uppercase block">Idle Start Time</span>
+                            <span className="font-bold text-amber-950 text-xs">
+                                {statusStr === "IDLING" && vehicle.idle_start
+                                    ? `Idling since ${formatUAETime(vehicle.idle_start)}`
+                                    : (statusStr === "IDLING" ? "Start time unavailable" : "Not currently idling")}
+                            </span>
+                        </div>
+                        <div className="rounded-lg bg-amber-50/60 p-2.5 border border-amber-200">
+                            <span className="text-[10px] font-semibold text-amber-800 uppercase block">Elapsed Idle Duration</span>
+                            <div className="font-bold text-amber-950 text-xs flex items-center gap-1.5">
+                                {statusStr === "IDLING" ? (
+                                    <>
+                                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                        <LiveIdleTimer
+                                            startTime={vehicle.idle_start}
+                                            baseDuration={vehicle.idle_duration}
+                                            status={statusStr}
+                                        />
+                                    </>
+                                ) : (
+                                    <span>
+                                        {vehicle.idle_duration
+                                            ? formatElapsedDuration(vehicle.idle_duration)
+                                            : (vehicle.total_idle_seconds ? formatElapsedDuration(vehicle.total_idle_seconds) : "0s")}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Event History for Selected Vehicle Only */}
+                    <div className="pt-2 border-t border-slate-100">
+                        <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11px] font-bold text-slate-700">
+                                Idle Events ({vehicleIdleEvents ? vehicleIdleEvents.length : 0})
+                            </span>
+                            {loadingIdleEvents && (
+                                <span className="flex items-center gap-1 text-[10px] text-slate-400">
+                                    <Loader2 className="h-3 w-3 animate-spin text-[#33758F]" /> Loading…
+                                </span>
+                            )}
+                        </div>
+
+                        {loadingIdleEvents ? (
+                            <div className="py-4 text-center">
+                                <Loader2 className="mx-auto h-5 w-5 animate-spin text-slate-400" />
+                            </div>
+                        ) : !vehicleIdleEvents || vehicleIdleEvents.length === 0 ? (
+                            <div className="rounded-lg bg-slate-50/80 p-3 text-center text-xs text-slate-500">
+                                No idle events recorded for this vehicle today.
+                            </div>
+                        ) : (
+                            <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                                {vehicleIdleEvents.map((ev, idx) => {
+                                    const dur = Number(ev.duration || 0)
+                                    return (
+                                        <div
+                                            key={ev.id || idx}
+                                            className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/60 p-2 text-xs"
+                                        >
+                                            <div className="min-w-0 pr-2">
+                                                <p className="font-semibold text-slate-800 text-[11px]">
+                                                    {formatUAETime(ev.start_time)} → {ev.end_time ? formatUAETime(ev.end_time) : "Ongoing"}
+                                                </p>
+                                                {ev.address && (
+                                                    <p className="text-[10px] text-slate-400 truncate">
+                                                        {ev.address}
+                                                    </p>
+                                                )}
+                                            </div>
+                                            <span className="font-mono font-bold text-amber-700 text-[11px] shrink-0 bg-amber-100/60 px-2 py-0.5 rounded">
+                                                {formatElapsedDuration(dur)}
+                                            </span>
+                                        </div>
+                                    )
+                                })}
                             </div>
                         )}
                     </div>
