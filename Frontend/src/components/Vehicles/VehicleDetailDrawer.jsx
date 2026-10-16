@@ -39,7 +39,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
         async function fetchVehicleFuel() {
             try {
                 setLoadingFuel(true)
-                const plate = vehicle.vehicle_name || vehicle.name || vehicle.plate || vehicle.plate_number || ""
+                const plate = vehicle.registration_plate || vehicle.plate || vehicle.plate_number || vehicle.vehicle_name || vehicle.name || ""
                 const vidNum = Number(vehicle.vehicle_id || vehicle.id)
                 const res = await getVehicleEfficiencyList({
                     vehicle_identifier: plate,
@@ -50,6 +50,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                 if (res?.data && res.data.length > 0) {
                     const matchedRecord = res.data.find(item =>
                         (item.wialon_unit_id && Number(item.wialon_unit_id) === vidNum) ||
+                        (item.registration_plate && plate && item.registration_plate.trim().toLowerCase() === plate.trim().toLowerCase()) ||
                         (item.vehicle_identifier && plate && item.vehicle_identifier.trim().toLowerCase() === plate.trim().toLowerCase())
                     )
                     setFuelData(matchedRecord || null)
@@ -90,7 +91,9 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
 
     const statusStr = String(vehicle.status || vehicle.normalizedStatus || (vehicle.is_offline ? "OFFLINE" : "STOPPED")).toUpperCase()
 
+    const regPlate = vehicle.registration_plate || vehicle.plate || vehicle.plate_number || ""
     const vehicleName = vehicle.vehicle_name || vehicle.name || `Vehicle #${vehicle.vehicle_id || vehicle.id}`
+    const displayTitle = regPlate || vehicleName
     const vehicleGroup = vehicle.group || (Array.isArray(vehicle.groups) && vehicle.groups[0]) || "General Fleet"
     const unitId = vehicle.vehicle_id || vehicle.id || "—"
     const hardwareType = vehicle.hardware_type || vehicle.device_type || vehicle.hw_type || null
@@ -132,7 +135,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                         </div>
                         <div className="min-w-0">
                             <h2 className="font-mono text-base font-black text-slate-900 truncate">
-                                {vehicleName}
+                                {displayTitle}
                             </h2>
                             <div className="flex items-center gap-2 mt-1">
                                 <FleetStatusBadge status={statusStr} size="xs" />
@@ -163,6 +166,14 @@ export default function VehicleDetailDrawer({ vehicle, onClose }) {
                     </h3>
 
                     <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Registration Plate</span>
+                            <span className="font-mono font-bold text-slate-900">{regPlate || "—"}</span>
+                        </div>
+                        <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
+                            <span className="text-[10px] font-semibold text-slate-400 uppercase block">Unit Name</span>
+                            <span className="font-mono font-semibold text-slate-800">{vehicleName}</span>
+                        </div>
                         <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
                             <span className="text-[10px] font-semibold text-slate-400 uppercase block">Unit ID</span>
                             <span className="font-mono font-bold text-slate-900">{unitId}</span>

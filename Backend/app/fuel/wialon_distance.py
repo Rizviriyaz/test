@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Dict, List, Any, Optional, Tuple
 from app.wialon import login, WialonAPIError
-from app.vehicles import get_all_vehicles
+from app.vehicles import get_all_vehicles, extract_registration_plate
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_unit_engine_report,
@@ -60,7 +60,13 @@ def match_fuel_vehicle_to_wialon(
     """
     Dynamically matches a fuel vehicle identifier (e.g. 'T-DXB-15770', '13-AUH-30561')
     to an active Wialon unit from a dynamically fetched unit list.
-    
+
+    Matching hierarchy:
+    1. Primary exact match against verified Wialon Profile Registration Plate.
+    2. Primary token match against verified Wialon Profile Registration Plate.
+    3. Fallback exact match against Wialon unit name (General -> Name) for backward compatibility.
+    4. Fallback token match against Wialon unit name.
+
     If multiple Wialon units match the same identifier, does NOT guess; returns an ambiguous marker.
     Zero hardcoded values: matching is purely algorithmic and scales to any fleet size.
     """
@@ -72,35 +78,70 @@ def match_fuel_vehicle_to_wialon(
     fuel_norm = normalize_alphanumeric(fuel_raw)
     fuel_tokens = extract_plate_tokens(fuel_raw)
 
-    candidates: List[Dict[str, Any]] = []
+    # 1. Primary: Exact match against verified Wialon Profile Registration Plate
+    candidates_primary: List[Dict[str, Any]] = []
+    for u in wialon_units:
+        u_plate = extract_registration_plate(u)
+        if u_plate:
+            u_plate_lower = str(u_plate).strip().lower()
+            u_plate_norm = normalize_alphanumeric(u_plate)
+            if u_plate_lower == fuel_lower or (u_plate_norm and u_plate_norm == fuel_norm):
+                if u not in candidates_primary:
+                    candidates_primary.append(u)
 
-    # 1. Exact match against unit name or registration plate
+    if candidates_primary:
+        distinct_ids = {c.get("id") for c in candidates_primary if c.get("id")}
+        if len(distinct_ids) == 1:
+            return candidates_primary[0]
+        elif len(distinct_ids) > 1:
+            return {"ambiguous": True, "candidates": candidates_primary, "id": None, "nm": None}
+
+    # 2. Primary: Match against fuel tokens using verified Profile Registration Plate
+    for u in wialon_units:
+        u_plate = extract_registration_plate(u)
+        if u_plate:
+            u_plate_lower = str(u_plate).strip().lower()
+            u_plate_norm = normalize_alphanumeric(u_plate)
+            if u_plate_lower in fuel_tokens or (u_plate_norm and u_plate_norm in fuel_tokens):
+                if u not in candidates_primary:
+                    candidates_primary.append(u)
+
+    if candidates_primary:
+        distinct_ids = {c.get("id") for c in candidates_primary if c.get("id")}
+        if len(distinct_ids) == 1:
+            return candidates_primary[0]
+        elif len(distinct_ids) > 1:
+            return {"ambiguous": True, "candidates": candidates_primary, "id": None, "nm": None}
+
+    # 3. Explicit Fallback: Exact match against Wialon unit name (General -> Name) for backward compatibility
+    candidates_fallback: List[Dict[str, Any]] = []
     for u in wialon_units:
         u_nm = str(u.get("nm", "")).strip().lower()
         if u_nm and (u_nm == fuel_lower or u_nm == fuel_norm):
-            if u not in candidates:
-                candidates.append(u)
+            if u not in candidates_fallback:
+                candidates_fallback.append(u)
 
-    if candidates:
-        distinct_ids = {c.get("id") for c in candidates if c.get("id")}
+    if candidates_fallback:
+        distinct_ids = {c.get("id") for c in candidates_fallback if c.get("id")}
         if len(distinct_ids) == 1:
-            return candidates[0]
+            return candidates_fallback[0]
         elif len(distinct_ids) > 1:
-            return {"ambiguous": True, "candidates": candidates, "id": None, "nm": None}
+            return {"ambiguous": True, "candidates": candidates_fallback, "id": None, "nm": None}
 
-    # 2. Match against fuel tokens (e.g., trailing plate number '30561' matches Wialon unit '30561')
+    # 4. Explicit Fallback: Match against fuel tokens using unit name
     for u in wialon_units:
         u_nm = str(u.get("nm", "")).strip().lower()
         u_nm_norm = normalize_alphanumeric(u.get("nm", ""))
         if u_nm in fuel_tokens or (u_nm_norm and u_nm_norm in fuel_tokens):
-            if u not in candidates:
-                candidates.append(u)
+            if u not in candidates_fallback:
+                candidates_fallback.append(u)
 
-    distinct_ids = {c.get("id") for c in candidates if c.get("id")}
-    if len(distinct_ids) == 1:
-        return candidates[0]
-    elif len(distinct_ids) > 1:
-        return {"ambiguous": True, "candidates": candidates, "id": None, "nm": None}
+    if candidates_fallback:
+        distinct_ids = {c.get("id") for c in candidates_fallback if c.get("id")}
+        if len(distinct_ids) == 1:
+            return candidates_fallback[0]
+        elif len(distinct_ids) > 1:
+            return {"ambiguous": True, "candidates": candidates_fallback, "id": None, "nm": None}
 
     return None
 

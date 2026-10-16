@@ -445,6 +445,7 @@ function Dashboard() {
                             vehicleAttentionMap.set(vid, {
                                 vehicle_id: vid,
                                 vehicle_name: ev.vehicle_name || `Vehicle #${vid}`,
+                                registration_plate: ev.registration_plate || ev.plate || null,
                                 group: grp,
                                 idle_duration: duration,
                                 max_duration: duration,
@@ -462,6 +463,7 @@ function Dashboard() {
                         vehicleAttentionMap.set(v.vehicle_id, {
                             vehicle_id: v.vehicle_id,
                             vehicle_name: v.vehicle_name || `Vehicle #${v.vehicle_id}`,
+                            registration_plate: v.registration_plate || v.plate || null,
                             group: grp,
                             idle_duration: maxDuration,
                             max_duration: maxDuration,
@@ -966,7 +968,7 @@ function Dashboard() {
                                                                 <div className="min-w-0 pr-3">
                                                                     <div className="flex items-center gap-2">
                                                                         <span className="font-mono text-xs font-bold text-slate-900 truncate">
-                                                                            {vehicle.vehicle_name}
+                                                                            {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name}
                                                                         </span>
                                                                         <span className="rounded bg-amber-200/80 px-1.5 py-0.5 text-[9px] font-bold text-amber-900 shrink-0">
                                                                             {vehicle.group || "General Fleet"}

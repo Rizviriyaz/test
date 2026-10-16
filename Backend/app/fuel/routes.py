@@ -57,7 +57,7 @@ from app.fuel.wialon_distance import (
     get_vehicle_telematics_detail,
     match_fuel_vehicle_to_wialon,
 )
-from app.vehicles import get_all_vehicles
+from app.vehicles import get_all_vehicles, extract_registration_plate
 from app.wialon import login
 
 logger = logging.getLogger(__name__)
@@ -508,6 +508,7 @@ async def get_fuel_vehicle_distance(
         vehicle_identifier=vehicle_identifier,
         wialon_unit_id=int(matched_unit["id"]),
         wialon_unit_name=str(matched_unit.get("nm", "")).strip(),
+        registration_plate=extract_registration_plate(matched_unit),
         date_from=date_from,
         date_to=date_to,
         distance=dist_info["distance"],

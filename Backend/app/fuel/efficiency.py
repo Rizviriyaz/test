@@ -16,6 +16,7 @@ from app.fuel.schemas import (
     EfficiencyTrendResponse,
 )
 from app.fuel.wialon_distance import match_fuel_vehicle_to_wialon
+from app.vehicles import extract_registration_plate
 
 logger = logging.getLogger(__name__)
 
@@ -350,6 +351,7 @@ def calculate_vehicle_efficiency_records(
 
         w_id = int(matched["id"])
         w_name = str(matched.get("nm", "")).strip()
+        w_plate = extract_registration_plate(matched)
         raw_t = telematics_map.get(w_name) if isinstance(telematics_map, dict) else None
         t_data = _normalize_telematics_entry(raw_t)
         
@@ -365,6 +367,7 @@ def calculate_vehicle_efficiency_records(
                     vehicle_identifier=vid,
                     wialon_unit_id=w_id,
                     wialon_unit_name=w_name,
+                    registration_plate=w_plate,
                     litres=v_litres,
                     total_cost=v_cost,
                     transaction_count=v_count,
@@ -415,6 +418,7 @@ def calculate_vehicle_efficiency_records(
                     vehicle_identifier=vid,
                     wialon_unit_id=w_id,
                     wialon_unit_name=w_name,
+                    registration_plate=w_plate,
                     litres=v_litres,
                     total_cost=v_cost,
                     transaction_count=v_count,
@@ -457,7 +461,12 @@ def paginate_and_sort_vehicle_efficiency(
 
     if vehicle_filter:
         veh_clean = vehicle_filter.strip().lower()
-        filtered = [v for v in filtered if veh_clean in v.vehicle_identifier.lower()]
+        filtered = [
+            v for v in filtered
+            if veh_clean in v.vehicle_identifier.lower()
+            or (v.registration_plate and veh_clean in v.registration_plate.lower())
+            or (v.wialon_unit_name and veh_clean in v.wialon_unit_name.lower())
+        ]
 
     is_desc = sort_order.strip().lower() == "desc"
     field = sort_by.strip().lower()

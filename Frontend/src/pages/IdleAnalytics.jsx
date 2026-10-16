@@ -653,8 +653,8 @@ export default function IdleAnalytics() {
                                                 <div className="flex items-center gap-3">
                                                     <Truck className="h-4 w-4 text-slate-400" />
                                                     <div>
-                                                        <p className="text-sm font-medium text-slate-900">{v.vehicle_name}</p>
-                                                        <p className="text-xs text-slate-400">ID {v.vehicle_id}</p>
+                                                        <p className="text-sm font-medium text-slate-900">{v.registration_plate || v.plate || v.vehicle_name}</p>
+                                                        <p className="text-xs text-slate-400">{v.vehicle_name ? `${v.vehicle_name} • ` : ""}ID {v.vehicle_id}</p>
                                                     </div>
                                                 </div>
                                                 <div className="flex items-center gap-6 text-right">

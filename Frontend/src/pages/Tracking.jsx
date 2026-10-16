@@ -153,10 +153,11 @@ function Tracking() {
         const query = searchTerm.trim().toLowerCase()
         return vehicles.filter(
             vehicle => {
+                const plateStr = String(vehicle.registration_plate || vehicle.plate || "").toLowerCase()
                 const name = String(vehicle.vehicle_name || "").toLowerCase()
                 const idStr = String(vehicle.vehicle_id || vehicle.id || "").toLowerCase()
                 const groupStr = String(vehicle.group || "").toLowerCase()
-                const matchesSearch = !query || name.includes(query) || idStr.includes(query) || groupStr.includes(query)
+                const matchesSearch = !query || plateStr.includes(query) || name.includes(query) || idStr.includes(query) || groupStr.includes(query)
 
                 const vStatus = String(vehicle.status || "").toUpperCase()
                 const isOffline = vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || vStatus === "OFFLINE"
@@ -432,10 +433,10 @@ function Tracking() {
                                                     </div>
                                                     <div className="min-w-0">
                                                         <h3 className="text-xs font-bold text-slate-900 truncate font-mono">
-                                                            {vehicle.vehicle_name || `Unit #${vid}`}
+                                                            {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vid}`}
                                                         </h3>
                                                         <p className="text-[10px] text-slate-400 truncate">
-                                                            {vehicle.group || "General Fleet"} • ID {vid}
+                                                            {vehicle.vehicle_name ? `${vehicle.vehicle_name} • ` : ""}{vehicle.group || "General Fleet"} • ID {vid}
                                                         </p>
                                                     </div>
                                                 </div>
@@ -548,11 +549,11 @@ function Tracking() {
                                             <div className="flex items-center gap-1.5">
                                                 <Truck className="h-4 w-4 text-[#33758F] shrink-0" />
                                                 <h4 className="font-mono text-sm font-bold text-slate-900 truncate">
-                                                    {selectedVehicle.vehicle_name || `Unit #${selectedVehicle.vehicle_id || selectedVehicle.id}`}
+                                                    {selectedVehicle.registration_plate || selectedVehicle.plate || selectedVehicle.vehicle_name || `Unit #${selectedVehicle.vehicle_id || selectedVehicle.id}`}
                                                 </h4>
                                             </div>
                                             <p className="text-[10px] text-slate-500 mt-0.5">
-                                                {selectedVehicle.group || "General Fleet"} • ID {selectedVehicle.vehicle_id || selectedVehicle.id}
+                                                {selectedVehicle.vehicle_name ? `${selectedVehicle.vehicle_name} • ` : ""}{selectedVehicle.group || "General Fleet"} • ID {selectedVehicle.vehicle_id || selectedVehicle.id}
                                             </p>
                                         </div>
 

@@ -87,7 +87,7 @@ export default function DriverSafety() {
         let v = data.by_vehicle
         if (search.trim()) {
             const q = search.toLowerCase()
-            v = v.filter(x => (x.vehicle_name || "").toLowerCase().includes(q) || (x.group || "").toLowerCase().includes(q))
+            v = v.filter(x => (x.registration_plate || "").toLowerCase().includes(q) || (x.vehicle_name || "").toLowerCase().includes(q) || (x.group || "").toLowerCase().includes(q))
         }
         return v
     }, [data, search])
@@ -98,6 +98,7 @@ export default function DriverSafety() {
         if (search.trim()) {
             const q = search.toLowerCase()
             evList = evList.filter(x =>
+                (x.registration_plate || "").toLowerCase().includes(q) ||
                 (x.vehicle_name || "").toLowerCase().includes(q) ||
                 (x.event_type || "").toLowerCase().includes(q) ||
                 (x.group || "").toLowerCase().includes(q)
@@ -271,8 +272,8 @@ export default function DriverSafety() {
                                                                     <Truck size={15} className="text-red-500" />
                                                                 </div>
                                                                 <div className="min-w-0">
-                                                                    <p className="font-semibold text-slate-800 truncate">{v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
-                                                                    <p className="text-xs text-slate-400">{v.group || "General Fleet"}</p>
+                                                                    <p className="font-semibold text-slate-800 truncate">{v.registration_plate || v.plate || v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
+                                                                    <p className="text-xs text-slate-400">{v.vehicle_name ? `${v.vehicle_name} • ` : ""}{v.group || "General Fleet"}</p>
                                                                 </div>
                                                             </div>
                                                         </td>

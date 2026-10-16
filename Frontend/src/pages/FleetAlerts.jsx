@@ -85,7 +85,10 @@ function AlertCard({ alert }) {
                 <div className="flex items-center gap-4 mt-3 text-xs text-slate-400 flex-wrap">
                     <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
                         <Truck size={13} className="text-slate-400" />
-                        <span>{alert.vehicle_name || "Fleet-wide"}</span>
+                        <span>{alert.registration_plate || alert.plate || alert.vehicle_name || "Fleet-wide"}</span>
+                        {alert.registration_plate && alert.vehicle_name && alert.registration_plate !== alert.vehicle_name && (
+                            <span className="text-slate-400 font-normal">· {alert.vehicle_name}</span>
+                        )}
                         {alert.vehicle_id && (
                             <span className="text-slate-400 font-normal">· Unit #{alert.vehicle_id}</span>
                         )}
@@ -169,6 +172,7 @@ export default function FleetAlerts() {
             a = a.filter(x =>
                 (x.message || "").toLowerCase().includes(q) ||
                 (x.title || "").toLowerCase().includes(q) ||
+                (x.registration_plate || "").toLowerCase().includes(q) ||
                 (x.vehicle_name || "").toLowerCase().includes(q) ||
                 (x.alert_type || "").toLowerCase().includes(q) ||
                 (x.group || "").toLowerCase().includes(q)

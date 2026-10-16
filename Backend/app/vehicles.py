@@ -19,7 +19,35 @@ from app.normalize import is_valid_sensor_value, resolve_unit_sensors
 
 idle_start_times = {}
 
+def extract_registration_plate(unit):
+    """
+    Safely extract the verified vehicle registration plate from Wialon unit profile fields (pflds).
+    Matches entry where n == 'registration_plate'.
+    Returns cleaned string value if found, or None if absent/empty/malformed.
+    """
+    if not isinstance(unit, dict):
+        return None
+    pflds = unit.get("pflds")
+    if not pflds:
+        return None
+
+    entries = pflds.values() if isinstance(pflds, dict) else (pflds if isinstance(pflds, list) else [])
+    for field in entries:
+        if isinstance(field, dict) and field.get("n") == "registration_plate":
+            val = field.get("v")
+            if val is not None:
+                cleaned = str(val).strip()
+                if cleaned:
+                    return cleaned
+    return None
+
+
 def get_all_vehicles(sid):
+    # Flags: 5121 | 8388608 (0x800000) = 8393729
+    # 1: Base (id, nm, cls, mu)
+    # 1024: Last message
+    # 4096: Admin fields
+    # 8388608: Profile fields (pflds)
     vehicle_data = wialon_request(
         "core/search_items",
         {
@@ -30,7 +58,7 @@ def get_all_vehicles(sid):
                 "sortType": "sys_name"
             },
             "force": 1,
-            "flags": 5121,
+            "flags": 8393729,
             "from": 0,
             "to": 0
         },
@@ -138,6 +166,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
     for vehicle in vehicles:
         vehicle_id = vehicle.get("id")
         vehicle_name = vehicle.get("nm", "Unknown")
+        reg_plate = extract_registration_plate(vehicle)
 
         calculated = calculated_by_vehicle.get(vehicle_id) or {}
 
@@ -369,9 +398,13 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
         vehicle_record = {
 
-            # Existing frontend fields
+            # Existing frontend fields & identity mapping
             "vehicle_id": vehicle_id,
             "vehicle_name": vehicle_name,
+            "unit_name": vehicle_name,
+            "registration_plate": reg_plate,
+            "plate": reg_plate or vehicle_name,
+            "plate_number": reg_plate or vehicle_name,
             "group": primary_group,
             "groups": v_groups,
             "speed": speed,

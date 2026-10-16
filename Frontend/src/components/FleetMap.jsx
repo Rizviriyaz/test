@@ -200,11 +200,11 @@ function VehiclePopupCard({ vehicle, onInspect }) {
                     <div className="flex items-center gap-1.5">
                         <Truck className="h-3.5 w-3.5 text-[#33758F] shrink-0" />
                         <h4 className="truncate text-sm font-bold text-slate-900 leading-tight">
-                            {vehicle.vehicle_name || `Unit #${vehicle.vehicle_id}`}
+                            {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vehicle.vehicle_id}`}
                         </h4>
                     </div>
                     <p className="mt-0.5 text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
-                        {vehicle.group || "General Fleet"} • ID {vehicle.vehicle_id}
+                        {vehicle.vehicle_name ? `${vehicle.vehicle_name} • ` : ""}{vehicle.group || "General Fleet"} • ID {vehicle.vehicle_id}
                     </p>
                 </div>
 

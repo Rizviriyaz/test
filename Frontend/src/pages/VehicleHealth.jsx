@@ -95,7 +95,7 @@ export default function VehicleHealth() {
         let v = vehicles
         if (search.trim()) {
             const q = search.toLowerCase()
-            v = v.filter(x => (x.vehicle_name || "").toLowerCase().includes(q) || String(x.vehicle_id).includes(q) || (x.group || "").toLowerCase().includes(q))
+            v = v.filter(x => (x.registration_plate || "").toLowerCase().includes(q) || (x.vehicle_name || "").toLowerCase().includes(q) || String(x.vehicle_id).includes(q) || (x.group || "").toLowerCase().includes(q))
         }
         if (filter === "critical") v = v.filter(x => x.battery?.status === "CRITICAL" || x.connectivity?.status === "OFFLINE")
         if (filter === "warning")  v = v.filter(x => x.battery?.status === "WARNING"  || x.connectivity?.status === "DELAYED" || x.gps?.status === "WEAK")
@@ -255,8 +255,8 @@ export default function VehicleHealth() {
                                                                     <Truck size={15} className="text-[#33758F]" />
                                                                 </div>
                                                                 <div className="min-w-0">
-                                                                    <p className="font-semibold text-slate-800 truncate">{v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
-                                                                    <p className="text-xs text-slate-400">{v.group || `ID ${v.vehicle_id}`}</p>
+                                                                    <p className="font-semibold text-slate-800 truncate">{v.registration_plate || v.plate || v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
+                                                                    <p className="text-xs text-slate-400">{v.vehicle_name ? `${v.vehicle_name} • ` : ""}{v.group || `ID ${v.vehicle_id}`}</p>
                                                                 </div>
                                                             </div>
                                                         </td>
