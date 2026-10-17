@@ -120,7 +120,7 @@ export default function VehicleRanking() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen overflow-hidden bg-[#F8FAFC] text-slate-900">
+            <div className="flex h-screen overflow-hidden bg-white text-slate-900">
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col">
@@ -211,7 +211,7 @@ export default function VehicleRanking() {
                                             setSearchQuery(e.target.value)
                                             setPage(1)
                                         }}
-                                        className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#1C5E7A] focus:bg-white focus:outline-hidden"
+                                        className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-2 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#33758F] focus:bg-white focus:outline-hidden"
                                     />
                                 </div>
 
@@ -228,7 +228,7 @@ export default function VehicleRanking() {
                                                 setSortBy(e.target.value)
                                                 setPage(1)
                                             }}
-                                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-2xs focus:border-[#1C5E7A] cursor-pointer"
+                                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-2xs focus:border-[#33758F] cursor-pointer"
                                         >
                                             {SORT_OPTIONS.map((opt) => (
                                                 <option key={opt.value} value={opt.value}>
@@ -357,7 +357,7 @@ export default function VehicleRanking() {
                                                         <div className="flex items-center gap-2">
                                                             <Link
                                                                 to={`/fuel/vehicles?select=${encodeURIComponent(v.vehicle_identifier)}`}
-                                                                className="font-mono text-sm font-black text-slate-900 hover:text-[#1C5E7A] transition-colors"
+                                                                className="font-mono text-sm font-black text-slate-900 hover:text-[#33758F] transition-colors"
                                                             >
                                                                 {v.vehicle_identifier}
                                                             </Link>
@@ -379,7 +379,7 @@ export default function VehicleRanking() {
                                                     </div>
                                                     <div className="h-2.5 w-full rounded-full bg-slate-100 overflow-hidden border border-slate-200/50">
                                                         <div
-                                                            className="h-full rounded-full bg-gradient-to-r from-[#1C5E7A] to-[#0284C7] transition-all duration-300"
+                                                            className="h-full rounded-full bg-gradient-to-r from-[#33758F] to-[#0284C7] transition-all duration-300"
                                                             style={{ width: `${progressPercent}%` }}
                                                         />
                                                     </div>
@@ -389,7 +389,7 @@ export default function VehicleRanking() {
                                                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-right text-xs shrink-0">
                                                     <div className="rounded-xl bg-slate-50/60 p-2">
                                                         <span className="block text-[10px] font-bold text-slate-400 uppercase">Efficiency</span>
-                                                        <span className="font-bold text-[#1C5E7A]">
+                                                        <span className="font-bold text-[#33758F]">
                                                             {v.fuel_efficiency_l_per_100km !== null ? `${v.fuel_efficiency_l_per_100km.toFixed(1)} L/100km` : "—"}
                                                         </span>
                                                     </div>

@@ -26,7 +26,7 @@ def is_valid_sensor_value(value):
         return False
 
     if isinstance(value, (int, float)):
-        if value == INVALID_WIALON_VALUE or abs(value - INVALID_WIALON_VALUE) < 0.001:
+        if value <= -100000 or value == INVALID_WIALON_VALUE or abs(value - INVALID_WIALON_VALUE) < 0.001:
             return False
 
     if isinstance(value, str):
@@ -70,6 +70,19 @@ def get_sensor_value(sensors, sensor_id):
     return value
 
 
+INVALID_DRIVER_IDS = {
+    "",
+    "---",
+    "0000000000000000",
+    "0",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "unknown",
+    "unassigned",
+}
+
 def normalize_driver_id(driver_id):
     """
     Convert Wialon placeholder driver IDs into None.
@@ -78,10 +91,11 @@ def normalize_driver_id(driver_id):
     if not is_valid_sensor_value(driver_id):
         return None
 
-    if str(driver_id) == "0000000000000000":
+    cleaned = str(driver_id).strip().lower()
+    if cleaned in INVALID_DRIVER_IDS:
         return None
 
-    return str(driver_id)
+    return str(driver_id).strip()
 
 
 def resolve_sensor_id_by_name(configured_sensors, name):
@@ -202,9 +216,44 @@ def normalize_wialon_message(message, configured_sensors=None, sensor_id_map=Non
     odometer = get_sensor_value(sensors, odo_id) if odo_id else None
     driver_id = get_sensor_value(sensors, drv_id) if drv_id else None
 
-    # Normalize binary / voltage sensors.
-    ignition = True if ignition_val == 1 else (True if isinstance(ignition_val, (int, float)) and ignition_val > 12.8 else False)
+    # Normalize binary sensors & odometer
+    raw_params = message.get("p") or {}
+    if ignition_val is not None and is_valid_sensor_value(ignition_val):
+        ignition = True if (ignition_val == 1 or str(ignition_val).strip().lower() in ["1", "true", "on"]) else False
+    else:
+        ignition = False
+        for p_key in ("io_11", "in1", "io_239"):
+            if p_key in raw_params:
+                try:
+                    if float(raw_params[p_key]) > 0:
+                        ignition = True
+                        break
+                except (ValueError, TypeError):
+                    pass
+
     key = True if key_val == 1 else False
+
+    # Normalize odometer: confirm source unit from sensor configuration before conversion
+    if odometer is not None and is_valid_sensor_value(odometer):
+        try:
+            odo_conf = (configured_sensors or {}).get(odo_id) or {}
+            param_str = str(odo_conf.get("p", "")).replace(" ", "").lower()
+            if "const0.01" in param_str or "*0.01" in param_str:
+                # Confirmed hectometers: io_16 in meters * 0.01 = hectometers -> / 10.0 = km
+                odometer = round(float(odometer) / 10.0, 3)
+            elif "const0.001" in param_str or "*0.001" in param_str or "/1000" in param_str or str(odo_conf.get("m", "")).strip().lower() == "km":
+                # Confirmed already in kilometers
+                odometer = round(float(odometer), 3)
+            elif param_str == "io_16":
+                # Confirmed raw meters: / 1000.0 = km
+                odometer = round(float(odometer) / 1000.0, 3)
+            else:
+                # If formula is unknown, do not guess; preserve as float
+                odometer = round(float(odometer), 3)
+        except (ValueError, TypeError):
+            odometer = None
+    else:
+        odometer = None
 
     # Driver placeholder means no assigned driver.
     driver_id = normalize_driver_id(driver_id)
@@ -521,12 +570,9 @@ def segment_vehicle_activity(
                     and current_odo >= previous_odo
                 ):
                     odo_delta = float(current_odo) - float(previous_odo)
+                    # Odometer is explicitly normalized in kilometers
                     if 0 < odo_delta <= 5.0:
                         step_dist = odo_delta
-                    elif 0 < (odo_delta / 1000.0) <= 5.0:
-                        step_dist = odo_delta / 1000.0
-                    elif 0 < (odo_delta / 10.0) <= 5.0:
-                        step_dist = odo_delta / 10.0
 
                 if 0 < step_dist < 10.0:
                     current_trip["distance"] += step_dist

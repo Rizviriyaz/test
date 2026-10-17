@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState, useMemo } from "react"
 import {
     HeartPulse, Battery, MapPin, Wifi,
-    RefreshCw, Loader2, AlertCircle, Search,
+    RefreshCw, Loader2, AlertCircle,
     Clock3, Truck, ShieldCheck,
 } from "lucide-react"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
+import PageHeader from "../components/Common/PageHeader"
+import KpiCard from "../components/Common/KpiCard"
+import SearchInput from "../components/Common/SearchInput"
 import { getFleetHealthAnalytics } from "../api/fleetApi"
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -51,34 +54,6 @@ const fmtAgo = (s) => {
     return `${Math.floor(sec / 86400)}d ago`
 }
 
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function KpiCard({ icon: Icon, label, value, sub, color = "blue", loading }) {
-    const colorMap = {
-        blue: "from-blue-500/10 to-blue-600/5 text-blue-600 border-blue-200/60",
-        amber: "from-amber-500/10 to-amber-600/5 text-amber-600 border-amber-200/60",
-        green: "from-emerald-500/10 to-emerald-600/5 text-emerald-600 border-emerald-200/60",
-        red: "from-red-500/10 to-red-600/5 text-red-600 border-red-200/60",
-        purple: "from-violet-500/10 to-violet-600/5 text-violet-600 border-violet-200/60",
-        teal: "from-teal-500/10 to-teal-600/5 text-teal-600 border-teal-200/60",
-    }
-    const cls = colorMap[color] || colorMap.blue
-    return (
-        <div className={`bg-gradient-to-br ${cls} border rounded-2xl p-5 flex items-start gap-4 transition-all hover:shadow-md`}>
-            <div className="p-2.5 rounded-xl bg-white/70 shadow-sm"><Icon size={20} /></div>
-            <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">{label}</p>
-                {loading ? (
-                    <div className="h-7 w-20 bg-slate-200 animate-pulse rounded-lg" />
-                ) : (
-                    <p className="text-2xl font-bold text-slate-800 leading-tight">{value}</p>
-                )}
-                {sub && <p className="text-xs text-slate-500 mt-0.5">{sub}</p>}
-            </div>
-        </div>
-    )
-}
-
 function Badge({ label, cls }) {
     return <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full border ${cls}`}>{label}</span>
 }
@@ -90,10 +65,11 @@ export default function VehicleHealth() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [search, setSearch] = useState("")
-    const [filter, setFilter] = useState("all") // all | issues | warning | healthy
+    const [filter, setFilter] = useState("all") // all | healthy | warning | critical
 
     const load = useCallback(async (mountedRef = { current: true }) => {
-        setLoading(true); setError(null)
+        setLoading(true)
+        setError(null)
         try {
             const res = await getFleetHealthAnalytics()
             if (mountedRef.current) setData(res)
@@ -119,7 +95,7 @@ export default function VehicleHealth() {
         let v = vehicles
         if (search.trim()) {
             const q = search.toLowerCase()
-            v = v.filter(x => (x.vehicle_name || "").toLowerCase().includes(q) || String(x.vehicle_id).includes(q) || (x.group || "").toLowerCase().includes(q))
+            v = v.filter(x => (x.registration_plate || "").toLowerCase().includes(q) || (x.vehicle_name || "").toLowerCase().includes(q) || String(x.vehicle_id).includes(q) || (x.group || "").toLowerCase().includes(q))
         }
         if (filter === "critical") v = v.filter(x => x.battery?.status === "CRITICAL" || x.connectivity?.status === "OFFLINE")
         if (filter === "warning")  v = v.filter(x => x.battery?.status === "WARNING"  || x.connectivity?.status === "DELAYED" || x.gps?.status === "WEAK")
@@ -129,73 +105,105 @@ export default function VehicleHealth() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen bg-slate-50 font-sans overflow-hidden">
+            <div className="flex h-screen bg-white font-sans overflow-hidden">
                 <Sidebar />
-                <div className="flex-1 flex flex-col overflow-hidden">
-                    {/* Header */}
-                    <header className="flex-none bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between gap-4">
-                        <div>
-                            <h1 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-                                <HeartPulse size={20} className="text-red-500" />
-                                Vehicle Health Diagnostics
-                            </h1>
-                            <p className="text-xs text-slate-500 mt-0.5">Battery Voltage · GPS Satellite Quality · Telemetry Connectivity · Health Scores</p>
-                        </div>
-                        <button
-                            id="health-refresh"
-                            onClick={() => load({ current: true })}
-                            className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2 rounded-xl transition-colors cursor-pointer"
-                        >
-                            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
-                            Refresh
-                        </button>
-                    </header>
-
+                <div className="flex-1 flex flex-col overflow-hidden bg-white">
                     <main className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+                        {/* Standard Page Header */}
+                        <PageHeader
+                            title="Vehicle Health Diagnostics"
+                            subtitle="Battery Voltage · GPS Satellite Quality · Telemetry Connectivity · Health Scores"
+                            icon={HeartPulse}
+                            loading={loading}
+                        >
+                            <button
+                                id="health-refresh"
+                                type="button"
+                                onClick={() => load({ current: true })}
+                                disabled={loading}
+                                className="inline-flex items-center gap-1.5 rounded-lg bg-[#33758F] hover:bg-[#285d73] text-white px-3.5 py-1.5 text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+                                <span>{loading ? "Updating…" : "Refresh"}</span>
+                            </button>
+                        </PageHeader>
 
-                        {/* KPIs */}
+                        {/* Standardized KPI Cards */}
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
-                            <KpiCard icon={Truck} label="Fleet Vehicles" loading={loading}
-                                value={data?.total_vehicles ?? "—"} color="blue" />
-                            <KpiCard icon={ShieldCheck} label="Healthy Units" loading={loading}
-                                value={data?.healthy_vehicles ?? "—"} color="green" />
-                            <KpiCard icon={HeartPulse} label="Avg Health Score" loading={loading}
-                                value={data?.average_health_score != null ? `${data.average_health_score}%` : "—"} color="teal" />
-                            <KpiCard icon={Battery} label="Battery Issues" loading={loading}
-                                value={data?.battery_warnings ?? 0} color={data?.battery_warnings > 0 ? "amber" : "green"} />
-                            <KpiCard icon={MapPin} label="GPS Warnings" loading={loading}
-                                value={data?.gps_warnings ?? 0} color={data?.gps_warnings > 0 ? "purple" : "green"} />
-                            <KpiCard icon={Wifi} label="Offline / Delayed" loading={loading}
-                                value={data?.connectivity_warnings ?? 0} color={data?.connectivity_warnings > 0 ? "red" : "green"} />
+                            <KpiCard
+                                icon={Truck}
+                                label="Fleet Vehicles"
+                                loading={loading}
+                                value={data?.total_vehicles ?? "—"}
+                                iconBg="bg-blue-50 text-blue-600 border border-blue-100"
+                            />
+                            <KpiCard
+                                icon={ShieldCheck}
+                                label="Healthy Units"
+                                loading={loading}
+                                value={data?.healthy_vehicles ?? "—"}
+                                iconBg="bg-emerald-50 text-emerald-600 border border-emerald-100"
+                            />
+                            <KpiCard
+                                icon={HeartPulse}
+                                label="Avg Health Score"
+                                loading={loading}
+                                value={data?.average_health_score != null ? `${data.average_health_score}%` : "—"}
+                                iconBg="bg-teal-50 text-teal-600 border border-teal-100"
+                            />
+                            <KpiCard
+                                icon={Battery}
+                                label="Battery Issues"
+                                loading={loading}
+                                value={data?.battery_warnings ?? 0}
+                                iconBg={data?.battery_warnings > 0 ? "bg-amber-50 text-amber-600 border border-amber-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
+                                valueColor={data?.battery_warnings > 0 ? "text-amber-600" : "text-slate-900"}
+                            />
+                            <KpiCard
+                                icon={MapPin}
+                                label="GPS Warnings"
+                                loading={loading}
+                                value={data?.gps_warnings ?? 0}
+                                iconBg={data?.gps_warnings > 0 ? "bg-purple-50 text-purple-600 border border-purple-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
+                                valueColor={data?.gps_warnings > 0 ? "text-purple-600" : "text-slate-900"}
+                            />
+                            <KpiCard
+                                icon={Wifi}
+                                label="Offline / Delayed"
+                                loading={loading}
+                                value={data?.connectivity_warnings ?? 0}
+                                iconBg={data?.connectivity_warnings > 0 ? "bg-rose-50 text-rose-600 border border-rose-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
+                                valueColor={data?.connectivity_warnings > 0 ? "text-rose-600" : "text-slate-900"}
+                            />
                         </div>
 
                         {/* Search + filter bar */}
                         <div className="flex gap-3 flex-wrap items-center">
-                            <div className="relative flex-1 min-w-48">
-                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                                <input
+                            <div className="flex-1 min-w-56">
+                                <SearchInput
                                     id="health-search"
-                                    type="text"
-                                    placeholder="Search by vehicle name, ID, or group..."
+                                    placeholder="Search by vehicle name, ID, or group…"
                                     value={search}
-                                    onChange={e => setSearch(e.target.value)}
-                                    className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                                    onChange={setSearch}
                                 />
                             </div>
-                            {["all", "healthy", "warning", "critical"].map(f => (
-                                <button
-                                    key={f}
-                                    id={`health-filter-${f}`}
-                                    onClick={() => setFilter(f)}
-                                    className={`px-4 py-2 rounded-xl text-sm font-semibold transition-colors capitalize cursor-pointer ${
-                                        filter === f
-                                        ? "bg-blue-600 text-white shadow-sm"
-                                        : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
-                                    }`}
-                                >
-                                    {f}
-                                </button>
-                            ))}
+                            <div className="flex items-center gap-1.5">
+                                {["all", "healthy", "warning", "critical"].map(f => (
+                                    <button
+                                        key={f}
+                                        id={`health-filter-${f}`}
+                                        type="button"
+                                        onClick={() => setFilter(f)}
+                                        className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors capitalize cursor-pointer ${
+                                            filter === f
+                                            ? "bg-[#33758F] text-white shadow-2xs"
+                                            : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                                        }`}
+                                    >
+                                        {f}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
 
                         {/* Vehicle health table */}
@@ -207,19 +215,19 @@ export default function VehicleHealth() {
                             <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
                                 <AlertCircle size={32} />
                                 <p className="text-sm font-medium">{error}</p>
-                                <button onClick={() => load({ current: true })} className="text-blue-600 text-sm font-semibold hover:underline">Retry</button>
+                                <button type="button" onClick={() => load({ current: true })} className="text-[#33758F] text-sm font-semibold hover:underline">Retry</button>
                             </div>
                         ) : filtered.length === 0 ? (
-                            <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
+                            <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3 rounded-xl border border-slate-200 bg-white p-8">
                                 <AlertCircle size={32} />
                                 <p className="text-sm font-medium">No vehicles match your filter</p>
                             </div>
                         ) : (
-                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                            <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
                                 <div className="overflow-x-auto">
                                     <table className="w-full text-sm">
                                         <thead>
-                                            <tr className="bg-slate-50 border-b border-slate-200">
+                                            <tr className="bg-slate-50/70 border-b border-slate-200">
                                                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wide px-5 py-3.5">Vehicle</th>
                                                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wide px-4 py-3.5">Status</th>
                                                 <th className="text-left text-xs font-semibold text-slate-500 uppercase tracking-wide px-4 py-3.5">Health Score</th>
@@ -243,23 +251,23 @@ export default function VehicleHealth() {
                                                     <tr key={v.vehicle_id} className="hover:bg-slate-50/70 transition-colors">
                                                         <td className="px-5 py-3.5">
                                                             <div className="flex items-center gap-2.5">
-                                                                <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center flex-none">
-                                                                    <Truck size={15} className="text-blue-600" />
+                                                                <div className="w-8 h-8 rounded-lg bg-slate-100 flex items-center justify-center flex-none">
+                                                                    <Truck size={15} className="text-[#33758F]" />
                                                                 </div>
                                                                 <div className="min-w-0">
-                                                                    <p className="font-semibold text-slate-800 truncate">{v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
-                                                                    <p className="text-xs text-slate-400">{v.group || `ID ${v.vehicle_id}`}</p>
+                                                                    <p className="font-semibold text-slate-800 truncate">{v.registration_plate || v.plate || v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
+                                                                    <p className="text-xs text-slate-400">{v.vehicle_name ? `${v.vehicle_name} • ` : ""}{v.group || `ID ${v.vehicle_id}`}</p>
                                                                 </div>
                                                             </div>
                                                         </td>
                                                         <td className="px-4 py-3.5">
                                                             <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                                                                v.status === "MOVING"  ? "text-blue-700 bg-blue-50 border border-blue-200" :
+                                                                v.status === "MOVING"  ? "text-emerald-700 bg-emerald-50 border border-emerald-200" :
                                                                 v.status === "IDLING"  ? "text-amber-700 bg-amber-50 border border-amber-200" :
-                                                                v.status === "OFFLINE" ? "text-red-700 bg-red-50 border-red-200" :
+                                                                v.status === "OFFLINE" ? "text-rose-700 bg-rose-50 border border-rose-200" :
                                                                                         "text-slate-600 bg-slate-100 border border-slate-200"
                                                                 }`}>
-                                                                <span className={`w-1.5 h-1.5 rounded-full ${v.status === "MOVING" ? "bg-blue-500" : v.status === "IDLING" ? "bg-amber-500" : v.status === "OFFLINE" ? "bg-red-500" : "bg-slate-400"}`} />
+                                                                <span className={`w-1.5 h-1.5 rounded-full ${v.status === "MOVING" ? "bg-emerald-500" : v.status === "IDLING" ? "bg-amber-500" : v.status === "OFFLINE" ? "bg-rose-500" : "bg-slate-400"}`} />
                                                                 {v.status || "STOPPED"}
                                                             </span>
                                                         </td>

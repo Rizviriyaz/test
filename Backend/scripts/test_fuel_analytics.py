@@ -192,8 +192,9 @@ def run_api_endpoint_tests():
     assert res_unauth.status_code == 401
     print("[PASS] Unauthenticated request rejected with 401.")
 
-    # Mock auth for unit testing endpoints
-    with patch("app.main.authenticate_access_token", return_value={"id": "test-uuid", "email": "admin@ats.ae", "role": "admin"}):
+    # Mock auth and matching for unit testing endpoints with synthetic vehicles
+    with patch("app.main.authenticate_access_token", return_value={"id": "test-uuid", "email": "admin@ats.ae", "role": "admin"}), \
+         patch("app.fuel.routes._filter_wialon_matched_transactions", side_effect=lambda tx, u: tx):
         auth_headers = {"Authorization": "Bearer test-valid-jwt"}
 
         # 10. Summary endpoint with mock DB

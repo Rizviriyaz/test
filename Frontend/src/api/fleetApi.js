@@ -58,36 +58,77 @@ async function apiFetch(url, options = {}) {
     return response
 }
 
-export async function getVehicles() {
-    const response = await apiFetch(`${API_URL}/api/vehicles`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle data")
+// Universal in-flight promise sharing and client-side memory cache
+const inFlightRequests = new Map()
+const clientCache = new Map()
+
+export function getFromClientCache(key, ttlMs = 10000) {
+    const entry = clientCache.get(key)
+    if (entry && (Date.now() - entry.timestamp) < ttlMs) {
+        return entry.data
     }
-    return response.json()
+    return null
 }
 
-export async function getVehicleDetails(vehicleId) {
-    const response = await apiFetch(`${API_URL}/api/vehicles/${vehicleId}`)
-    if (!response.ok) {
-        throw new Error(`Failed to fetch vehicle details for ID ${vehicleId}`)
-    }
-    return response.json()
+export function setClientCache(key, data) {
+    clientCache.set(key, { data, timestamp: Date.now() })
 }
 
-export async function getDashboardSummary(hours = 24) {
-    const response = await apiFetch(`${API_URL}/api/dashboard/summary?hours=${hours}`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch dashboard summary")
+export function clearClientCache(keyPrefix = "") {
+    if (!keyPrefix) {
+        clientCache.clear()
+        return
     }
-    return response.json()
+    for (const key of clientCache.keys()) {
+        if (key.includes(keyPrefix)) {
+            clientCache.delete(key)
+        }
+    }
 }
 
-export async function getFleetHealth() {
-    const response = await apiFetch(`${API_URL}/api/fleet/health`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch fleet health")
+async function deduplicatedFetch(url, options = {}, ttlMs = 0) {
+    if (ttlMs > 0 && (!options.method || options.method === "GET") && !options.skipCache) {
+        const cachedData = getFromClientCache(url, ttlMs)
+        if (cachedData !== null) {
+            return cachedData
+        }
     }
-    return response.json()
+
+    if (inFlightRequests.has(url)) {
+        return inFlightRequests.get(url)
+    }
+
+    const promise = (async () => {
+        try {
+            const response = await apiFetch(url, options)
+            const data = await response.json()
+            if (ttlMs > 0) {
+                setClientCache(url, data)
+            }
+            return data
+        } finally {
+            inFlightRequests.delete(url)
+        }
+    })()
+
+    inFlightRequests.set(url, promise)
+    return promise
+}
+
+export async function getVehicles(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/vehicles`, options, 8000)
+}
+
+export async function getVehicleDetails(vehicleId, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/vehicles/${vehicleId}`, options, 10000)
+}
+
+export async function getDashboardSummary(hours = 24, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/dashboard/summary?hours=${hours}`, options, 30000)
+}
+
+export async function getFleetHealth(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/health`, options, 30000)
 }
 
 export async function getDashboardMileage(timeframe = "today", options = {}) {
@@ -105,27 +146,16 @@ export async function getDashboardMileage(timeframe = "today", options = {}) {
     if (options.to_date) params.append("to_date", options.to_date)
     if (options.group_id) params.append("group_id", options.group_id)
 
-    const response = await apiFetch(`${API_URL}/api/dashboard/mileage?${params.toString()}`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch dashboard mileage")
-    }
-    return response.json()
+    const url = `${API_URL}/api/dashboard/mileage?${params.toString()}`
+    return deduplicatedFetch(url, options, 30000)
 }
 
-export async function getDashboardTrends(hours = 24) {
-    const response = await apiFetch(`${API_URL}/api/dashboard/trends?hours=${hours}`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch dashboard trends")
-    }
-    return response.json()
+export async function getDashboardTrends(hours = 24, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/dashboard/trends?hours=${hours}`, options, 30000)
 }
 
-export async function getVehicleGroups() {
-    const response = await apiFetch(`${API_URL}/api/groups`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle groups")
-    }
-    return response.json()
+export async function getVehicleGroups(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/groups`, options, 30000)
 }
 
 export async function getDrivers() {
@@ -138,7 +168,6 @@ export async function getDrivers() {
 
 export async function getVehicleTrips(vehicleId, options = {}) {
     const { hours = 24, from_time, to_time } = options
-    let url = `${API_URL}/api/vehicles/${vehicleId}/trips`
     const params = new URLSearchParams()
 
     if (from_time !== undefined && from_time !== null && to_time !== undefined && to_time !== null) {
@@ -149,20 +178,12 @@ export async function getVehicleTrips(vehicleId, options = {}) {
     }
 
     const queryString = params.toString()
-    if (queryString) {
-        url += `?${queryString}`
-    }
-
-    const response = await apiFetch(url)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle trips")
-    }
-    return response.json()
+    const url = `${API_URL}/api/vehicles/${vehicleId}/trips${queryString ? `?${queryString}` : ""}`
+    return deduplicatedFetch(url, options, 30000)
 }
 
 export async function getVehicleHistory(vehicleId, options = {}) {
     const { hours = 24, from_time, to_time } = options
-    let url = `${API_URL}/api/vehicles/${vehicleId}/history`
     const params = new URLSearchParams()
 
     if (from_time !== undefined && from_time !== null && to_time !== undefined && to_time !== null) {
@@ -173,20 +194,12 @@ export async function getVehicleHistory(vehicleId, options = {}) {
     }
 
     const queryString = params.toString()
-    if (queryString) {
-        url += `?${queryString}`
-    }
-
-    const response = await apiFetch(url)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle history")
-    }
-    return response.json()
+    const url = `${API_URL}/api/vehicles/${vehicleId}/history${queryString ? `?${queryString}` : ""}`
+    return deduplicatedFetch(url, options, 30000)
 }
 
 export async function getVehicleIdle(vehicleId, options = {}) {
     const { hours, from_time, to_time, timeframe, from_date, to_date } = options
-    let url = `${API_URL}/api/vehicles/${vehicleId}/idle`
     const params = new URLSearchParams()
 
     if (timeframe) {
@@ -202,35 +215,20 @@ export async function getVehicleIdle(vehicleId, options = {}) {
     }
 
     const queryString = params.toString()
-    if (queryString) {
-        url += `?${queryString}`
-    }
-
-    const response = await apiFetch(url)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle idle details")
-    }
-    return response.json()
+    const url = `${API_URL}/api/vehicles/${vehicleId}/idle${queryString ? `?${queryString}` : ""}`
+    return deduplicatedFetch(url, options, 30000)
 }
 
-export async function getVehicleEfficiency(vehicleId, hours = 24) {
-    const response = await apiFetch(`${API_URL}/api/vehicles/${vehicleId}/efficiency?hours=${hours}`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle efficiency")
-    }
-    return response.json()
+export async function getVehicleEfficiency(vehicleId, hours = 24, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/vehicles/${vehicleId}/efficiency?hours=${hours}`, options, 30000)
 }
 
-export async function getVehicleSafety(vehicleId) {
-    const response = await apiFetch(`${API_URL}/api/vehicles/${vehicleId}/safety`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch vehicle safety")
-    }
-    return response.json()
+export async function getVehicleSafety(vehicleId, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/vehicles/${vehicleId}/safety`, options, 30000)
 }
 
 export async function getFleetIdleAnalytics(options = {}) {
-    const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id } = options
+    const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id, include_events, skip_cache, refresh, skipCache } = options
     let url = `${API_URL}/api/idle/fleet-analytics`
     const params = new URLSearchParams()
 
@@ -254,16 +252,22 @@ export async function getFleetIdleAnalytics(options = {}) {
         params.append("vehicle_id", vehicle_id)
     }
 
+    if (include_events !== undefined && include_events !== null) {
+        params.append("include_events", include_events)
+    }
+
+    const shouldBypass = Boolean(skip_cache || refresh || skipCache)
+    if (shouldBypass) {
+        params.append("skip_cache", "true")
+        params.append("refresh", "true")
+    }
+
     const queryString = params.toString()
     if (queryString) {
         url += `?${queryString}`
     }
 
-    const response = await apiFetch(url)
-    if (!response.ok) {
-        throw new Error("Failed to fetch fleet idle analytics")
-    }
-    return response.json()
+    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass }, 30000)
 }
 
 export async function sendAiChatMessage(messages) {
@@ -287,16 +291,12 @@ export async function sendAiChatMessage(messages) {
 
 // ── New Extended Fleet Analytics ─────────────────────────────────────────────
 
-export async function getFleetHealthAnalytics() {
-    const response = await apiFetch(`${API_URL}/api/fleet/health`)
-    if (!response.ok) throw new Error("Failed to fetch fleet health analytics")
-    return response.json()
+export async function getFleetHealthAnalytics(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/health`, options, 30000)
 }
 
-export async function getFleetUtilizationAnalytics(hours = 24) {
-    const response = await apiFetch(`${API_URL}/api/fleet/utilization?hours=${hours}`)
-    if (!response.ok) throw new Error("Failed to fetch fleet utilization analytics")
-    return response.json()
+export async function getFleetUtilizationAnalytics(hours = 24, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/utilization?hours=${hours}`, options, 30000)
 }
 
 export async function getFleetTripsAnalytics(options = {}) {
@@ -318,27 +318,19 @@ export async function getFleetTripsAnalytics(options = {}) {
     const queryString = params.toString()
     if (queryString) url += `?${queryString}`
 
-    const response = await apiFetch(url)
-    if (!response.ok) throw new Error("Failed to fetch fleet trips analytics")
-    return response.json()
+    return deduplicatedFetch(url, options, 30000)
 }
 
-export async function getFleetSafetyAnalytics(hours = 168) {
-    const response = await apiFetch(`${API_URL}/api/fleet/safety?hours=${hours}`)
-    if (!response.ok) throw new Error("Failed to fetch fleet safety analytics")
-    return response.json()
+export async function getFleetSafetyAnalytics(hours = 168, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/safety?hours=${hours}`, options, 30000)
 }
 
-export async function getFleetAlertsAnalytics() {
-    const response = await apiFetch(`${API_URL}/api/fleet/alerts`)
-    if (!response.ok) throw new Error("Failed to fetch fleet alerts")
-    return response.json()
+export async function getFleetAlertsAnalytics(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/alerts`, options, 30000)
 }
 
-export async function getFleetGroupsAnalytics() {
-    const response = await apiFetch(`${API_URL}/api/fleet/groups`)
-    if (!response.ok) throw new Error("Failed to fetch fleet groups analytics")
-    return response.json()
+export async function getFleetGroupsAnalytics(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fleet/groups`, options, 30000)
 }
 
 export async function getVehicleDeepAnalytics(vehicleId, hours = 24) {
@@ -366,44 +358,36 @@ function buildFuelQueryString(params = {}) {
     return qs ? `?${qs}` : ""
 }
 
-export async function getFuelSummary(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/summary${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelSummary(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/summary${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getFuelTrend(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/trend${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelTrend(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/trend${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getFuelVehicles(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/vehicles${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelVehicles(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/vehicles${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getFuelTypes(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/fuel-types${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelTypes(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/fuel-types${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getFleetEfficiency(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFleetEfficiency(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/efficiency${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getVehicleEfficiencyList(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency/vehicles${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getVehicleEfficiencyList(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/efficiency/vehicles${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getEfficiencyTrend(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/efficiency/trend${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getEfficiencyTrend(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/efficiency/trend${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function getFuelVehicleDistance(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelVehicleDistance(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`, options, 30000)
 }
 
 export async function previewFuelImport(file) {
@@ -432,7 +416,15 @@ export async function getFuelImports(limit = 50, offset = 0) {
     return response.json()
 }
 
-export async function getFuelTransactions(params = {}) {
-    const response = await apiFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`)
-    return response.json()
+export async function getFuelWaste(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/waste${buildFuelQueryString(params)}`, options, 30000)
 }
+
+export async function getVehicleFuelDetail(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/vehicle-detail${buildFuelQueryString(params)}`, options, 30000)
+}
+
+export async function getFuelTransactions(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`, options, 30000)
+}
+

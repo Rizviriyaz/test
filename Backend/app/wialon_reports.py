@@ -26,8 +26,55 @@ GROUP_ID_ALL_UNITS = 601817480
 _report_lock = threading.Lock()
 
 
+def extract_cell_value(cell: Any) -> Any:
+    """Extract numeric or primitive value from Wialon report cell (dict or primitive)."""
+    if isinstance(cell, dict):
+        return cell.get("v") if cell.get("v") is not None else cell.get("t")
+    return cell
+
+
+def extract_cell_text(cell: Any) -> str:
+    """Extract string text representation from Wialon report cell."""
+    if isinstance(cell, dict):
+        return str(cell.get("t") if cell.get("t") is not None else cell.get("v", ""))
+    return str(cell or "")
+
+
+def parse_float_safe(val: Any, default: float = 0.0) -> float:
+    """
+    Safely parse float from Wialon cell (primitive, dict, or string with units/separators).
+    Handles comma/dot decimal separators, thousand separators, and units like 'km', 'km/h'.
+    """
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, dict):
+        raw = val.get("v") if val.get("v") is not None else val.get("t")
+        return parse_float_safe(raw, default=default)
+
+    clean_str = str(val).replace("km/h", "").replace("km", "").replace(" ", "").strip()
+    if not clean_str or clean_str in ("---", "N/A", "null", "none"):
+        return default
+
+    # Handle thousand and decimal separators: "1,234.56" vs "12,5"
+    if "," in clean_str and "." in clean_str:
+        clean_str = clean_str.replace(",", "")
+    elif "," in clean_str and "." not in clean_str:
+        clean_str = clean_str.replace(",", ".")
+
+    try:
+        return float(clean_str)
+    except (ValueError, TypeError):
+        return default
+
+
 def parse_duration_to_seconds(dur_str: Any) -> int:
     """Parse Wialon duration string (HH:MM:SS or MM:SS) to total seconds."""
+    if isinstance(dur_str, (int, float)):
+        return int(dur_str)
+    if isinstance(dur_str, dict):
+        dur_str = dur_str.get("v") if dur_str.get("v") is not None else dur_str.get("t", "0")
     try:
         parts = str(dur_str).strip().split(":")
         if len(parts) == 3:
@@ -98,7 +145,7 @@ def execute_wialon_unit_trips_report(
                     if isinstance(row_res, dict) and "error" in row_res:
                         raise WialonAPIError(f"Wialon trip rows failed for vehicle {vehicle_id}: {row_res}")
                     if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Wialon trip rows returned an invalid response for vehicle {vehicle_id}")
+                        raise WialonAPIError(f"Unexpected response structure for trip rows of vehicle {vehicle_id}: {row_res}")
                     for r in row_res:
                         cols = r.get("c", [])
                         if len(cols) >= 10:
@@ -108,15 +155,10 @@ def execute_wialon_unit_trips_report(
                             end_loc_obj = cols[4] if isinstance(cols[4], dict) else {}
                             max_spd_obj = cols[8] if isinstance(cols[8], dict) else {}
 
-                            dist_raw = cols[9] if len(cols) > 9 else "0"
-                            dist_str = str(dist_raw).replace("km", "").strip()
-                            try:
-                                dist_km = float(dist_str)
-                            except ValueError:
-                                dist_km = 0.0
+                            dist_km = parse_float_safe(extract_cell_value(cols[9]) if len(cols) > 9 else 0.0)
 
-                            dur_str = str(cols[5])
-                            mov_str = str(cols[6])
+                            dur_str = extract_cell_text(cols[5])
+                            mov_str = extract_cell_text(cols[6])
                             dur_mins = parse_duration_to_minutes(dur_str)
 
                             trips.append(
@@ -199,16 +241,17 @@ def execute_wialon_unit_engine_report(
             total_engine_sec = 0
 
             if tables:
-                row_res = wialon_request(
-                    "report/get_result_rows",
-                    {"tableIndex": 0, "indexFrom": 0, "indexTo": 100},
-                    sid=sid,
-                )
-                if isinstance(row_res, dict) and "error" in row_res:
-                    raise WialonAPIError(f"Wialon engine rows failed for vehicle {vehicle_id}: {row_res}")
-                if not isinstance(row_res, list):
-                    raise WialonAPIError(f"Wialon engine rows returned an invalid response for vehicle {vehicle_id}")
-                if isinstance(row_res, list):
+                total_rows = tables[0].get("rows", 0)
+                if total_rows > 0:
+                    row_res = wialon_request(
+                        "report/get_result_rows",
+                        {"tableIndex": 0, "indexFrom": 0, "indexTo": min(total_rows - 1, 100)},
+                        sid=sid,
+                    )
+                    if isinstance(row_res, dict) and "error" in row_res:
+                        raise WialonAPIError(f"Wialon engine rows failed for vehicle {vehicle_id}: {row_res}")
+                    if not isinstance(row_res, list):
+                        raise WialonAPIError(f"Unexpected response structure for engine rows of vehicle {vehicle_id}: {row_res}")
                     for row_idx, r in enumerate(row_res):
                         cols = r.get("c", [])
                         if len(cols) >= 9:
@@ -318,29 +361,19 @@ def execute_wialon_group_trips_report(
                     if isinstance(row_res, dict) and "error" in row_res:
                         raise WialonAPIError(f"Wialon trip rows failed for group {group_id}: {row_res}")
                     if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Wialon trip rows returned an invalid response for group {group_id}")
+                        raise WialonAPIError(f"Unexpected response structure for trip rows of group {group_id}: {row_res}")
                     for r in row_res:
                         cols = r.get("c", [])
                         # Table 0 columns: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Mileage', 'Total time', 'Engine hours', 'Avg. speed', 'Max. speed', 'Driver']
                         if len(cols) >= 6:
-                            vehicle_name = str(cols[0]).strip()
-                            dist_raw = cols[5] if len(cols) > 5 else "0"
-                            dist_str = str(dist_raw).replace("km", "").strip()
-                            try:
-                                dist_km = float(dist_str)
-                            except ValueError:
-                                dist_km = 0.0
+                            vehicle_name = extract_cell_text(cols[0]).strip()
+                            dist_km = parse_float_safe(extract_cell_value(cols[5]) if len(cols) > 5 else 0.0)
 
-                            total_time_str = str(cols[6]) if len(cols) > 6 else "0:00:00"
-                            engine_hours_str = str(cols[7]) if len(cols) > 7 else "0:00:00"
-                            avg_spd_str = str(cols[8]) if len(cols) > 8 else "0 km/h"
-                            max_spd_col = cols[9] if len(cols) > 9 else "0 km/h"
-                            max_spd_str = (
-                                max_spd_col.get("t")
-                                if isinstance(max_spd_col, dict)
-                                else str(max_spd_col)
-                            )
-                            driver_col = str(cols[10]).strip() if len(cols) > 10 else ""
+                            total_time_str = extract_cell_text(cols[6]) if len(cols) > 6 else "0:00:00"
+                            engine_hours_str = extract_cell_text(cols[7]) if len(cols) > 7 else "0:00:00"
+                            avg_spd_str = extract_cell_text(cols[8]) if len(cols) > 8 else "0 km/h"
+                            max_spd_str = extract_cell_text(cols[9]) if len(cols) > 9 else "0 km/h"
+                            driver_col = extract_cell_text(cols[10]).strip() if len(cols) > 10 else ""
 
                             unit_summaries.append({
                                 "vehicle_name": vehicle_name,
@@ -408,16 +441,17 @@ def execute_wialon_group_engine_idle_report(
             all_idle_events = []
 
             if tables:
-                row_res = wialon_request(
-                    "report/get_result_rows",
-                    {"tableIndex": 0, "indexFrom": 0, "indexTo": 500},
-                    sid=sid,
-                )
-                if isinstance(row_res, dict) and "error" in row_res:
-                    raise WialonAPIError(f"Wialon engine rows failed for group {group_id}: {row_res}")
-                if not isinstance(row_res, list):
-                    raise WialonAPIError(f"Wialon engine rows returned an invalid response for group {group_id}")
-                if isinstance(row_res, list):
+                total_rows = tables[0].get("rows", 0)
+                if total_rows > 0:
+                    row_res = wialon_request(
+                        "report/get_result_rows",
+                        {"tableIndex": 0, "indexFrom": 0, "indexTo": min(total_rows - 1, 500)},
+                        sid=sid,
+                    )
+                    if isinstance(row_res, dict) and "error" in row_res:
+                        raise WialonAPIError(f"Wialon engine rows failed for group {group_id}: {row_res}")
+                    if not isinstance(row_res, list):
+                        raise WialonAPIError(f"Unexpected response structure for engine rows of group {group_id}: {row_res}")
                     for row_idx, r in enumerate(row_res):
                         cols = r.get("c", [])
                         # Table 0: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Total time', 'Engine hours', 'In motion', 'Idling', 'Mileage', 'Avg. speed', 'Max. speed']
@@ -472,8 +506,34 @@ def execute_wialon_group_engine_idle_report(
                                                 }
                                                 unit_events.append(ev_item)
                                                 all_idle_events.append(ev_item)
+                            elif include_events and idling_sec > 0 and r.get("d", 0) == 0:
+                                # When a vehicle has idling recorded in a single non-nested interval
+                                st_obj = cols[1] if len(cols) > 1 and isinstance(cols[1], dict) else {}
+                                loc_obj = cols[2] if len(cols) > 2 and isinstance(cols[2], dict) else (cols[4] if len(cols) > 4 and isinstance(cols[4], dict) else {})
+                                et_obj = cols[3] if len(cols) > 3 and isinstance(cols[3], dict) else {}
+                                st_ts = st_obj.get("v") or r.get("t1") or 0
+                                et_ts = et_obj.get("v") or r.get("t2") or (st_ts + idling_sec)
+                                lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
+                                lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
+                                addr = loc_obj.get("t") or "Unknown Location"
 
-                            longest_idle = max((ev["duration"] for ev in unit_events), default=idling_sec)
+                                ev_item = {
+                                    "vehicle_name": vehicle_name,
+                                    "start_time": st_ts,
+                                    "end_time": et_ts,
+                                    "duration": idling_sec,
+                                    "duration_minutes": round(idling_sec / 60.0, 2),
+                                    "location": {
+                                        "latitude": lat,
+                                        "longitude": lng,
+                                    },
+                                    "address": addr,
+                                }
+                                unit_events.append(ev_item)
+                                all_idle_events.append(ev_item)
+
+                            # Only consider discrete individual qualifying events; never substitute cumulative total idle
+                            longest_idle = max((ev["duration"] for ev in unit_events), default=(idling_sec if len(unit_events) == 1 else 0))
 
                             unit_summaries.append({
                                 "vehicle_name": vehicle_name,

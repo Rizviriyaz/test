@@ -27,14 +27,9 @@ def calculate_idle_duration(
     # Find the Ignition sensor dynamically
     # --------------------------------------------------
 
-    ignition_sensor_id = None
-    if isinstance(configured_sensors, dict):
-        for sensor_id, sensor_config in configured_sensors.items():
-            s_type = str(sensor_config.get("t", "")).lower()
-            s_name = str(sensor_config.get("n", "")).lower()
-            if s_type == "engine operation" or any(kw in s_name for kw in ["ignition", "engine", "acc", "ig"]):
-                ignition_sensor_id = str(sensor_id)
-                break
+    from app.normalize import is_valid_sensor_value, resolve_unit_sensors
+    sensor_map = resolve_unit_sensors(configured_sensors)
+    ignition_sensor_id = sensor_map.get("ignition_id")
 
     # --------------------------------------------------
     # Build status history
@@ -64,15 +59,19 @@ def calculate_idle_duration(
         sensors = message.get("sensors", {})
         if ignition_sensor_id and ignition_sensor_id in sensors:
             ig_val = sensors[ignition_sensor_id].get("value")
-            if ig_val is not None:
-                ignition_on = (ig_val == 1 or str(ig_val).lower() in ["1", "true", "on"])
+            if ig_val is not None and is_valid_sensor_value(ig_val):
+                ignition_on = (ig_val == 1) or str(ig_val).strip().lower() in ["1", "true", "on"]
         else:
-            # Fallback to telemetry parameters (io_11 or in1)
+            # Fallback to digital telemetry inputs (io_11, in1, io_239)
             params = message.get("p") or {}
-            if "io_11" in params:
-                ignition_on = float(params["io_11"]) > 0
-            elif "in1" in params:
-                ignition_on = float(params["in1"]) > 0
+            for p_key in ("io_11", "in1", "io_239"):
+                if p_key in params:
+                    try:
+                        if float(params[p_key]) > 0:
+                            ignition_on = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
 
         # Status
         status = calculate_status(

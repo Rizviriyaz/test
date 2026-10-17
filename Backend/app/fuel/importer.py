@@ -276,26 +276,49 @@ def validate_confirmed_mapping(raw_headers: List[str], confirmed_mapping: Dict[s
 def resolve_fleet_vehicles() -> Dict[str, int]:
     """
     Attempt to fetch fleet vehicle units to match vehicle_identifier with Wialon unit IDs.
-    Returns normalized_name/plate -> vehicle_id mapping.
+    First indexes verified Wialon profile registration plates.
+    Keeps unit name matching as an explicit backward-compatibility fallback.
+    Returns normalized plate/name -> vehicle_id mapping.
     """
     try:
         from app.wialon import login
-        from app.vehicles import get_all_vehicles
+        from app.vehicles import get_all_vehicles, extract_registration_plate
 
         sid = login()
         vehicles = get_all_vehicles(sid)
         lookup: Dict[str, int] = {}
+        fallback_lookup: Dict[str, int] = {}
+
         for v in vehicles:
             v_id = v.get("id")
-            v_name = v.get("nm", "")
-            if v_id and v_name:
-                # Store full normalized name and alphanumeric key
-                lookup[str(v_name).strip().lower()] = int(v_id)
-                alphanumeric = re.sub(r"[^a-zA-Z0-9]", "", str(v_name).lower())
-                if alphanumeric:
-                    lookup[alphanumeric] = int(v_id)
-                # Also index by string ID if applicable
-                lookup[str(v_id)] = int(v_id)
+            if not v_id:
+                continue
+            v_id_int = int(v_id)
+            lookup[str(v_id)] = v_id_int
+
+            # 1. Primary: Verified Profile Registration Plate
+            v_plate = extract_registration_plate(v)
+            if v_plate:
+                plate_clean = str(v_plate).strip().lower()
+                lookup[plate_clean] = v_id_int
+                plate_alpha = re.sub(r"[^a-zA-Z0-9]", "", plate_clean)
+                if plate_alpha:
+                    lookup[plate_alpha] = v_id_int
+
+            # 2. Explicit Fallback: Unit Name (General -> Name) for backward compatibility
+            v_name = v.get("nm")
+            if v_name:
+                name_clean = str(v_name).strip().lower()
+                fallback_lookup[name_clean] = v_id_int
+                name_alpha = re.sub(r"[^a-zA-Z0-9]", "", name_clean)
+                if name_alpha:
+                    fallback_lookup[name_alpha] = v_id_int
+
+        # Add fallback mappings only if not already claimed by a verified plate
+        for k, vid in fallback_lookup.items():
+            if k not in lookup:
+                lookup[k] = vid
+
         return lookup
     except Exception as exc:
         logger.warning("Could not pre-fetch Wialon vehicles for ID resolution: %s", exc)

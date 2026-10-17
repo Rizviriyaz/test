@@ -68,8 +68,8 @@ export default function FuelTrendChart() {
                     Period: {point?.period}
                 </p>
                 <div className="flex items-center justify-between gap-4">
-                    <span className="text-slate-500">Fuel Consumed:</span>
-                    <span className="font-bold text-[#1C5E7A]">{Number(point?.litres || 0).toLocaleString()} L</span>
+                    <span className="text-slate-500">Fuel Purchased:</span>
+                    <span className="font-bold text-[#33758F]">{Number(point?.litres || 0).toLocaleString()} L</span>
                 </div>
                 <div className="flex items-center justify-between gap-4">
                     <span className="text-slate-500">Fuel Cost:</span>
@@ -97,7 +97,7 @@ export default function FuelTrendChart() {
             {/* Header with Title and Interactive Controls */}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-100">
                 <div className="flex items-center gap-2.5">
-                    <div className="rounded-xl bg-[#1C5E7A]/10 p-2 text-[#1C5E7A]">
+                    <div className="rounded-xl bg-[#33758F]/10 p-2 text-[#33758F]">
                         <TrendingUp className="h-4 w-4" />
                     </div>
                     <div>
@@ -118,7 +118,7 @@ export default function FuelTrendChart() {
                             onClick={() => setMetric("fuel")}
                             className={`rounded-lg px-2.5 py-1 transition-colors cursor-pointer ${
                                 metric === "fuel"
-                                    ? "bg-white text-[#1C5E7A] shadow-xs font-bold"
+                                    ? "bg-white text-[#33758F] shadow-xs font-bold"
                                     : "text-slate-600 hover:text-slate-900"
                             }`}
                         >
@@ -183,7 +183,7 @@ export default function FuelTrendChart() {
             <div className="pt-4 h-[320px] w-full">
                 {loading ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                        <Loader2 className="h-6 w-6 animate-spin text-[#1C5E7A] mb-2" />
+                        <Loader2 className="h-6 w-6 animate-spin text-[#33758F] mb-2" />
                         <span className="text-xs font-semibold">Loading fleet trend telemetry…</span>
                     </div>
                 ) : error ? (
@@ -201,15 +201,15 @@ export default function FuelTrendChart() {
                         <AreaChart data={formattedData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                             <defs>
                                 <linearGradient id="fuelGradient" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="5%" stopColor="#1C5E7A" stopOpacity={0.4} />
-                                    <stop offset="95%" stopColor="#1C5E7A" stopOpacity={0.0} />
+                                    <stop offset="5%" stopColor="#33758F" stopOpacity={0.4} />
+                                    <stop offset="95%" stopColor="#33758F" stopOpacity={0.0} />
                                 </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
                             <XAxis dataKey="displayPeriod" tick={{ fontSize: 11, fill: "#64748B" }} tickLine={false} axisLine={{ stroke: "#E2E8F0" }} />
                             <YAxis tick={{ fontSize: 11, fill: "#64748B" }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k L`} />
                             <Tooltip content={<CustomTooltip />} />
-                            <Area type="monotone" dataKey="litres" stroke="#1C5E7A" strokeWidth={2.5} fillOpacity={1} fill="url(#fuelGradient)" name="Fuel (Litres)" />
+                            <Area type="monotone" dataKey="litres" stroke="#33758F" strokeWidth={2.5} fillOpacity={1} fill="url(#fuelGradient)" name="Fuel (Litres)" />
                         </AreaChart>
                     </ResponsiveContainer>
                 ) : metric === "cost" ? (
@@ -244,11 +244,11 @@ export default function FuelTrendChart() {
                         <BarChart data={formattedData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
                             <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
                             <XAxis dataKey="displayPeriod" tick={{ fontSize: 11, fill: "#64748B" }} tickLine={false} axisLine={{ stroke: "#E2E8F0" }} />
-                            <YAxis yAxisId="left" tick={{ fontSize: 11, fill: "#1C5E7A" }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k L`} />
+                            <YAxis yAxisId="left" tick={{ fontSize: 11, fill: "#33758F" }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k L`} />
                             <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11, fill: "#0284C7" }} tickLine={false} axisLine={false} tickFormatter={(v) => `${(v / 1000).toFixed(0)}k km`} />
                             <Tooltip content={<CustomTooltip />} />
                             <Legend wrapperStyle={{ fontSize: 11, paddingTop: 10 }} />
-                            <Bar yAxisId="left" dataKey="litres" fill="#1C5E7A" radius={[4, 4, 0, 0]} name="Fuel (Litres)" />
+                            <Bar yAxisId="left" dataKey="litres" fill="#33758F" radius={[4, 4, 0, 0]} name="Fuel (Litres)" />
                             <Bar yAxisId="right" dataKey="distance_km" fill="#38BDF8" radius={[4, 4, 0, 0]} name="Distance (km)" />
                         </BarChart>
                     </ResponsiveContainer>

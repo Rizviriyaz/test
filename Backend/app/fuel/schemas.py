@@ -147,6 +147,7 @@ class VehicleDistanceResponse(BaseModel):
     vehicle_identifier: str = Field(..., description="Fuel vehicle registration identifier")
     wialon_unit_id: int = Field(..., description="Dynamically resolved Wialon unit ID")
     wialon_unit_name: str = Field(..., description="Dynamically resolved Wialon unit name")
+    registration_plate: Optional[str] = Field(None, description="Verified Wialon profile registration plate, null if not available")
     date_from: str = Field(..., description="Start date (YYYY-MM-DD)")
     date_to: str = Field(..., description="End date (YYYY-MM-DD)")
     distance: float = Field(..., description="Authoritative distance traveled in kilometers")
@@ -157,32 +158,56 @@ class VehicleDistanceResponse(BaseModel):
 
 
 class FleetEfficiencyResponse(BaseModel):
-    total_litres: float = Field(..., description="Total fuel volume across all filtered refuel records")
-    total_cost: float = Field(..., description="Total fuel expenditure across all filtered refuel records")
-    transaction_count: int = Field(..., description="Total refuel transactions recorded")
-    vehicle_count: int = Field(..., description="Total unique vehicles in the filtered fuel data")
+    total_litres: float = Field(..., description="Total fuel volume across all filtered refuel records [Recorded]")
+    total_cost: float = Field(..., description="Total fuel expenditure across all filtered refuel records [Recorded]")
+    transaction_count: int = Field(..., description="Total refuel transactions recorded [Recorded]")
+    vehicle_count: int = Field(..., description="Total unique vehicles in the filtered fuel data [Recorded]")
     matched_vehicle_count: int = Field(..., description="Vehicles successfully matched to an active Wialon GPS unit")
     unmatched_vehicle_count: int = Field(..., description="Vehicles not tracked by Wialon GPS")
     vehicles_with_distance: int = Field(..., description="Tracked vehicles with recorded distance > 0")
     vehicles_without_distance: int = Field(..., description="Tracked vehicles with 0 recorded distance / no trips")
     tracked_litres: float = Field(..., description="Fuel volume dispensed specifically to vehicles with tracked distance")
     tracked_cost: float = Field(..., description="Fuel cost incurred specifically by vehicles with tracked distance")
-    total_distance_km: Optional[float] = Field(None, description="Total distance traveled by tracked vehicles in kilometers")
+    total_distance_km: Optional[float] = Field(None, description="Total distance traveled by tracked vehicles in kilometers [Recorded]")
+    total_driving_hours: Optional[float] = Field(None, description="Total qualifying moving duration across tracked vehicles in hours [Recorded]")
+    total_idle_hours: Optional[float] = Field(None, description="Total qualifying idle duration across tracked vehicles in hours [Recorded]")
+    total_engine_hours: Optional[float] = Field(None, description="Total engine on hours across tracked vehicles [Recorded]")
+    idle_rate_lph: float = Field(default=2.0, description="Configured idle consumption coefficient in L/h [Assumption]")
+    estimated_idle_fuel_litres: Optional[float] = Field(None, description="Estimated total fuel consumed while idling across fleet [Estimated]")
+    estimated_idle_cost: Optional[float] = Field(None, description="Estimated total cost of idle fuel across fleet [Estimated]")
+    estimated_driving_fuel_litres: Optional[float] = Field(None, description="Estimated total fuel consumed while driving across fleet [Estimated]")
+    estimated_idle_percentage: Optional[float] = Field(None, description="Estimated idle fuel percentage of tracked fuel [Estimated]")
+    estimated_driving_percentage: Optional[float] = Field(None, description="Estimated driving fuel percentage of tracked fuel [Estimated]")
     fuel_efficiency_l_per_100km: Optional[float] = Field(None, description="Weighted fleet fuel efficiency in L/100 km (tracked_litres / total_distance * 100)")
     fuel_cost_per_km: Optional[float] = Field(None, description="Weighted fleet fuel cost per km (tracked_cost / total_distance)")
+    unmatched_transactions_count: int = Field(default=0, description="Number of fuel transactions with unmatched vehicle identifier")
+    unmatched_litres: float = Field(default=0.0, description="Fuel volume from unmatched transactions")
+    unmatched_cost: float = Field(default=0.0, description="Fuel cost from unmatched transactions")
 
 
 class VehicleEfficiencyItem(BaseModel):
     vehicle_identifier: str = Field(..., description="Registration plate / vehicle identifier")
     wialon_unit_id: Optional[int] = Field(None, description="Resolved Wialon unit ID, null if not tracked")
     wialon_unit_name: Optional[str] = Field(None, description="Resolved Wialon unit name, null if not tracked")
-    litres: float = Field(..., description="Total fuel dispensed in litres")
-    total_cost: float = Field(..., description="Total fuel expenditure in AED")
-    transaction_count: int = Field(..., description="Number of refuels recorded")
-    distance_km: Optional[float] = Field(None, description="Total distance traveled in km, null if not tracked")
+    registration_plate: Optional[str] = Field(None, description="Resolved Wialon profile registration plate, null if not available")
+    litres: float = Field(..., description="Total fuel dispensed in litres [Recorded]")
+    total_cost: float = Field(..., description="Total fuel expenditure in AED [Recorded]")
+    transaction_count: int = Field(..., description="Number of refuels recorded [Recorded]")
+    distance_km: Optional[float] = Field(None, description="Total distance traveled in km, null if not tracked [Recorded]")
+    driving_duration_hours: Optional[float] = Field(None, description="Total qualifying driving time in hours [Recorded]")
+    idle_duration_hours: Optional[float] = Field(None, description="Total qualifying idle time in hours [Recorded]")
+    engine_hours: Optional[float] = Field(None, description="Total engine operation hours [Recorded]")
+    idle_rate_lph: float = Field(default=2.0, description="Idle consumption coefficient applied (L/h)")
+    estimated_idle_fuel_litres: Optional[float] = Field(None, description="Estimated idle fuel consumed (L) = idle_hours * idle_rate_lph [Estimated]")
+    estimated_idle_cost: Optional[float] = Field(None, description="Estimated idle fuel expenditure in AED [Estimated]")
+    estimated_driving_fuel_litres: Optional[float] = Field(None, description="Estimated driving fuel (L) = litres - estimated_idle_fuel [Estimated]")
+    estimated_idle_percentage: Optional[float] = Field(None, description="Estimated idle fuel percentage of fuel purchased [Estimated]")
+    estimated_driving_percentage: Optional[float] = Field(None, description="Estimated driving fuel percentage of fuel purchased [Estimated]")
     fuel_efficiency_l_per_100km: Optional[float] = Field(None, description="Fuel consumption in L/100 km, null if distance unavailable")
     fuel_cost_per_km: Optional[float] = Field(None, description="Fuel cost per km, null if distance unavailable")
     status: str = Field(..., description="Data status: 'matched', 'not_tracked', 'no_distance_data', or 'ambiguous'")
+    estimation_status: str = Field(default="unavailable", description="Estimation confidence: 'measured', 'estimated', 'provisional', 'unavailable'")
+    quality_warnings: List[str] = Field(default_factory=list, description="Data quality issues or reconciliation flags")
 
 
 class VehicleEfficiencyResponse(BaseModel):
@@ -205,3 +230,45 @@ class EfficiencyTrendItem(BaseModel):
 class EfficiencyTrendResponse(BaseModel):
     group_by: str = Field(..., description="Grouping interval: 'day', 'week', or 'month'")
     data: List[EfficiencyTrendItem] = Field(default_factory=list, description="Chronological efficiency trend records")
+
+
+# ─── Fuel Waste & Anomaly Schemas ──────────────────────────────────────────────
+
+class FuelAnomalyItem(BaseModel):
+    id: str = Field(..., description="Unique identifier for the anomaly flag")
+    anomaly_type: str = Field(..., description="Category: 'excessive_idling', 'rapid_refuel', 'volume_spike', 'odometer_inconsistency', 'duplicate_candidate', 'unmatched_vehicle'")
+    severity: str = Field(..., description="Severity level: 'critical', 'warning', 'info'")
+    finding_type: str = Field(..., description="Evidence classification: 'measured', 'estimated', 'provisional'")
+    vehicle_identifier: str = Field(..., description="Vehicle registration plate affected")
+    transaction_id: Optional[int] = Field(None, description="Transaction ID if specific to a single record")
+    transaction_date: Optional[str] = Field(None, description="Date or timestamp of incident")
+    title: str = Field(..., description="Concise title summarizing the anomaly")
+    description: str = Field(..., description="Detailed explanation with transparent numbers and reason")
+    recorded_value: Optional[str] = Field(None, description="Actual recorded value that triggered the flag")
+    threshold_or_baseline: Optional[str] = Field(None, description="Comparison threshold or baseline used")
+    wasted_litres: Optional[float] = Field(None, description="Estimated fuel wasted in litres if applicable")
+    wasted_cost: Optional[float] = Field(None, description="Estimated expenditure wasted in AED if applicable")
+    details: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context metadata")
+
+
+class FuelWasteResponse(BaseModel):
+    total_anomalies_count: int = Field(..., description="Total number of active anomaly findings")
+    excessive_idle_vehicles_count: int = Field(..., description="Vehicles exceeding idle duration threshold")
+    total_idle_waste_litres: float = Field(..., description="Fleet total estimated idle fuel waste in litres")
+    total_idle_waste_cost: float = Field(..., description="Fleet total estimated idle fuel waste in AED")
+    refuel_anomalies_count: int = Field(..., description="Number of unusual refuelling patterns detected")
+    data_quality_issues_count: int = Field(..., description="Number of data quality inconsistencies found")
+    idle_threshold_hours: float = Field(default=5.0, description="Configured idle threshold in hours")
+    idle_rate_lph: float = Field(default=2.0, description="Idle consumption coefficient in L/h")
+    anomalies: List[FuelAnomalyItem] = Field(default_factory=list, description="Prioritized list of anomalies")
+    top_idle_wasters: List[VehicleEfficiencyItem] = Field(default_factory=list, description="Top vehicles ranked by estimated idle cost")
+
+
+class VehicleFuelDetailResponse(BaseModel):
+    vehicle_identifier: str = Field(..., description="Vehicle registration plate")
+    vehicle_summary: VehicleEfficiencyItem = Field(..., description="Comprehensive vehicle performance metrics")
+    transactions: List[FuelTransactionItem] = Field(default_factory=list, description="Chronological transaction history")
+    activity_breakdown: Dict[str, Any] = Field(default_factory=dict, description="Driving vs Idling duration and fuel breakdown")
+    anomalies: List[FuelAnomalyItem] = Field(default_factory=list, description="Specific anomalies identified for this vehicle")
+    calculation_transparency: Dict[str, Any] = Field(default_factory=dict, description="Disclosed formulas, coefficient, and data sources")
+
