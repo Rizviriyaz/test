@@ -20,6 +20,7 @@ import {
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 import FleetStatusBadge from "./Common/FleetStatusBadge"
+import { MorphingDialogTrigger } from "./core/morphing-dialog"
 
 export function isValidCoordinate(lat, lng) {
     if (lat === null || lat === undefined || lng === null || lng === undefined) return false
@@ -280,13 +281,13 @@ function VehiclePopupCard({ vehicle, onInspect }) {
 
             {/* Inspect details action */}
             {onInspect && (
-                <button
-                    type="button"
+                <MorphingDialogTrigger
+                    layoutId={`vehicle-${vehicle.vehicle_id || vehicle.id}`}
                     onClick={() => onInspect(vehicle)}
-                    className="mt-2.5 w-full rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white py-1.5 text-xs font-bold transition shadow-2xs cursor-pointer text-center"
+                    className="mt-2.5 w-full rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white py-1.5 text-xs font-bold transition-colors shadow-2xs cursor-pointer text-center flex items-center justify-center"
                 >
                     View Vehicle Details
-                </button>
+                </MorphingDialogTrigger>
             )}
         </div>
     )

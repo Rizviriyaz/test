@@ -506,8 +506,34 @@ def execute_wialon_group_engine_idle_report(
                                                 }
                                                 unit_events.append(ev_item)
                                                 all_idle_events.append(ev_item)
+                            elif include_events and idling_sec > 0 and r.get("d", 0) == 0:
+                                # When a vehicle has idling recorded in a single non-nested interval
+                                st_obj = cols[1] if len(cols) > 1 and isinstance(cols[1], dict) else {}
+                                loc_obj = cols[2] if len(cols) > 2 and isinstance(cols[2], dict) else (cols[4] if len(cols) > 4 and isinstance(cols[4], dict) else {})
+                                et_obj = cols[3] if len(cols) > 3 and isinstance(cols[3], dict) else {}
+                                st_ts = st_obj.get("v") or r.get("t1") or 0
+                                et_ts = et_obj.get("v") or r.get("t2") or (st_ts + idling_sec)
+                                lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
+                                lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
+                                addr = loc_obj.get("t") or "Unknown Location"
 
-                            longest_idle = max((ev["duration"] for ev in unit_events), default=idling_sec)
+                                ev_item = {
+                                    "vehicle_name": vehicle_name,
+                                    "start_time": st_ts,
+                                    "end_time": et_ts,
+                                    "duration": idling_sec,
+                                    "duration_minutes": round(idling_sec / 60.0, 2),
+                                    "location": {
+                                        "latitude": lat,
+                                        "longitude": lng,
+                                    },
+                                    "address": addr,
+                                }
+                                unit_events.append(ev_item)
+                                all_idle_events.append(ev_item)
+
+                            # Only consider discrete individual qualifying events; never substitute cumulative total idle
+                            longest_idle = max((ev["duration"] for ev in unit_events), default=(idling_sec if len(unit_events) == 1 else 0))
 
                             unit_summaries.append({
                                 "vehicle_name": vehicle_name,

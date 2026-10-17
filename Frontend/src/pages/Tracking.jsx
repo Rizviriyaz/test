@@ -25,6 +25,7 @@ import PageHeader from "../components/Common/PageHeader"
 import SearchInput from "../components/Common/SearchInput"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import { MorphingDialogTrigger } from "../components/core/morphing-dialog"
 
 function Tracking() {
     const [searchParams, setSearchParams] = useSearchParams()
@@ -493,17 +494,17 @@ function Tracking() {
                                                     </span>
                                                 </div>
 
-                                                <button
-                                                    type="button"
+                                                <MorphingDialogTrigger
+                                                    layoutId={`vehicle-${vehicle.vehicle_id || vehicle.id}`}
                                                     onClick={(e) => {
                                                         e.stopPropagation()
                                                         setDrawerVehicle(vehicle)
                                                     }}
-                                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#33758F] hover:text-[#285E73] hover:underline cursor-pointer"
+                                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#33758F] hover:text-[#285E73] hover:underline cursor-pointer transition-colors"
                                                 >
                                                     <span>Details</span>
                                                     <ChevronRight className="h-3.5 w-3.5" />
-                                                </button>
+                                                </MorphingDialogTrigger>
                                             </div>
                                         </div>
                                     )
@@ -573,13 +574,13 @@ function Tracking() {
                                         <span className="font-black text-slate-800">
                                             {Math.round(Number(selectedVehicle.speed) || 0)} km/h
                                         </span>
-                                        <button
-                                            type="button"
+                                        <MorphingDialogTrigger
+                                            layoutId={`vehicle-${selectedVehicle.vehicle_id || selectedVehicle.id}`}
                                             onClick={() => setDrawerVehicle(selectedVehicle)}
-                                            className="rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white px-2.5 py-1 text-[11px] font-bold transition shadow-2xs cursor-pointer"
+                                            className="rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white px-2.5 py-1 text-[11px] font-bold transition-colors shadow-2xs cursor-pointer flex items-center justify-center"
                                         >
                                             Full Details
-                                        </button>
+                                        </MorphingDialogTrigger>
                                     </div>
                                 </div>
                             )}

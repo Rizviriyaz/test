@@ -228,7 +228,7 @@ export async function getVehicleSafety(vehicleId, options = {}) {
 }
 
 export async function getFleetIdleAnalytics(options = {}) {
-    const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id, include_events } = options
+    const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id, include_events, skip_cache, refresh, skipCache } = options
     let url = `${API_URL}/api/idle/fleet-analytics`
     const params = new URLSearchParams()
 
@@ -256,12 +256,18 @@ export async function getFleetIdleAnalytics(options = {}) {
         params.append("include_events", include_events)
     }
 
+    const shouldBypass = Boolean(skip_cache || refresh || skipCache)
+    if (shouldBypass) {
+        params.append("skip_cache", "true")
+        params.append("refresh", "true")
+    }
+
     const queryString = params.toString()
     if (queryString) {
         url += `?${queryString}`
     }
 
-    return deduplicatedFetch(url, options, 30000)
+    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass }, 30000)
 }
 
 export async function sendAiChatMessage(messages) {

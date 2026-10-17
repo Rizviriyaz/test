@@ -1252,7 +1252,9 @@ def get_fleet_idle_analytics(
     to_time: int = None,
     group_id: int = None,
     vehicle_id: int = None,
-    include_events: bool = True
+    include_events: bool = True,
+    refresh: bool = False,
+    skip_cache: bool = False,
 ):
     """
     Authoritative Fleet-wide Idle Analytics endpoint backed directly by Wialon Engine Hours Report (Template 2).
@@ -1283,11 +1285,12 @@ def get_fleet_idle_analytics(
         window_spec = f"hours-{hours or 24}"
 
     events_tag = "full" if include_events else "summary"
-    cache_key = f"fleet-idle-v6-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
-    hit = cached(cache_key, ttl_seconds=180)
-    log_cache_state("/api/idle/fleet-analytics", hit is not None)
-    if hit:
-        return hit
+    cache_key = f"fleet-idle-v8-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
+    if not refresh and not skip_cache:
+        hit = cached(cache_key, ttl_seconds=180)
+        log_cache_state("/api/idle/fleet-analytics", hit is not None)
+        if hit:
+            return hit
 
     sid = login()
 
@@ -1425,34 +1428,6 @@ def get_fleet_idle_analytics(
             }
             processed_v_events.append(ev_item)
 
-        # Handle active idling if currently idling and timeframe covers now
-        if live_st == "IDLING" and v_idle_dur > 0 and eff_to >= (current_ts - 300):
-            act_start = v_idle_st or (current_ts - v_idle_dur)
-            last_ev_end = max((e["end_time"] for e in processed_v_events), default=0)
-            if act_start >= last_ev_end:
-                act_event = {
-                    "id": f"{vid}-active",
-                    "vehicle_id": vid,
-                    "vehicle_name": vname,
-                    "registration_plate": v_reg_plate,
-                    "group_id": primary_grp["id"],
-                    "group_name": primary_grp["name"],
-                    "start_time": act_start,
-                    "end_time": current_ts,
-                    "duration": v_idle_dur,
-                    "duration_minutes": round(v_idle_dur / 60.0, 2),
-                    "location": {
-                        "latitude": v_lat,
-                        "longitude": v_lng
-                    },
-                    "address": v_addr,
-                    "is_active": True
-                }
-                processed_v_events.append(act_event)
-                v_idle_sec += v_idle_dur
-                if v_idle_dur > v_longest_sec:
-                    v_longest_sec = v_idle_dur
-
         all_events.extend(processed_v_events)
         v_event_count = len(processed_v_events) if processed_v_events else (1 if v_idle_sec > 0 else 0)
 
@@ -1476,10 +1451,6 @@ def get_fleet_idle_analytics(
         if v_idle_sec > 0:
             total_idle_vehicles += 1
 
-        total_idle_seconds += v_idle_sec
-        if v_longest_sec > longest_idle_seconds:
-            longest_idle_seconds = v_longest_sec
-
         # Aggregate by group
         gid = primary_grp["id"]
         if gid in group_agg:
@@ -1487,6 +1458,53 @@ def get_fleet_idle_analytics(
             group_agg[gid]["idle_events"] += v_event_count
             if live_st == "IDLING":
                 group_agg[gid]["currently_idling"] += 1
+
+    # ── Boundary Clipping & Qualifying Idle Event Selection ──────────────────────
+    # Filter events strictly to those overlapping with the active reporting window [eff_from, eff_to].
+    # Crucially preserve the authoritative discrete idle duration (ev["duration"]).
+    qualifying_events = []
+    for ev in all_events:
+        ev_dur = ev.get("duration", 0)
+        if ev_dur <= 0:
+            continue
+        ev_start = ev.get("start_time") or 0
+        ev_end = ev.get("end_time") or (ev_start + ev_dur)
+        if ev_start <= eff_to and ev_end >= eff_from:
+            ev_copy = dict(ev)
+            ev_copy["start_time"] = max(ev_start, eff_from)
+            ev_copy["end_time"] = min(ev_end, eff_to)
+            ev_copy["bounded_start_time"] = ev_copy["start_time"]
+            ev_copy["bounded_end_time"] = ev_copy["end_time"]
+            ev_copy["raw_start_time"] = ev_start
+            ev_copy["raw_end_time"] = ev_end
+            ev_copy["duration"] = ev_dur
+            ev_copy["duration_minutes"] = round(ev_dur / 60.0, 2)
+            qualifying_events.append(ev_copy)
+
+    all_events = qualifying_events
+    total_events_count = len(all_events)
+    # Total idle time is the authoritative sum of Wialon vehicle idle totals
+    total_idle_seconds = sum(v["total_idle_seconds"] for v in by_vehicle)
+    avg_idle_sec = round(total_idle_seconds / total_events_count, 2) if total_events_count > 0 else 0
+
+    # Highest Idle: The single longest individual qualifying idling event within the selected reporting period
+    longest_idle_event = None
+    if all_events:
+        longest_idle_event = max(all_events, key=lambda e: (e["duration"], -e["start_time"]))
+        longest_idle_seconds = longest_idle_event["duration"]
+        longest_idle_vehicle_id = longest_idle_event["vehicle_id"]
+        longest_idle_vehicle_name = longest_idle_event["vehicle_name"]
+        longest_idle_registration_plate = longest_idle_event.get("registration_plate")
+    else:
+        longest_idle_seconds = 0
+        longest_idle_vehicle_id = None
+        longest_idle_vehicle_name = None
+        longest_idle_registration_plate = None
+
+    # Update by_vehicle longest_idle_seconds based strictly on in-window qualifying events
+    for bv in by_vehicle:
+        v_events = [e for e in all_events if e["vehicle_id"] == bv["vehicle_id"]]
+        bv["longest_idle_seconds"] = max((e["duration"] for e in v_events), default=0)
 
     # Format by_group list
     by_group = []
@@ -1540,7 +1558,6 @@ def get_fleet_idle_analytics(
     by_location.sort(key=lambda x: x["total_idle_seconds"], reverse=True)
 
     # Trend timeline generation (using UAE local timezone for bucket labels)
-    total_events_count = len(all_events)
     span_seconds = eff_to - eff_from
     use_daily_interval = span_seconds > (48 * 3600)
     bucket_step = 86400 if use_daily_interval else 3600
@@ -1582,14 +1599,6 @@ def get_fleet_idle_analytics(
     all_events.sort(key=lambda x: x["start_time"], reverse=True)
 
     total_fleet_vehicles = len(target_vehicles)
-    avg_idle_sec = round(total_idle_seconds / total_events_count, 2) if total_events_count > 0 else 0
-
-    longest_idle_vehicle = None
-    if longest_idle_seconds > 0 and by_vehicle:
-        for bv in by_vehicle:
-            if bv.get("longest_idle_seconds", 0) == longest_idle_seconds:
-                longest_idle_vehicle = bv
-                break
 
     response_payload = {
         "timeframe": {
@@ -1607,9 +1616,11 @@ def get_fleet_idle_analytics(
             "total_idle_hours": round(total_idle_seconds / 3600.0, 2),
             "average_idle_seconds": avg_idle_sec,
             "longest_idle_seconds": longest_idle_seconds,
-            "longest_idle_vehicle_id": longest_idle_vehicle.get("vehicle_id") if longest_idle_vehicle else None,
-            "longest_idle_vehicle_name": longest_idle_vehicle.get("vehicle_name") if longest_idle_vehicle else None,
-            "longest_idle_registration_plate": longest_idle_vehicle.get("registration_plate") if longest_idle_vehicle else None,
+            "longest_idle_vehicle_id": longest_idle_vehicle_id,
+            "longest_idle_vehicle_name": longest_idle_vehicle_name,
+            "longest_idle_registration_plate": longest_idle_registration_plate,
+            "longest_idle_event": longest_idle_event,
+            "highest_idle_event": longest_idle_event,
             "idle_event_count": total_events_count,
             "idling_fleet_ratio": round((currently_idling / total_fleet_vehicles) * 100, 1) if total_fleet_vehicles > 0 else 0
         },

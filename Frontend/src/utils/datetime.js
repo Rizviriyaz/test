@@ -38,6 +38,23 @@ export function formatUAETime(ts, options = {}) {
 }
 
 /**
+ * Formats a UNIX timestamp to calendar date (e.g. Oct 17, 2026) in UAE Time.
+ */
+export function formatUAEDate(ts, options = {}) {
+    if (!ts) return "—"
+    const date = typeof ts === "number" ? new Date(ts > 1e11 ? ts : ts * 1000) : new Date(ts)
+    if (isNaN(date.getTime())) return "—"
+
+    return date.toLocaleDateString("en-US", {
+        timeZone: UAE_TIMEZONE,
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        ...options
+    })
+}
+
+/**
  * Returns current UAE calendar date as YYYY-MM-DD.
  */
 export function getUAETodayStr() {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react"
+import { useEffect, useMemo, useState, useCallback, useRef } from "react"
 import {
     Clock3,
     Truck,
@@ -12,12 +12,12 @@ import {
     RefreshCw,
     Layers,
     X,
-    SlidersHorizontal,
     ChevronRight,
     Search,
     ChevronLeft,
     TrendingUp,
     Users,
+    Calendar,
 } from "lucide-react"
 
 import { getFleetIdleAnalytics } from "../api/fleetApi"
@@ -27,7 +27,7 @@ import IdleMapModal from "../components/Analytics/IdleMapModal"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import { LocationName } from "../utils/reverseGeocode"
 
-import { formatUAEDateTime, getUAETodayStr, getUAEDateStr } from "../utils/datetime"
+import { formatUAEDateTime, formatUAETime, getUAETodayStr, getUAEDateStr } from "../utils/datetime"
 
 // ─── Utilities ───────────────────────────────────────────────
 
@@ -77,13 +77,11 @@ const exportToCSV = (events) => {
 }
 
 import KpiCard from "../components/Common/KpiCard"
-import SearchInput from "../components/Common/SearchInput"
 
 // ─── Filter Bar ───────────────────────────────────────────────
 
 const PRESET_OPTIONS = [
     { label: "Today", timeframe: "today", hours: 0 },
-    { label: "Last 24h", hours: 24 },
     { label: "Last 1h", hours: 1 },
     { label: "Last 6h", hours: 6 },
     { label: "Last 12h", hours: 12 },
@@ -107,7 +105,7 @@ export default function IdleAnalytics() {
     // ── Time filters ──
     const [rangeMode, setRangeMode] = useState("preset")
     const [selectedTimeframe, setSelectedTimeframe] = useState("today")
-    const [hours, setHours] = useState(24)
+    const [hours, setHours] = useState(168)
     const todayStr = getUAETodayStr()
     const sevenDaysAgoStr = getUAEDateStr(-7)
     const [startDate, setStartDate] = useState(sevenDaysAgoStr)
@@ -118,7 +116,6 @@ export default function IdleAnalytics() {
     const [filterVehicleId, setFilterVehicleId] = useState("")
     const [filterMinIdle, setFilterMinIdle] = useState(0)
     const [searchText, setSearchText] = useState("")
-    const [filtersOpen, setFiltersOpen] = useState(false)
 
     // ── Data ──
     const [analytics, setAnalytics] = useState(null)
@@ -136,8 +133,12 @@ export default function IdleAnalytics() {
     const [page, setPage] = useState(1)
     const [pageSize, setPageSize] = useState(10)
 
+    // Request sequence tracking to guard against out-of-order race conditions
+    const reqSeqRef = useRef(0)
+
     // ── Load analytics ──
-    const load = useCallback(async () => {
+    const load = useCallback(async (isManualRefresh = false) => {
+        const currentReq = ++reqSeqRef.current
         setLoading(true)
         setError("")
         if (rangeMode === "custom" && startDate && endDate && startDate > endDate) {
@@ -155,17 +156,27 @@ export default function IdleAnalytics() {
             } else {
                 opts.hours = hours
             }
+            if (isManualRefresh) {
+                opts.skip_cache = true
+                opts.refresh = true
+            }
             // Pass server-side group/vehicle filter only when drilling
             if (filterGroupId) opts.group_id = Number(filterGroupId)
             if (filterVehicleId) opts.vehicle_id = Number(filterVehicleId)
             const data = await getFleetIdleAnalytics(opts)
-            setAnalytics(data)
-            setLastUpdated(new Date())
+            if (currentReq === reqSeqRef.current) {
+                setAnalytics(data)
+                setLastUpdated(new Date())
+            }
         } catch (err) {
-            console.error(err)
-            setError(err.message || "Failed to load idle analytics. Please try again.")
+            if (currentReq === reqSeqRef.current) {
+                console.error(err)
+                setError(err.message || "Failed to load idle analytics. Please try again.")
+            }
         } finally {
-            setLoading(false)
+            if (currentReq === reqSeqRef.current) {
+                setLoading(false)
+            }
         }
     }, [hours, selectedTimeframe, rangeMode, startDate, endDate, filterGroupId, filterVehicleId])
 
@@ -182,6 +193,12 @@ export default function IdleAnalytics() {
     const byGroup = useMemo(() => analytics?.by_group || [], [analytics])
     const byLocation = useMemo(() => analytics?.by_location || [], [analytics])
     const trend = useMemo(() => analytics?.trend || [], [analytics])
+
+    // Filtered vehicle options for the vehicle dropdown
+    const vehicleOptions = useMemo(() => {
+        if (!byVehicle || byVehicle.length === 0) return []
+        return byVehicle.filter((v) => !filterGroupId || String(v.group_id) === String(filterGroupId))
+    }, [byVehicle, filterGroupId])
 
     // Reset page to 1 whenever any filter or sort changes
     useEffect(() => {
@@ -235,21 +252,9 @@ export default function IdleAnalytics() {
     const visibleStart = totalEvents === 0 ? 0 : startIndex + 1
     const visibleEnd = Math.min(startIndex + pageSize, totalEvents)
 
-    // Longest idle vehicle resolution for interactive KPI card
-    const longestIdleVehicle = useMemo(() => {
-        if (!analytics?.by_vehicle || analytics.by_vehicle.length === 0) return null
-        const longestSec = Number(analytics?.kpis?.longest_idle_seconds || 0)
-        if (longestSec <= 0) return null
-
-        if (analytics?.kpis?.longest_idle_vehicle_id) {
-            const match = analytics.by_vehicle.find(v => String(v.vehicle_id) === String(analytics.kpis.longest_idle_vehicle_id))
-            if (match) return match
-        }
-
-        const exact = analytics.by_vehicle.find(v => Number(v.longest_idle_seconds || 0) === longestSec)
-        if (exact) return exact
-
-        return analytics.by_vehicle.reduce((max, v) => (Number(v.longest_idle_seconds || 0) > Number(max?.longest_idle_seconds || 0) ? v : max), null)
+    // Highest idle individual qualifying event resolution for interactive KPI card
+    const highestIdleEvent = useMemo(() => {
+        return analytics?.kpis?.longest_idle_event || analytics?.kpis?.highest_idle_event || null
     }, [analytics])
 
     // Stats for active vehicle search / filter
@@ -336,7 +341,8 @@ export default function IdleAnalytics() {
 
     const resetFilters = () => {
         setRangeMode("preset")
-        setHours(24)
+        setSelectedTimeframe("today")
+        setHours(168)
         setFilterGroupId("")
         setFilterVehicleId("")
         setFilterMinIdle(0)
@@ -357,204 +363,225 @@ export default function IdleAnalytics() {
         <div className="flex min-h-screen bg-white">
             <Sidebar />
             <div className="flex min-w-0 flex-1 flex-col bg-white">
-                <main className="flex-1 space-y-6 p-6 lg:p-8 bg-white">
+                <main className="flex-1 space-y-5 p-5 lg:p-7 bg-white">
 
-                    {/* ── Header ── */}
-                    <section className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-slate-200 pb-5">
-                        <div>
-                            <div className="flex items-center gap-2">
-                                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#33758F]/10">
-                                    <Clock3 className="h-5 w-5 text-[#33758F]" />
-                                </div>
-                                <h1 className="text-xl font-bold text-slate-900">Idle Analytics</h1>
+                    {/* ── Compact Header ── */}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
+                        <div className="flex items-center gap-2.5">
+                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#33758F]/10 text-[#33758F] shrink-0">
+                                <Clock3 className="h-4.5 w-4.5" />
                             </div>
-                            <p className="mt-1 text-xs text-slate-500">
-                                Fleet-wide idling analysis, customer groups & location hotspots
-                            </p>
+                            <div>
+                                <h1 className="text-xl font-bold tracking-tight text-slate-900 leading-none">Idle Analytics</h1>
+                                <p className="mt-1 text-xs text-slate-500">
+                                    Fleet-wide idling analysis, customer groups & location hotspots
+                                </p>
+                            </div>
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-2">
-                            {/* Time Range Switcher */}
-                            <div className="flex items-center rounded-xl border border-slate-200 bg-slate-50 p-1 shadow-2xs">
-                                {["preset", "custom"].map((mode) => (
-                                    <button
-                                        key={mode}
-                                        type="button"
-                                        onClick={() => setRangeMode(mode)}
-                                        className={`rounded-lg px-3 py-1.5 text-xs font-bold capitalize transition cursor-pointer ${rangeMode === mode ? "bg-[#33758F] text-white shadow-2xs" : "text-slate-600 hover:text-slate-900"}`}
-                                    >
-                                        {mode === "preset" ? "Presets" : "Custom Range"}
-                                    </button>
-                                ))}
+                        {lastUpdated && (
+                            <div className="flex items-center gap-1.5 text-[11px] text-slate-400 font-medium">
+                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                <span>Updated {formatUAETime(lastUpdated)}</span>
                             </div>
+                        )}
+                    </div>
 
-                            {rangeMode === "preset" ? (
-                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
-                                    <Timer className="h-4 w-4 text-slate-400" />
+                    {/* ── Compact Filter Toolbar ── */}
+                    <section className="rounded-xl border border-slate-200/90 bg-slate-50/70 p-2 sm:p-2.5 shadow-2xs">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                            {/* Left Side: Filter Controls */}
+                            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-0">
+                                {/* Presets / Custom Range Segmented Toggle */}
+                                <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 shadow-2xs">
+                                    {["preset", "custom"].map((mode) => (
+                                        <button
+                                            key={mode}
+                                            type="button"
+                                            onClick={() => setRangeMode(mode)}
+                                            className={`rounded-md px-2.5 py-1 text-xs font-semibold capitalize transition cursor-pointer ${
+                                                rangeMode === mode
+                                                    ? "bg-[#33758F] text-white shadow-2xs"
+                                                    : "text-slate-600 hover:text-slate-900"
+                                            }`}
+                                        >
+                                            {mode === "preset" ? "Presets" : "Custom"}
+                                        </button>
+                                    ))}
+                                </div>
+
+                                {/* Preset Selector */}
+                                {rangeMode === "preset" ? (
+                                    <div className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 shadow-2xs">
+                                        <Timer className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                        <select
+                                            value={selectedTimeframe === "today" ? "today" : hours}
+                                            onChange={(e) => {
+                                                const val = e.target.value
+                                                if (val === "today") {
+                                                    setSelectedTimeframe("today")
+                                                } else {
+                                                    setSelectedTimeframe("preset")
+                                                    setHours(Number(val))
+                                                }
+                                            }}
+                                            className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer pr-1"
+                                            aria-label="Preset timeframe"
+                                        >
+                                            {PRESET_OPTIONS.map((o) => (
+                                                <option key={o.timeframe || o.hours} value={o.timeframe || o.hours}>
+                                                    {o.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                ) : (
+                                    <div className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 shadow-2xs">
+                                        <Calendar className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                        <input
+                                            type="date"
+                                            value={startDate}
+                                            onChange={(e) => setStartDate(e.target.value)}
+                                            className="bg-transparent text-xs font-medium text-slate-800 outline-none cursor-pointer"
+                                            aria-label="Start date"
+                                        />
+                                        <span className="text-xs text-slate-400">→</span>
+                                        <input
+                                            type="date"
+                                            value={endDate}
+                                            onChange={(e) => setEndDate(e.target.value)}
+                                            className="bg-transparent text-xs font-medium text-slate-800 outline-none cursor-pointer"
+                                            aria-label="End date"
+                                        />
+                                    </div>
+                                )}
+
+                                {/* Customer Group Filter */}
+                                <div className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 shadow-2xs">
+                                    <Layers className="h-3.5 w-3.5 text-slate-400 shrink-0" />
                                     <select
-                                        value={selectedTimeframe === "today" ? "today" : hours}
+                                        value={filterGroupId}
                                         onChange={(e) => {
-                                            const val = e.target.value
-                                            if (val === "today") {
-                                                setSelectedTimeframe("today")
-                                            } else {
-                                                setSelectedTimeframe("preset")
-                                                setHours(Number(val))
-                                            }
+                                            setFilterGroupId(e.target.value)
+                                            setFilterVehicleId("")
                                         }}
-                                        className="bg-transparent text-xs font-bold text-slate-800 outline-none cursor-pointer"
+                                        className="bg-transparent text-xs font-medium text-slate-700 outline-none cursor-pointer max-w-[130px] sm:max-w-[150px] truncate pr-1"
+                                        aria-label="Filter customer group"
                                     >
-                                        {PRESET_OPTIONS.map((o) => (
-                                            <option key={o.timeframe || o.hours} value={o.timeframe || o.hours}>{o.label}</option>
+                                        <option value="">All Groups</option>
+                                        {groups.map((g) => (
+                                            <option key={g.id} value={g.id}>{g.name}</option>
                                         ))}
                                     </select>
                                 </div>
-                            ) : (
-                                <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 shadow-2xs">
-                                    <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="bg-transparent text-xs font-semibold text-slate-800 outline-none" />
-                                    <span className="text-xs text-slate-400">to</span>
-                                    <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="bg-transparent text-xs font-semibold text-slate-800 outline-none" />
+
+                                {/* Vehicle Filter */}
+                                <div className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 shadow-2xs">
+                                    <Truck className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                    <select
+                                        value={filterVehicleId}
+                                        onChange={(e) => setFilterVehicleId(e.target.value)}
+                                        className="bg-transparent text-xs font-medium text-slate-700 outline-none cursor-pointer max-w-[130px] sm:max-w-[150px] truncate pr-1"
+                                        aria-label="Filter vehicle"
+                                    >
+                                        <option value="">All Vehicles</option>
+                                        {vehicleOptions.map((v) => (
+                                            <option key={v.vehicle_id} value={v.vehicle_id}>
+                                                {v.registration_plate ? `${v.registration_plate} (${v.vehicle_name})` : v.vehicle_name}
+                                            </option>
+                                        ))}
+                                    </select>
                                 </div>
-                            )}
 
-                            {/* Filters toggle */}
-                            <button
-                                type="button"
-                                onClick={() => setFiltersOpen(!filtersOpen)}
-                                className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold shadow-2xs transition cursor-pointer ${filtersOpen || activeFilterCount > 0 ? "border-[#33758F] bg-[#33758F]/10 text-[#33758F]" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
-                            >
-                                <SlidersHorizontal className="h-3.5 w-3.5" />
-                                Filters
+                                {/* Min Idle Duration Filter */}
+                                <div className="flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 shadow-2xs">
+                                    <Clock3 className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                    <select
+                                        value={filterMinIdle}
+                                        onChange={(e) => setFilterMinIdle(Number(e.target.value))}
+                                        className="bg-transparent text-xs font-medium text-slate-700 outline-none cursor-pointer pr-1"
+                                        aria-label="Minimum idle duration"
+                                    >
+                                        {MIN_IDLE_OPTIONS.map((o) => (
+                                            <option key={o.value} value={o.value}>{o.label}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* Search Input */}
+                                <div className="relative flex h-8 items-center">
+                                    <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-slate-400" />
+                                    <input
+                                        type="text"
+                                        placeholder="Search vehicle / group…"
+                                        value={searchText}
+                                        onChange={(e) => setSearchText(e.target.value)}
+                                        className="h-8 w-36 sm:w-44 focus:w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-7 text-xs text-slate-800 placeholder:text-slate-400 shadow-2xs focus:border-[#33758F] transition-all outline-none"
+                                        aria-label="Search vehicles or groups"
+                                    />
+                                    {searchText && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchText("")}
+                                            className="absolute right-2 rounded-full p-0.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                                            title="Clear search"
+                                        >
+                                            <X className="h-3 w-3" />
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Active Filters Clear Button */}
                                 {activeFilterCount > 0 && (
-                                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#33758F] text-[9px] font-bold text-white">
-                                        {activeFilterCount}
-                                    </span>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setFilterGroupId("")
+                                            setFilterVehicleId("")
+                                            setFilterMinIdle(0)
+                                            setSearchText("")
+                                        }}
+                                        className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-slate-500 hover:bg-slate-200/60 hover:text-slate-800 transition cursor-pointer"
+                                        title="Clear active filters"
+                                    >
+                                        <X className="h-3 w-3" />
+                                        <span>Clear</span>
+                                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[#33758F] text-[9px] font-bold text-white">
+                                            {activeFilterCount}
+                                        </span>
+                                    </button>
                                 )}
-                            </button>
+                            </div>
 
-                            {/* Export CSV */}
-                            <button
-                                type="button"
-                                onClick={() => exportToCSV(filteredEvents)}
-                                disabled={filteredEvents.length === 0}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50 cursor-pointer disabled:opacity-40"
-                            >
-                                <Download className="h-3.5 w-3.5" />
-                                Export CSV
-                            </button>
-
-                            {/* Refresh */}
-                            <button
-                                type="button"
-                                onClick={load}
-                                disabled={loading}
-                                className="inline-flex items-center gap-1.5 rounded-xl bg-[#33758F] hover:bg-[#285E73] text-white px-3.5 py-2 text-xs font-bold shadow-xs transition cursor-pointer disabled:opacity-50"
-                            >
-                                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-                                {loading ? "Loading…" : "Refresh"}
-                            </button>
-                        </div>
-                    </section>
-
-                    {/* ── Expanded Filters Panel ── */}
-                    {filtersOpen && (
-                        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-                            <div className="mb-4 flex items-center justify-between">
-                                <h3 className="text-sm font-semibold text-slate-900">Filters</h3>
+                            {/* Right Side: Toolbar Actions (Export + Top-Right Refresh Button) */}
+                            <div className="flex items-center gap-1.5 shrink-0 self-start sm:self-auto ml-auto">
+                                {/* Export CSV Button */}
                                 <button
                                     type="button"
-                                    onClick={resetFilters}
-                                    className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 hover:text-slate-900"
+                                    onClick={() => exportToCSV(filteredEvents)}
+                                    disabled={filteredEvents.length === 0}
+                                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:bg-slate-50 cursor-pointer disabled:opacity-40"
+                                    title="Export filtered idle events to CSV"
+                                    aria-label="Export filtered idle events to CSV"
                                 >
-                                    <X className="h-3 w-3" />
-                                    Reset all
+                                    <Download className="h-3.5 w-3.5" />
+                                    <span className="hidden md:inline">Export</span>
+                                </button>
+
+                                {/* Refresh Button (Icon-Only at Top-Right Corner) */}
+                                <button
+                                    type="button"
+                                    onClick={() => load(true)}
+                                    disabled={loading}
+                                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white shadow-2xs transition cursor-pointer disabled:opacity-50 shrink-0"
+                                    title="Refresh analytics (bypass cache)"
+                                    aria-label="Refresh analytics"
+                                >
+                                    <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
                                 </button>
                             </div>
-                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                                {/* Group filter */}
-                                <div>
-                                    <label className="mb-1.5 block text-xs font-medium text-slate-600">Customer Group</label>
-                                    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                        <Layers className="h-3.5 w-3.5 text-slate-400" />
-                                        <select
-                                            value={filterGroupId}
-                                            onChange={(e) => { setFilterGroupId(e.target.value); setFilterVehicleId("") }}
-                                            className="w-full bg-transparent text-xs text-slate-800 outline-none"
-                                        >
-                                            <option value="">All Groups</option>
-                                            {groups.map((g) => (
-                                                <option key={g.id} value={g.id}>{g.name}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {/* Vehicle filter */}
-                                <div>
-                                    <label className="mb-1.5 block text-xs font-medium text-slate-600">Vehicle</label>
-                                    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                        <Truck className="h-3.5 w-3.5 text-slate-400" />
-                                        <select
-                                            value={filterVehicleId}
-                                            onChange={(e) => setFilterVehicleId(e.target.value)}
-                                            className="w-full bg-transparent text-xs text-slate-800 outline-none"
-                                        >
-                                            <option value="">All Vehicles</option>
-                                            {byVehicle
-                                                .filter((v) => !filterGroupId || String(v.group_id) === String(filterGroupId))
-                                                .map((v) => (
-                                                    <option key={v.vehicle_id} value={v.vehicle_id}>
-                                                        {v.vehicle_name}
-                                                    </option>
-                                                ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {/* Min idle duration */}
-                                <div>
-                                    <label className="mb-1.5 block text-xs font-medium text-slate-600">Min Idle Duration</label>
-                                    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                                        <Timer className="h-3.5 w-3.5 text-slate-400" />
-                                        <select
-                                            value={filterMinIdle}
-                                            onChange={(e) => setFilterMinIdle(Number(e.target.value))}
-                                            className="w-full bg-transparent text-xs text-slate-800 outline-none"
-                                        >
-                                            {MIN_IDLE_OPTIONS.map((o) => (
-                                                <option key={o.value} value={o.value}>{o.label}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                </div>
-
-                                {/* Search */}
-                                <div>
-                                    <label className="mb-1.5 block text-xs font-medium text-slate-600">Search Vehicle / Group</label>
-                                    <div className="relative flex items-center">
-                                        <Search className="pointer-events-none absolute left-3 h-3.5 w-3.5 text-slate-400" />
-                                        <input
-                                            type="text"
-                                            placeholder="Search vehicle number, ID or group…"
-                                            value={searchText}
-                                            onChange={(e) => setSearchText(e.target.value)}
-                                            className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-7 text-xs text-slate-800 outline-none placeholder:text-slate-400 focus:border-[#33758F] focus:bg-white"
-                                        />
-                                        {searchText && (
-                                            <button
-                                                type="button"
-                                                onClick={() => setSearchText("")}
-                                                className="absolute right-2.5 rounded-full p-0.5 text-slate-400 hover:text-slate-700"
-                                                title="Clear search"
-                                            >
-                                                <X className="h-3.5 w-3.5" />
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        </section>
-                    )}
+                        </div>
+                    </section>
 
                     {/* ── Error ── */}
                     {error && (
@@ -614,13 +641,21 @@ export default function IdleAnalytics() {
                                     icon={AlertTriangle}
                                     iconBg="bg-red-50 text-red-600 border border-red-100"
                                     iconColor="text-red-500"
-                                    label="Longest Idle"
+                                    label="Highest Idle"
                                     value={formatDuration(kpis.longest_idle_seconds)}
-                                    sub={longestIdleVehicle ? `${longestIdleVehicle.registration_plate || longestIdleVehicle.vehicle_name} · Click for details` : "No idling recorded"}
-                                    badge={longestIdleVehicle ? "Inspect" : undefined}
+                                    sub={
+                                        highestIdleEvent
+                                            ? `${highestIdleEvent.vehicle_name} · ${formatDuration(highestIdleEvent.duration)} · Click to inspect`
+                                            : "No idling recorded in selected period"
+                                    }
+                                    badge={highestIdleEvent ? "Inspect Event" : undefined}
                                     badgeCls="bg-red-100/70 text-red-800 border-red-200"
-                                    onClick={longestIdleVehicle ? () => setDrawerVehicle(longestIdleVehicle) : undefined}
-                                    title={longestIdleVehicle ? `Inspect longest idle vehicle: ${longestIdleVehicle.registration_plate || longestIdleVehicle.vehicle_name}` : "Longest idle"}
+                                    onClick={highestIdleEvent ? () => setMapEvent(highestIdleEvent) : undefined}
+                                    title={
+                                        highestIdleEvent
+                                            ? `Inspect highest idle event for vehicle: ${highestIdleEvent.vehicle_name}`
+                                            : "Highest idle event"
+                                    }
                                 />
                             </section>
 
