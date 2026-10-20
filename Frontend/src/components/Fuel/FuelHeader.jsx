@@ -6,6 +6,7 @@ export default function FuelHeader({
     title = "ATS Fleet Fuel Performance",
     subtitle,
     showFilters = true,
+    actions,
 }) {
     const {
         period,
@@ -226,6 +227,13 @@ export default function FuelHeader({
                                 <span>Reset</span>
                             </button>
                         )}
+
+                        {actions}
+                    </div>
+                )}
+                {!showFilters && actions && (
+                    <div className="flex items-center gap-2.5">
+                        {actions}
                     </div>
                 )}
             </div>

@@ -2,15 +2,26 @@
 Wialon Native Report Integration Module for ATS Fleet Management.
 
 Provides high-performance, authoritative native report execution directly through Wialon's report engine:
-  1. Unit Trips Report (Distance, Duration, Moving Duration, Avg/Max Speed, Start/End Locations)
-  2. Unit Engine & Idle Report (Engine Hours, Idle Duration, Stop Duration)
+  1. Unit Trips Report (Distance, Duration, Engine Hours, Avg/Max Speed, Start/End Locations)
+  2. Unit Engine & Idle Report (Engine Hours, In Motion, Idle Duration)
   3. Group Trips & Utilization Rollups (All Units or Specific Groups)
   4. Group Engine & Idle Rollups (Engine Hours, Motion, Idling, Discrete Idle Events)
+
+Completeness contract (shared by fuel, idle analytics, dashboard and fleet analytics):
+  - Every report row is read in pages; a page shorter than requested raises WialonAPIError instead of
+    silently truncating totals. Sub-rows (discrete idle events) are paged too; if Wialon returns an
+    error for them the unit's events are flagged via `incomplete_fields` ("idle_events") and the
+    report-level `events_incomplete` list rather than failing the whole report.
+  - Existing keys keep their historical types and values (ints default to 0) so existing callers are
+    unaffected. Cells that could not be read are additionally listed in `incomplete_fields`, so callers
+    that must not treat "unreadable" as zero (fuel efficiency) can tell the difference.
+  - Columns are located by header name when Wialon sends a header; if a name is not found the
+    historical column position is used and the fact is reported in `column_warnings`.
 """
 
 import logging
 import threading
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from app.wialon import WialonAPIError, wialon_request
 
 # Wialon Resource ID containing official templates in this account
@@ -22,6 +33,12 @@ TEMPLATE_ID_GROUP_ENGINE = 2
 
 # Standard 'All Unit' group ID in ATS Wialon account
 GROUP_ID_ALL_UNITS = 601817480
+
+# Rows requested per report/get_result_rows call, and sub-rows per report/get_result_subrows call
+REPORT_ROWS_CHUNK = 1000
+REPORT_SUBROWS_CHUNK = 200
+# Safety bound on sub-row pages for a single row (200 * 500 = 100k idle events)
+REPORT_SUBROWS_MAX_PAGES = 500
 
 _report_lock = threading.Lock()
 
@@ -38,6 +55,11 @@ def extract_cell_text(cell: Any) -> str:
     if isinstance(cell, dict):
         return str(cell.get("t") if cell.get("t") is not None else cell.get("v", ""))
     return str(cell or "")
+
+
+def _cell_str(cell: Any) -> str:
+    """Text of a cell; identical to str(cell) for plain values (historical behaviour), text for dict cells."""
+    return extract_cell_text(cell) if isinstance(cell, dict) else str(cell)
 
 
 def parse_float_safe(val: Any, default: float = 0.0) -> float:
@@ -86,10 +108,109 @@ def parse_duration_to_seconds(dur_str: Any) -> int:
         return 0
 
 
+def parse_duration_strict(cell: Any) -> Optional[int]:
+    """Like parse_duration_to_seconds, but None when the cell is missing or unreadable (never 0 by default)."""
+    if cell is None or isinstance(cell, bool):
+        return None
+    if isinstance(cell, (int, float)):
+        return int(cell)
+    if isinstance(cell, dict):
+        cell = cell.get("v") if cell.get("v") is not None else cell.get("t")
+        if cell is None:
+            return None
+        if isinstance(cell, (int, float)):
+            return int(cell)
+    s = str(cell).strip()
+    if not s:
+        return None
+    try:
+        parts = s.split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + int(float(parts[1]))
+        return int(float(s))
+    except (ValueError, TypeError):
+        return None
+
+
 def parse_duration_to_minutes(dur_str: Any) -> float:
     """Parse Wialon duration string to minutes rounded to 2 decimal places."""
     sec = parse_duration_to_seconds(dur_str)
     return round(sec / 60.0, 2)
+
+
+def _normalize_header_name(name: Any) -> str:
+    return " ".join(extract_cell_text(name).replace(".", " ").split()).lower()
+
+
+def _column_index(header: Any, names: Tuple[str, ...], default: int, warnings: List[str]) -> int:
+    """
+    Locate a report column by header name. Falls back to the historical position `default` when no
+    header is sent or the name is absent, recording why in `warnings` (never silently guesses).
+    """
+    if not isinstance(header, list) or not header:
+        return default
+    wanted = {_normalize_header_name(n) for n in names}
+    for idx, col in enumerate(header):
+        if _normalize_header_name(col) in wanted:
+            return idx
+    warnings.append(f"Column '{names[0]}' not found in report header; using position {default}")
+    return default
+
+
+def _fetch_all_rows(sid: str, total_rows: int, what: str, table_index: int = 0) -> List[Dict[str, Any]]:
+    """Read all `total_rows` rows of a report table in pages; raise if any page comes back short."""
+    rows: List[Dict[str, Any]] = []
+    start = 0
+    while start < total_rows:
+        end = min(start + REPORT_ROWS_CHUNK, total_rows) - 1
+        page = wialon_request(
+            "report/get_result_rows",
+            {"tableIndex": table_index, "indexFrom": start, "indexTo": end},
+            sid=sid,
+        )
+        if isinstance(page, dict) and "error" in page:
+            raise WialonAPIError(f"Wialon {what} rows failed: {page}")
+        if not isinstance(page, list):
+            raise WialonAPIError(f"Unexpected response structure for {what} rows: {page}")
+        expected = end - start + 1
+        if len(page) != expected:
+            raise WialonAPIError(
+                f"Wialon {what} returned {len(page)} of {expected} rows for rows {start}-{end}; report incomplete"
+            )
+        rows.extend(page)
+        start = end + 1
+    return rows
+
+
+def _fetch_all_subrows(sid: str, row_index: int, what: str, table_index: int = 0) -> Tuple[List[Dict[str, Any]], bool]:
+    """
+    Read every sub-row (e.g. discrete idle intervals) of one report row, page by page.
+    Returns (subrows, complete). An error/unexpected sub-row response does not fail the whole report
+    (historically such rows were skipped and existing pages rely on that); instead complete=False so
+    the caller can flag the unit's event list as incomplete. Transport errors still propagate.
+    """
+    subrows: List[Dict[str, Any]] = []
+    for page_no in range(REPORT_SUBROWS_MAX_PAGES):
+        start = page_no * REPORT_SUBROWS_CHUNK
+        page = wialon_request(
+            "report/get_result_subrows",
+            {"tableIndex": table_index, "rowIndex": row_index,
+             "indexFrom": start, "indexTo": start + REPORT_SUBROWS_CHUNK - 1},
+            sid=sid,
+        )
+        if not isinstance(page, list):
+            logging.warning("Wialon %s sub-rows unavailable for row %s: %s", what, row_index, page)
+            return subrows, False
+        subrows.extend(page)
+        if len(page) < REPORT_SUBROWS_CHUNK:
+            return subrows, True
+    logging.warning(
+        "Wialon %s row %s has more than %s sub-rows; event list truncated",
+        what, row_index, REPORT_SUBROWS_CHUNK * REPORT_SUBROWS_MAX_PAGES,
+    )
+    return subrows, False
 
 
 def execute_wialon_unit_trips_report(
@@ -98,6 +219,9 @@ def execute_wialon_unit_trips_report(
     """
     Execute Wialon's native Trips Report template (ID 4) for an individual unit.
     Returns authoritative trip list and summary metrics directly from Wialon.
+
+    Note: column 6 of this template is "Engine hours" (not moving time). It is exposed as
+    `engine_hours_str`; `moving_duration` keeps the same value only for backward compatibility.
 
     Guarantees report cleanup inside finally block and thread-safe execution.
     """
@@ -133,19 +257,16 @@ def execute_wialon_unit_trips_report(
 
             tables = rr.get("tables", [])
             trips = []
+            column_warnings: List[str] = []
+            incomplete_fields = set()
+            total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
+                header = tables[0].get("header")
+                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings)
                 if total_rows > 0:
-                    row_res = wialon_request(
-                        "report/get_result_rows",
-                        {"tableIndex": 0, "indexFrom": 0, "indexTo": total_rows - 1},
-                        sid=sid,
-                    )
-                    if isinstance(row_res, dict) and "error" in row_res:
-                        raise WialonAPIError(f"Wialon trip rows failed for vehicle {vehicle_id}: {row_res}")
-                    if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Unexpected response structure for trip rows of vehicle {vehicle_id}: {row_res}")
+                    row_res = _fetch_all_rows(sid, total_rows, f"trip report of vehicle {vehicle_id}")
                     for r in row_res:
                         cols = r.get("c", [])
                         if len(cols) >= 10:
@@ -155,40 +276,56 @@ def execute_wialon_unit_trips_report(
                             end_loc_obj = cols[4] if isinstance(cols[4], dict) else {}
                             max_spd_obj = cols[8] if isinstance(cols[8], dict) else {}
 
-                            dist_km = parse_float_safe(extract_cell_value(cols[9]) if len(cols) > 9 else 0.0)
+                            trip_incomplete = []
+                            raw_mileage = extract_cell_value(cols[mileage_idx]) if len(cols) > mileage_idx else None
+                            dist_strict = parse_float_safe(raw_mileage, default=None)
+                            if dist_strict is None:
+                                trip_incomplete.append("distance_km")
+                            dist_km = dist_strict if dist_strict is not None else 0.0
 
                             dur_str = extract_cell_text(cols[5])
                             mov_str = extract_cell_text(cols[6])
                             dur_mins = parse_duration_to_minutes(dur_str)
 
-                            trips.append(
-                                {
-                                    "start_time": start_obj.get("v"),
-                                    "start_time_str": start_obj.get("t"),
-                                    "start_location": start_loc_obj.get("t") or "Unknown",
-                                    "start_latitude": start_loc_obj.get("y"),
-                                    "start_longitude": start_loc_obj.get("x"),
-                                    "end_time": end_obj.get("v"),
-                                    "end_time_str": end_obj.get("t"),
-                                    "end_location": end_loc_obj.get("t") or "Unknown",
-                                    "end_latitude": end_loc_obj.get("y"),
-                                    "end_longitude": end_loc_obj.get("x"),
-                                    "duration": dur_str,
-                                    "duration_str": dur_str,
-                                    "duration_minutes": dur_mins,
-                                    "moving_duration": mov_str,
-                                    "moving_duration_str": mov_str,
-                                    "average_speed": str(cols[7]),
-                                    "max_speed": (
-                                        max_spd_obj.get("t")
-                                        if isinstance(max_spd_obj, dict)
-                                        else str(max_spd_obj)
-                                    ),
-                                    "distance_km": round(dist_km, 2),
-                                }
-                            )
+                            trip = {
+                                "start_time": start_obj.get("v"),
+                                "start_time_str": start_obj.get("t"),
+                                "start_location": start_loc_obj.get("t") or "Unknown",
+                                "start_latitude": start_loc_obj.get("y"),
+                                "start_longitude": start_loc_obj.get("x"),
+                                "end_time": end_obj.get("v"),
+                                "end_time_str": end_obj.get("t"),
+                                "end_location": end_loc_obj.get("t") or "Unknown",
+                                "end_latitude": end_loc_obj.get("y"),
+                                "end_longitude": end_loc_obj.get("x"),
+                                "duration": dur_str,
+                                "duration_str": dur_str,
+                                "duration_minutes": dur_mins,
+                                "moving_duration": mov_str,
+                                "moving_duration_str": mov_str,
+                                "engine_hours_str": mov_str,
+                                "average_speed": str(cols[7]),
+                                "max_speed": (
+                                    max_spd_obj.get("t")
+                                    if isinstance(max_spd_obj, dict)
+                                    else str(max_spd_obj)
+                                ),
+                                "distance_km": round(dist_km, 2),
+                            }
+                            if trip_incomplete:
+                                trip["incomplete_fields"] = trip_incomplete
+                                incomplete_fields.update(trip_incomplete)
+                            trips.append(trip)
+                        else:
+                            incomplete_fields.add("row_shape")
 
-            return {"stats": stats, "trips": trips}
+            return {
+                "stats": stats,
+                "trips": trips,
+                "rows_total": total_rows,
+                "incomplete_fields": sorted(incomplete_fields),
+                "column_warnings": column_warnings,
+            }
 
         except Exception as exc:
             logging.error(
@@ -210,6 +347,8 @@ def execute_wialon_unit_engine_report(
     Execute Wialon's native Engine Hours Report template (ID 1) for a single unit.
     Returns authoritative engine hours, in motion duration, idling duration,
     and individual idle periods directly from Wialon.
+
+    `total_in_motion_seconds` is None when the "In motion" value could not be read for every row.
     """
     with _report_lock:
         report_executed = False
@@ -239,61 +378,71 @@ def execute_wialon_unit_engine_report(
             idle_events = []
             total_idle_sec = 0
             total_engine_sec = 0
+            total_in_motion_sec: Optional[int] = 0
+            column_warnings: List[str] = []
+            incomplete_fields = set()
+            total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
+                header = tables[0].get("header")
+                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings)
+                motion_idx = _column_index(header, ("In motion",), 7, column_warnings)
+                idling_idx = _column_index(header, ("Idling",), 8, column_warnings)
                 if total_rows > 0:
-                    row_res = wialon_request(
-                        "report/get_result_rows",
-                        {"tableIndex": 0, "indexFrom": 0, "indexTo": min(total_rows - 1, 100)},
-                        sid=sid,
-                    )
-                    if isinstance(row_res, dict) and "error" in row_res:
-                        raise WialonAPIError(f"Wialon engine rows failed for vehicle {vehicle_id}: {row_res}")
-                    if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Unexpected response structure for engine rows of vehicle {vehicle_id}: {row_res}")
+                    row_res = _fetch_all_rows(sid, total_rows, f"engine report of vehicle {vehicle_id}")
                     for row_idx, r in enumerate(row_res):
                         cols = r.get("c", [])
                         if len(cols) >= 9:
-                            engine_hours_str = str(cols[6]) if len(cols) > 6 else "0:00:00"
-                            idling_str = str(cols[8]) if len(cols) > 8 else "0:00:00"
-                            total_engine_sec += parse_duration_to_seconds(engine_hours_str)
-                            total_idle_sec += parse_duration_to_seconds(idling_str)
+                            engine_cell = cols[engine_idx] if len(cols) > engine_idx else None
+                            idling_cell = cols[idling_idx] if len(cols) > idling_idx else None
+                            motion_cell = cols[motion_idx] if len(cols) > motion_idx else None
+                            total_engine_sec += parse_duration_to_seconds(_cell_str(engine_cell))
+                            row_idle_sec = parse_duration_to_seconds(_cell_str(idling_cell))
+                            total_idle_sec += row_idle_sec
+                            if parse_duration_strict(engine_cell) is None:
+                                incomplete_fields.add("engine_hours")
+                            if parse_duration_strict(idling_cell) is None:
+                                incomplete_fields.add("idle_seconds")
+                            motion_sec = parse_duration_strict(motion_cell)
+                            if motion_sec is None:
+                                incomplete_fields.add("in_motion_seconds")
+                                total_in_motion_sec = None
+                            elif total_in_motion_sec is not None:
+                                total_in_motion_sec += motion_sec
 
                             # Fetch subrows for discrete idle segments
-                            if r.get("d", 0) > 0 and parse_duration_to_seconds(idling_str) > 0:
-                                sub = wialon_request(
-                                    "report/get_result_subrows",
-                                    {"tableIndex": 0, "rowIndex": row_idx, "indexFrom": 0, "indexTo": 200},
-                                    sid=sid,
-                                )
-                                if isinstance(sub, list):
-                                    for s in sub:
-                                        sc = s.get("c", [])
-                                        if len(sc) >= 9:
-                                            s_idle_str = str(sc[8]).strip()
-                                            s_idle_sec = parse_duration_to_seconds(s_idle_str)
-                                            if s_idle_sec > 0:
-                                                st_obj = sc[1] if isinstance(sc[1], dict) else {}
-                                                et_obj = sc[2] if isinstance(sc[2], dict) else {}
-                                                loc_obj = sc[3] if isinstance(sc[3], dict) else (sc[4] if isinstance(sc[4], dict) else {})
-                                                st_ts = st_obj.get("v") or s.get("t1") or 0
-                                                et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
-                                                lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
-                                                lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
-                                                addr = loc_obj.get("t") or "Unknown Location"
+                            if r.get("d", 0) > 0 and row_idle_sec > 0:
+                                sub, sub_complete = _fetch_all_subrows(sid, row_idx, f"engine report of vehicle {vehicle_id}")
+                                if not sub_complete:
+                                    incomplete_fields.add("idle_events")
+                                for s in sub:
+                                    sc = s.get("c", [])
+                                    if len(sc) >= 9:
+                                        s_idle_sec = parse_duration_to_seconds(_cell_str(sc[8]).strip())
+                                        if s_idle_sec > 0:
+                                            st_obj = sc[1] if isinstance(sc[1], dict) else {}
+                                            et_obj = sc[2] if isinstance(sc[2], dict) else {}
+                                            loc_obj = sc[3] if isinstance(sc[3], dict) else (sc[4] if isinstance(sc[4], dict) else {})
+                                            st_ts = st_obj.get("v") or s.get("t1") or 0
+                                            et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
+                                            lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
+                                            lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
+                                            addr = loc_obj.get("t") or "Unknown Location"
 
-                                                idle_events.append({
-                                                    "start_time": st_ts,
-                                                    "end_time": et_ts,
-                                                    "duration": s_idle_sec,
-                                                    "duration_minutes": round(s_idle_sec / 60.0, 2),
-                                                    "location": {
-                                                        "latitude": lat,
-                                                        "longitude": lng,
-                                                    },
-                                                    "address": addr,
-                                                })
+                                            idle_events.append({
+                                                "start_time": st_ts,
+                                                "end_time": et_ts,
+                                                "duration": s_idle_sec,
+                                                "duration_minutes": round(s_idle_sec / 60.0, 2),
+                                                "location": {
+                                                    "latitude": lat,
+                                                    "longitude": lng,
+                                                },
+                                                "address": addr,
+                                            })
+                        else:
+                            incomplete_fields.add("row_shape")
 
             return {
                 "total_idle_seconds": total_idle_sec,
@@ -301,6 +450,10 @@ def execute_wialon_unit_engine_report(
                 "total_engine_seconds": total_engine_sec,
                 "total_engine_hours": round(total_engine_sec / 3600.0, 2),
                 "idle_events": idle_events,
+                "total_in_motion_seconds": total_in_motion_sec,
+                "rows_total": total_rows,
+                "incomplete_fields": sorted(incomplete_fields),
+                "column_warnings": column_warnings,
             }
 
         except Exception as exc:
@@ -320,6 +473,7 @@ def execute_wialon_group_trips_report(
     """
     Execute Wialon's native Trips Report - All Unit template (ID 5) for a fleet unit group.
     Returns authoritative vehicle mileage and trip metrics for all units directly from Wialon.
+    Rows whose mileage cell could not be read carry incomplete_fields=["mileage_km"].
 
     Guarantees thread-safe execution and cleanup in finally block.
     """
@@ -352,22 +506,18 @@ def execute_wialon_group_trips_report(
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
+                column_warnings: List[str] = []
+                mileage_idx = _column_index(tables[0].get("header"), ("Mileage",), 5, column_warnings)
                 if total_rows > 0:
-                    row_res = wialon_request(
-                        "report/get_result_rows",
-                        {"tableIndex": 0, "indexFrom": 0, "indexTo": total_rows - 1},
-                        sid=sid,
-                    )
-                    if isinstance(row_res, dict) and "error" in row_res:
-                        raise WialonAPIError(f"Wialon trip rows failed for group {group_id}: {row_res}")
-                    if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Unexpected response structure for trip rows of group {group_id}: {row_res}")
+                    row_res = _fetch_all_rows(sid, total_rows, f"group trips report of group {group_id}")
                     for r in row_res:
                         cols = r.get("c", [])
                         # Table 0 columns: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Mileage', 'Total time', 'Engine hours', 'Avg. speed', 'Max. speed', 'Driver']
                         if len(cols) >= 6:
                             vehicle_name = extract_cell_text(cols[0]).strip()
-                            dist_km = parse_float_safe(extract_cell_value(cols[5]) if len(cols) > 5 else 0.0)
+                            raw_mileage = extract_cell_value(cols[mileage_idx]) if len(cols) > mileage_idx else None
+                            dist_strict = parse_float_safe(raw_mileage, default=None)
+                            dist_km = dist_strict if dist_strict is not None else 0.0
 
                             total_time_str = extract_cell_text(cols[6]) if len(cols) > 6 else "0:00:00"
                             engine_hours_str = extract_cell_text(cols[7]) if len(cols) > 7 else "0:00:00"
@@ -375,7 +525,7 @@ def execute_wialon_group_trips_report(
                             max_spd_str = extract_cell_text(cols[9]) if len(cols) > 9 else "0 km/h"
                             driver_col = extract_cell_text(cols[10]).strip() if len(cols) > 10 else ""
 
-                            unit_summaries.append({
+                            summary = {
                                 "vehicle_name": vehicle_name,
                                 "mileage_km": round(dist_km, 2),
                                 "total_time": total_time_str,
@@ -383,7 +533,12 @@ def execute_wialon_group_trips_report(
                                 "avg_speed": avg_spd_str,
                                 "max_speed": max_spd_str,
                                 "driver": driver_col,
-                            })
+                            }
+                            if dist_strict is None:
+                                summary["incomplete_fields"] = ["mileage_km"]
+                            if column_warnings:
+                                summary["column_warnings"] = list(column_warnings)
+                            unit_summaries.append(summary)
 
             return unit_summaries
 
@@ -409,6 +564,9 @@ def execute_wialon_group_engine_idle_report(
     Execute Wialon's native Engine Hours Report - All Unit template (ID 2) for a fleet group.
     Returns authoritative vehicle idling metrics, engine hours, moving durations, and discrete
     idle events across the entire fleet directly from Wialon.
+
+    Each vehicle row lists unreadable cells in `incomplete_fields` (the corresponding legacy integer
+    keys stay 0 for existing callers) and carries a parsed `mileage_km` (None when unreadable).
 
     Guarantees thread-safe execution and cleanup in finally block.
     """
@@ -439,73 +597,85 @@ def execute_wialon_group_engine_idle_report(
             tables = rr.get("tables", [])
             unit_summaries = []
             all_idle_events = []
+            column_warnings: List[str] = []
+            events_incomplete: List[str] = []
+            total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
+                header = tables[0].get("header")
+                total_idx = _column_index(header, ("Total time",), 5, column_warnings)
+                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings)
+                motion_idx = _column_index(header, ("In motion",), 7, column_warnings)
+                idling_idx = _column_index(header, ("Idling",), 8, column_warnings)
+                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings)
                 if total_rows > 0:
-                    row_res = wialon_request(
-                        "report/get_result_rows",
-                        {"tableIndex": 0, "indexFrom": 0, "indexTo": min(total_rows - 1, 500)},
-                        sid=sid,
-                    )
-                    if isinstance(row_res, dict) and "error" in row_res:
-                        raise WialonAPIError(f"Wialon engine rows failed for group {group_id}: {row_res}")
-                    if not isinstance(row_res, list):
-                        raise WialonAPIError(f"Unexpected response structure for engine rows of group {group_id}: {row_res}")
+                    row_res = _fetch_all_rows(sid, total_rows, f"group engine report of group {group_id}")
                     for row_idx, r in enumerate(row_res):
                         cols = r.get("c", [])
                         # Table 0: ['Grouping', 'Beginning', 'Initial location', 'End', 'Final location', 'Total time', 'Engine hours', 'In motion', 'Idling', 'Mileage', 'Avg. speed', 'Max. speed']
                         if len(cols) >= 9:
-                            vehicle_name = str(cols[0]).strip()
-                            total_time_str = str(cols[5]) if len(cols) > 5 else "0:00:00"
-                            engine_hours_str = str(cols[6]) if len(cols) > 6 else "0:00:00"
-                            in_motion_str = str(cols[7]) if len(cols) > 7 else "0:00:00"
-                            idling_str = str(cols[8]) if len(cols) > 8 else "0:00:00"
-                            mileage_str = str(cols[9]) if len(cols) > 9 else "0.00 km"
+                            vehicle_name = _cell_str(cols[0]).strip()
+
+                            def cell(idx):
+                                return cols[idx] if len(cols) > idx else None
+
+                            total_time_str = _cell_str(cell(total_idx)) if len(cols) > total_idx else "0:00:00"
+                            engine_hours_str = _cell_str(cell(engine_idx)) if len(cols) > engine_idx else "0:00:00"
+                            in_motion_str = _cell_str(cell(motion_idx)) if len(cols) > motion_idx else "0:00:00"
+                            idling_str = _cell_str(cell(idling_idx)) if len(cols) > idling_idx else "0:00:00"
+                            mileage_str = _cell_str(cell(mileage_idx)) if len(cols) > mileage_idx else "0.00 km"
 
                             total_time_sec = parse_duration_to_seconds(total_time_str)
                             engine_hours_sec = parse_duration_to_seconds(engine_hours_str)
                             in_motion_sec = parse_duration_to_seconds(in_motion_str)
                             idling_sec = parse_duration_to_seconds(idling_str)
 
+                            row_incomplete = []
+                            for field, idx in (("total_time_seconds", total_idx), ("engine_hours_seconds", engine_idx),
+                                               ("in_motion_seconds", motion_idx), ("total_idle_seconds", idling_idx)):
+                                if parse_duration_strict(cell(idx)) is None:
+                                    row_incomplete.append(field)
+                            mileage_km = parse_float_safe(cell(mileage_idx), default=None)
+                            if mileage_km is None:
+                                row_incomplete.append("mileage_km")
+
                             unit_events = []
                             # Fetch subrows for discrete idle segments if idling > 0
                             if include_events and idling_sec > 0 and r.get("d", 0) > 0:
-                                sub = wialon_request(
-                                    "report/get_result_subrows",
-                                    {"tableIndex": 0, "rowIndex": row_idx, "indexFrom": 0, "indexTo": 200},
-                                    sid=sid,
-                                )
-                                if isinstance(sub, list):
-                                    for s in sub:
-                                        sc = s.get("c", [])
-                                        if len(sc) >= 9:
-                                            s_idle_str = str(sc[8]).strip()
-                                            s_idle_sec = parse_duration_to_seconds(s_idle_str)
-                                            if s_idle_sec > 0:
-                                                st_obj = sc[1] if isinstance(sc[1], dict) else {}
-                                                loc_obj = sc[2] if isinstance(sc[2], dict) else (sc[4] if isinstance(sc[4], dict) else {})
-                                                et_obj = sc[3] if isinstance(sc[3], dict) else {}
-                                                st_ts = st_obj.get("v") or s.get("t1") or 0
-                                                et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
-                                                lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
-                                                lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
-                                                addr = loc_obj.get("t") or "Unknown Location"
+                                sub, sub_complete = _fetch_all_subrows(sid, row_idx, f"group engine report of group {group_id}")
+                                if not sub_complete:
+                                    row_incomplete.append("idle_events")
+                                    events_incomplete.append(vehicle_name)
+                                for s in sub:
+                                    sc = s.get("c", [])
+                                    if len(sc) >= 9:
+                                        s_idle_str = _cell_str(sc[8]).strip()
+                                        s_idle_sec = parse_duration_to_seconds(s_idle_str)
+                                        if s_idle_sec > 0:
+                                            st_obj = sc[1] if isinstance(sc[1], dict) else {}
+                                            loc_obj = sc[2] if isinstance(sc[2], dict) else (sc[4] if isinstance(sc[4], dict) else {})
+                                            et_obj = sc[3] if isinstance(sc[3], dict) else {}
+                                            st_ts = st_obj.get("v") or s.get("t1") or 0
+                                            et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
+                                            lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
+                                            lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
+                                            addr = loc_obj.get("t") or "Unknown Location"
 
-                                                ev_item = {
-                                                    "vehicle_name": vehicle_name,
-                                                    "start_time": st_ts,
-                                                    "end_time": et_ts,
-                                                    "duration": s_idle_sec,
-                                                    "duration_minutes": round(s_idle_sec / 60.0, 2),
-                                                    "location": {
-                                                        "latitude": lat,
-                                                        "longitude": lng,
-                                                    },
-                                                    "address": addr,
-                                                }
-                                                unit_events.append(ev_item)
-                                                all_idle_events.append(ev_item)
+                                            ev_item = {
+                                                "vehicle_name": vehicle_name,
+                                                "start_time": st_ts,
+                                                "end_time": et_ts,
+                                                "duration": s_idle_sec,
+                                                "duration_minutes": round(s_idle_sec / 60.0, 2),
+                                                "location": {
+                                                    "latitude": lat,
+                                                    "longitude": lng,
+                                                },
+                                                "address": addr,
+                                            }
+                                            unit_events.append(ev_item)
+                                            all_idle_events.append(ev_item)
                             elif include_events and idling_sec > 0 and r.get("d", 0) == 0:
                                 # When a vehicle has idling recorded in a single non-nested interval
                                 st_obj = cols[1] if len(cols) > 1 and isinstance(cols[1], dict) else {}
@@ -549,12 +719,17 @@ def execute_wialon_group_engine_idle_report(
                                 "idle_events": len(unit_events) if unit_events else (1 if idling_sec > 0 else 0),
                                 "longest_idle_seconds": longest_idle,
                                 "mileage_str": mileage_str,
+                                "mileage_km": round(mileage_km, 2) if mileage_km is not None else None,
+                                "incomplete_fields": row_incomplete,
                                 "events": unit_events,
                             })
 
             return {
                 "vehicles": unit_summaries,
                 "events": all_idle_events,
+                "rows_total": total_rows,
+                "column_warnings": column_warnings,
+                "events_incomplete": events_incomplete,
             }
 
         except Exception as exc:

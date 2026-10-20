@@ -1,5 +1,7 @@
 import logging
-from datetime import datetime, timezone, timedelta, time as dtime
+import re
+from datetime import date, datetime, timezone, timedelta, time as dtime
+from typing import Optional, Tuple
 
 # UAE Timezone: UTC+04:00 (Fixed offset, no DST) - Asia/Dubai
 UAE_TZ = timezone(timedelta(hours=4))
@@ -53,6 +55,54 @@ def to_iso_uae(timestamp: int) -> str:
     if not timestamp:
         return ""
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(UAE_TZ).isoformat()
+
+
+_TX_WALLCLOCK_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})"
+    r"(?:[T ](\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?"
+    r"\s*(?:Z|[+-]\d{2}(?::?\d{2})?)?$",
+    re.IGNORECASE,
+)
+
+
+def parse_tx_wallclock(value) -> Optional[Tuple[datetime, str]]:
+    """
+    Return (naive wall-clock datetime truncated to seconds, precision) for a stored or
+    imported fuel transaction_date.
+
+    Any UTC offset, 'Z' suffix or tzinfo is DISCARDED, never converted. The importer writes
+    offset-free local timestamps, and PostgREST echoes the written wall clock back under every
+    plausible column type (date / timestamp / timestamptz with a consistent session TimeZone),
+    so keeping the printed wall clock is the only round-trip-stable reading.
+
+    LIMITATION (unverified): the actual column type of fuel_transactions.transaction_date and the
+    session TimeZone used for historical writes are not known from this repository. The wall clock
+    is whatever the source statement contained (assumed UAE local time); if rows were ever written
+    under different session time zones, their wall clocks are not comparable.
+
+    precision is "date" when there is no time component or the time is exactly 00:00:00
+    (the importer serializes midnight as date-only, so the two are indistinguishable),
+    otherwise "second". Returns None if unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        wall = value.replace(tzinfo=None, microsecond=0)
+    elif isinstance(value, date):
+        wall = datetime(value.year, value.month, value.day)
+    else:
+        m = _TX_WALLCLOCK_RE.match(str(value).strip())
+        if not m:
+            return None
+        try:
+            wall = datetime(
+                int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                int(m.group(4) or 0), int(m.group(5) or 0), int(m.group(6) or 0),
+            )
+        except ValueError:
+            return None
+    precision = "date" if (wall.hour, wall.minute, wall.second) == (0, 0, 0) else "second"
+    return wall, precision
 
 
 def parse_date_to_uae_bounds(from_date: str, to_date: str = None) -> tuple:

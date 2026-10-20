@@ -1,25 +1,34 @@
 """Dynamic Excel fuel import processor, preview generator, and Supabase execution engine."""
 
+import hashlib
 import io
 import logging
+import math
 import re
-from datetime import date, datetime, timezone
+import zipfile
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import openpyxl
 from openpyxl.utils.datetime import from_excel
 
 from app.fuel.db import (
+    FuelDataFetchError,
     build_fingerprint,
     create_fuel_import_record,
     fetch_existing_transaction_fingerprints,
+    find_import_by_sha256,
     insert_fuel_transactions_batch,
+    insert_fuel_transactions_ignore_duplicates,
+    schema_v2_enabled,
     update_fuel_import_record,
+    weak_fingerprint_key,
 )
 from app.fuel.mapper import CANONICAL_FIELDS, REQUIRED_FIELDS, map_headers, normalize_header
 from app.fuel.schemas import FuelImportPreviewResponse, FuelImportResultResponse, HeaderMappingItem
+from app.utils.config import get_env_int
 
-logger = logging.getLogger(__name__)
+logger =logging.getLogger(__name__)
 
 
 class FuelImportError(Exception):
@@ -37,6 +46,68 @@ SUMMARY_ROW_KEYWORDS: Set[str] = {
     "opening balance", "net total", "gross total"
 }
 
+MAX_IMPORT_WARNINGS = 50
+MAX_DETAIL_ROWS = 20
+# .xlsx is a zip: a few MB upload can expand to GBs in openpyxl (read_only=False). Checked before loading.
+MAX_UNCOMPRESSED_BYTES = get_env_int("FUEL_IMPORT_MAX_UNCOMPRESSED_BYTES", 200 * 1024 * 1024)
+WORKBOOK_TOO_LARGE_MESSAGE = "The workbook is too large to import. Split the statement into smaller files."
+# Library error text (zip paths, parser internals) is logged server-side, never returned to the client.
+UNREADABLE_WORKBOOK_MESSAGE = "Unable to read Excel file. It may be corrupt, encrypted or not a valid .xlsx workbook."
+
+TIMESTAMP_COMPARISON_NOTE = (
+    "Transaction dates are compared as wall-clock times exactly as written on the statement "
+    "(assumed UAE local time); any UTC offset returned by the database is ignored, not converted. "
+    "The database column type and the session time zone of historical writes are not verified."
+)
+
+
+def _add_to_weak_index(index: Dict[str, Set[str]], fingerprint: str) -> None:
+    key, time_part = weak_fingerprint_key(fingerprint)
+    if time_part is not None:
+        index.setdefault(key, set()).add(time_part)
+
+
+def _build_weak_index(fingerprints: Set[str]) -> Dict[str, Set[str]]:
+    index: Dict[str, Set[str]] = {}
+    for fp in fingerprints:
+        _add_to_weak_index(index, fp)
+    return index
+
+
+def _is_duplicate(fingerprint: str, strong: Set[str], weak_index: Dict[str, Set[str]]) -> bool:
+    """
+    Exact wall-clock match, or same date-level key when either side only has date precision
+    (date-only / 00:00:00). Two rows on the same day with different real times are not duplicates.
+    """
+    if fingerprint in strong:
+        return True
+    key, time_part = weak_fingerprint_key(fingerprint)
+    times = weak_index.get(key)
+    if not times or time_part is None:
+        return False
+    return time_part == "00:00:00" or "00:00:00" in times
+
+
+def load_fuel_workbook(file_bytes: bytes, context: str):
+    """Open an uploaded .xlsx after checking its expanded size; client errors never carry library text."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            expanded = sum(info.file_size for info in archive.infolist())
+    except (zipfile.BadZipFile, ValueError) as exc:
+        logger.warning("%s: upload is not a zip-based workbook: %s", context, exc)
+        raise FuelImportError(UNREADABLE_WORKBOOK_MESSAGE, status_code=422) from None
+    if expanded > MAX_UNCOMPRESSED_BYTES:
+        logger.warning("%s: workbook expands to %d bytes (limit %d)", context, expanded, MAX_UNCOMPRESSED_BYTES)
+        raise FuelImportError(WORKBOOK_TOO_LARGE_MESSAGE, status_code=413)
+    try:
+        return openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
+    except Exception as exc:
+        logger.warning("%s: workbook could not be opened: %s", context, exc)
+        raise FuelImportError(UNREADABLE_WORKBOOK_MESSAGE, status_code=422) from None
+
+
+_THOUSANDS_RE = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?$")
+
 
 def parse_numeric_value(val: Any) -> Tuple[Optional[float], Optional[str]]:
     """
@@ -45,22 +116,33 @@ def parse_numeric_value(val: Any) -> Tuple[Optional[float], Optional[str]]:
     """
     if val is None:
         return None, None
+    if isinstance(val, bool):
+        return None, f"Could not parse numeric value '{val}'"
     if isinstance(val, (int, float)):
-        return float(val), None
+        number = float(val)
+        return (number, None) if math.isfinite(number) else (None, f"Could not parse numeric value '{val}'")
 
     str_val = str(val).strip()
     if not str_val or str_val.lower() in {"-", "n/a", "na", "null", "none", "/"}:
         return None, None
 
-    # Remove currency strings, units, and commas
+    # Remove currency strings and units
     cleaned = re.sub(r"(?i)\b(aed|sar|usd|eur|gbp|dh|dhs|ltr|litres|liters|km)\b", "", str_val)
-    cleaned = cleaned.replace("$", "").replace("€", "").replace("£", "")
-    cleaned = cleaned.replace(",", "").strip()
+    cleaned = cleaned.replace("$", "").replace("€", "").replace("£", "").strip()
+    # Commas are accepted only as thousands separators (1,234 / 1,234.56). A decimal comma such as
+    # "12,5" or "1.234,56" would otherwise be read as 125 or 1.23456, so it is rejected, not guessed.
+    if "," in cleaned:
+        if not _THOUSANDS_RE.match(cleaned):
+            return None, f"Could not parse numeric value '{str_val}' (ambiguous comma; use '.' for decimals)"
+        cleaned = cleaned.replace(",", "")
 
     try:
-        return float(cleaned), None
+        number = float(cleaned)
     except ValueError:
         return None, f"Could not parse numeric value '{str_val}'"
+    if not math.isfinite(number):  # "nan", "inf", "1e999" would be stored as invalid JSON
+        return None, f"Could not parse numeric value '{str_val}'"
+    return number, None
 
 
 def parse_date_value(val: Any) -> Tuple[Optional[str], Optional[str]]:
@@ -331,10 +413,7 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
     if not (lower_name.endswith(".xlsx") or lower_name.endswith(".xlsm") or lower_name.endswith(".xltx")):
         raise FuelImportError("Unsupported file type. Please upload a modern Excel file (.xlsx).", status_code=400)
 
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
-    except Exception as exc:
-        raise FuelImportError(f"Unable to read Excel file. It may be corrupt or encrypted. (Error: {str(exc)})", status_code=422)
+    wb = load_fuel_workbook(file_bytes, "Fuel preview")
 
     if not wb.sheetnames:
         raise FuelImportError("Excel workbook contains no worksheets.", status_code=422)
@@ -456,10 +535,7 @@ def execute_fuel_import(
     if not (lower_name.endswith(".xlsx") or lower_name.endswith(".xlsm") or lower_name.endswith(".xltx")):
         raise FuelImportError("Unsupported file type. Please upload a modern Excel file (.xlsx).", status_code=400)
 
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=False)
-    except Exception as exc:
-        raise FuelImportError(f"Unable to read Excel file: {str(exc)}", status_code=422)
+    wb = load_fuel_workbook(file_bytes, "Fuel import")
 
     if not wb.sheetnames:
         raise FuelImportError("Excel workbook contains no worksheets.", status_code=422)
@@ -490,29 +566,25 @@ def execute_fuel_import(
             break
 
     total_rows_found = len(all_rows)
-
-    # 4. Create initial fuel_imports record
-    import_id = create_fuel_import_record(
-        file_name=file_name,
-        imported_by=imported_by,
-        rows_found=total_rows_found,
-        bearer_token=bearer_token,
-    )
-
-    # 5. Fetch vehicle lookup & existing transaction fingerprints
-    vehicle_lookup = resolve_fleet_vehicles()
-    existing_fingerprints = fetch_existing_transaction_fingerprints(bearer_token=bearer_token)
-    in_memory_fingerprints: Set[str] = set()
-
-    # 6. Process rows
     total_cols = len(raw_headers)
-    rows_candidate = 0
+
+    # 4. Pass 1: parse and validate every row (no database access yet)
     rows_ignored = 0
     rows_failed = 0
-    rows_duplicate = 0
-    valid_transactions: List[Dict[str, Any]] = []
+    rows_date_ambiguous = 0
+    rows_optional_parse_failed = 0
+    candidates: List[Dict[str, Any]] = []
     failed_row_details: List[Dict[str, Any]] = []
-    parsed_dates: List[str] = []
+    warnings: List[str] = []
+
+    def add_warning(message: str) -> None:
+        if len(warnings) < MAX_IMPORT_WARNINGS:
+            warnings.append(message)
+
+    def fail_row(source_row: int, reason: str) -> None:
+        nonlocal rows_failed
+        rows_failed += 1
+        failed_row_details.append({"source_row": source_row, "reason": reason})
 
     for offset, row in enumerate(all_rows, start=1):
         row_idx = header_row_idx + offset
@@ -525,8 +597,6 @@ def execute_fuel_import(
             rows_ignored += 1
             continue
 
-        rows_candidate += 1
-
         # Extract values
         raw_date = row_slice[canonical_to_col_idx["transaction_date"]] if "transaction_date" in canonical_to_col_idx else None
         raw_vehicle = row_slice[canonical_to_col_idx["vehicle_identifier"]] if "vehicle_identifier" in canonical_to_col_idx else None
@@ -535,35 +605,32 @@ def execute_fuel_import(
         # Validate required fields
         parsed_dt, date_err = parse_date_value(raw_date)
         if not parsed_dt:
-            rows_failed += 1
-            failed_row_details.append({
-                "source_row": row_idx,
-                "reason": f"Invalid or missing transaction date ('{raw_date}')"
-            })
+            fail_row(row_idx, f"Invalid or missing transaction date ('{raw_date}')")
             continue
+        if date_err:
+            rows_date_ambiguous += 1
+            add_warning(f"Row {row_idx}: {date_err}")
 
         if not raw_vehicle or not str(raw_vehicle).strip():
-            rows_failed += 1
-            failed_row_details.append({
-                "source_row": row_idx,
-                "reason": "Missing vehicle identifier"
-            })
+            fail_row(row_idx, "Missing vehicle identifier")
             continue
         clean_vehicle = str(raw_vehicle).strip()
 
-        parsed_litres, litres_err = parse_numeric_value(raw_litres)
-        if parsed_litres is None or parsed_litres <= 0:
-            rows_failed += 1
-            failed_row_details.append({
-                "source_row": row_idx,
-                "reason": f"Invalid or zero fuel litres ('{raw_litres}')"
-            })
+        # Negative litres are kept as signed refund/reversal adjustments; zero is meaningless.
+        parsed_litres, _ = parse_numeric_value(raw_litres)
+        if parsed_litres is None or parsed_litres == 0:
+            fail_row(row_idx, f"Invalid or zero fuel litres ('{raw_litres}')")
             continue
 
-        # Parse optional fields
+        # Parse optional fields; a non-empty cell that cannot be parsed is left empty and reported
+        row_parse_failures: List[str] = []
+
         def get_opt_numeric(canonical_key: str) -> Optional[float]:
             if canonical_key in canonical_to_col_idx:
-                val, _ = parse_numeric_value(row_slice[canonical_to_col_idx[canonical_key]])
+                raw_val = row_slice[canonical_to_col_idx[canonical_key]]
+                val, warn = parse_numeric_value(raw_val)
+                if warn:
+                    row_parse_failures.append(f"{canonical_key} '{raw_val}'")
                 return val
             return None
 
@@ -577,11 +644,25 @@ def execute_fuel_import(
         total_cost = get_opt_numeric("total_cost")
         odometer_km = get_opt_numeric("odometer_km")
 
-        # Auto-compute total_cost or unit_price if one is missing but the other is present
-        if total_cost is None and unit_price is not None and parsed_litres:
+        if row_parse_failures:
+            rows_optional_parse_failed += 1
+            add_warning(f"Row {row_idx}: could not parse {', '.join(row_parse_failures)}; left empty")
+
+        # Auto-compute total_cost or unit_price if one is missing but the other is present (derived, not recorded)
+        cost_derived = False
+        unit_price_derived = False
+        if total_cost is None and unit_price is not None:
             total_cost = round(unit_price * parsed_litres, 2)
-        elif unit_price is None and total_cost is not None and parsed_litres:
+            cost_derived = True
+        elif unit_price is None and total_cost is not None:
             unit_price = round(total_cost / parsed_litres, 4)
+            unit_price_derived = True
+
+        # Litres and cost must carry the same sign (a refund reverses both)
+        if total_cost is not None and total_cost != 0 and (total_cost > 0) != (parsed_litres > 0):
+            kind = "negative litres (refund) with positive cost" if parsed_litres < 0 else "positive litres with negative cost"
+            fail_row(row_idx, f"Sign mismatch: {kind} ({parsed_litres} L, {total_cost})")
+            continue
 
         fuel_type = get_opt_str("fuel_type")
         station_name = get_opt_str("station_name")
@@ -591,7 +672,6 @@ def execute_fuel_import(
         reference_number = get_opt_str("reference_number")
         notes = get_opt_str("notes")
 
-        # Deduplication check
         fp = build_fingerprint(
             vehicle_identifier=clean_vehicle,
             transaction_date=parsed_dt,
@@ -601,48 +681,182 @@ def execute_fuel_import(
             odometer_km=odometer_km,
         )
 
-        if fp in in_memory_fingerprints or fp in existing_fingerprints:
-            rows_duplicate += 1
-            continue
-
-        in_memory_fingerprints.add(fp)
-
         # Vehicle ID: public.vehicles is empty in Supabase and Wialon IDs do not belong in that FK.
         # vehicle_id is kept NULL while vehicle_identifier stores the full registration plate.
-        vehicle_id: Optional[int] = None
-
-        parsed_dates.append(parsed_dt[:10])
-
-        valid_transactions.append({
-            "import_id": import_id,
-            "vehicle_id": vehicle_id,
-            "transaction_date": parsed_dt,
-            "vehicle_identifier": clean_vehicle,
-            "fuel_type": fuel_type,
-            "litres": parsed_litres,
-            "unit_price": unit_price,
-            "total_cost": total_cost,
-            "odometer_km": odometer_km,
-            "station_name": station_name,
-            "invoice_number": invoice_number,
-            "card_number": card_number,
-            "driver_name": driver_name,
-            "reference_number": reference_number,
-            "notes": notes,
-            "source_row_number": row_idx,
+        candidates.append({
+            "fingerprint": fp,
+            "cost_derived": cost_derived,
+            "unit_price_derived": unit_price_derived,
+            "fields": {
+                "vehicle_id": None,
+                "transaction_date": parsed_dt,
+                "vehicle_identifier": clean_vehicle,
+                "fuel_type": fuel_type,
+                "litres": parsed_litres,
+                "unit_price": unit_price,
+                "total_cost": total_cost,
+                "odometer_km": odometer_km,
+                "station_name": station_name,
+                "invoice_number": invoice_number,
+                "card_number": card_number,
+                "driver_name": driver_name,
+                "reference_number": reference_number,
+                "notes": notes,
+                "source_row_number": row_idx,
+            },
         })
 
-    # 7. Insert batches into Supabase
+    # 5. Fetch existing fingerprints for the file's date window (±1 day). If this cannot be read
+    # completely, refuse the import before writing anything: a partial set lets duplicates through.
+    check_from: Optional[str] = None
+    check_to: Optional[str] = None
+    existing_fingerprints: Set[str] = set()
+    if candidates:
+        candidate_days = [c["fields"]["transaction_date"][:10] for c in candidates]
+        check_from = (date.fromisoformat(min(candidate_days)) - timedelta(days=1)).isoformat()
+        check_to = (date.fromisoformat(max(candidate_days)) + timedelta(days=1)).isoformat()
+        try:
+            existing_fingerprints = fetch_existing_transaction_fingerprints(
+                date_from=check_from,
+                date_to=check_to,
+                bearer_token=bearer_token,
+            )
+        except FuelDataFetchError:
+            raise FuelImportError(
+                "Duplicate check unavailable: existing transactions could not be read completely. "
+                "Nothing was imported; please retry.",
+                status_code=503,
+            ) from None
+
+    stored_value_shapes = getattr(existing_fingerprints, "stored_value_shapes", None)
+    offsets_seen = sorted(k for k in (stored_value_shapes or {}) if k.startswith("offset:"))
+    if len(offsets_seen) > 1:
+        add_warning(
+            "Stored transaction dates carry different UTC offsets "
+            f"({', '.join(o.split(':', 1)[1] for o in offsets_seen)}); wall-clock duplicate comparison "
+            "across them is unreliable."
+        )
+
+    file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    v2 = schema_v2_enabled()
+    if v2:
+        try:
+            earlier = find_import_by_sha256(file_sha256, bearer_token)
+        except FuelDataFetchError:
+            raise FuelImportError("Duplicate-file check unavailable; nothing was imported. Please retry.", status_code=503) from None
+        if earlier is not None:
+            raise FuelImportError(f"Identical file already imported as #{earlier}; nothing was imported.", status_code=409)
+
+    # 6. Create initial fuel_imports record
+    import_id = create_fuel_import_record(
+        file_name=file_name,
+        imported_by=imported_by,
+        rows_found=total_rows_found,
+        bearer_token=bearer_token,
+        **({"file_sha256": file_sha256} if v2 else {}),
+    )
+
+    # 7. Pass 2: deduplicate against the database and earlier rows of this file
+    existing_weak = _build_weak_index(existing_fingerprints)
+    file_strong: Set[str] = set()
+    file_weak: Dict[str, Set[str]] = {}
+    rows_duplicate = 0
+    rows_cost_derived = 0
+    rows_unit_price_derived = 0
+    duplicate_row_details: List[Dict[str, Any]] = []
+    purchases: List[Dict[str, Any]] = []
+    refunds: List[Dict[str, Any]] = []
+    parsed_dates: List[str] = []
+
+    for cand in candidates:
+        fp = cand["fingerprint"]
+        source_row = cand["fields"]["source_row_number"]
+        if _is_duplicate(fp, existing_fingerprints, existing_weak):
+            dup_reason = "Matches an existing transaction"
+        elif _is_duplicate(fp, file_strong, file_weak):
+            dup_reason = "Duplicate of an earlier row in this file"
+        else:
+            dup_reason = None
+        if dup_reason:
+            rows_duplicate += 1
+            if len(duplicate_row_details) < MAX_DETAIL_ROWS:
+                duplicate_row_details.append({"source_row": source_row, "reason": dup_reason})
+            continue
+
+        file_strong.add(fp)
+        _add_to_weak_index(file_weak, fp)
+        rows_cost_derived += int(cand["cost_derived"])
+        rows_unit_price_derived += int(cand["unit_price_derived"])
+        parsed_dates.append(cand["fields"]["transaction_date"][:10])
+
+        tx = {"import_id": import_id, **cand["fields"]}
+        if v2:
+            tx.update({
+                "fingerprint": fp,
+                "transaction_kind": "refund_adjustment" if tx["litres"] < 0 else "purchase",
+                "cost_derived": bool(cand["cost_derived"]),
+                "unit_price_derived": bool(cand["unit_price_derived"]),
+            })
+        (refunds if tx["litres"] < 0 else purchases).append(tx)
+
+    # 8. Insert batches into Supabase. Refunds go in their own request so that a database
+    # constraint on negative litres (unverified) can only reject the refunds.
     rows_imported = 0
+    rows_refund = 0
     batch_errors: List[str] = []
-    if valid_transactions:
-        rows_imported, batch_errors = insert_fuel_transactions_batch(
-            transactions=valid_transactions,
+    refund_rejection_details: List[Dict[str, Any]] = []
+    if v2:
+        # The unique fingerprint index skips rows already stored, including by a concurrent import.
+        for group, is_refund in ((purchases, False), (refunds, True)):
+            if not group:
+                continue
+            inserted, ignored, errs = insert_fuel_transactions_ignore_duplicates(
+                group, batch_size=len(group) if is_refund else 100, bearer_token=bearer_token,
+            )
+            rows_imported += inserted
+            rows_duplicate += ignored
+            if ignored and len(duplicate_row_details) < MAX_DETAIL_ROWS:
+                duplicate_row_details.append({"source_row": None, "reason": f"{ignored} row(s) already stored (database fingerprint index)"})
+            if is_refund:
+                rows_refund = inserted
+                batch_errors.extend(f"Refund adjustments: {e}" for e in errs)
+                if errs:
+                    for tx in group:
+                        rows_failed += 1
+                        refund_rejection_details.append({"source_row": tx["source_row_number"],
+                                                         "reason": "Database rejected refund adjustment batch"})
+            else:
+                batch_errors.extend(errs)
+                # Rows of rejected batches are neither inserted nor ignored: count them as failed.
+                rows_failed += len(group) - inserted - ignored
+        purchases, refunds = [], []
+    if purchases:
+        inserted, errs = insert_fuel_transactions_batch(
+            transactions=purchases,
             batch_size=100,
             bearer_token=bearer_token,
         )
+        rows_imported += inserted
+        batch_errors.extend(errs)
+        # Rows of rejected batches were not stored: count them so the totals reconcile with rows_found.
+        rows_failed += len(purchases) - inserted
+    if refunds:
+        inserted, errs = insert_fuel_transactions_batch(
+            transactions=refunds,
+            batch_size=len(refunds),
+            bearer_token=bearer_token,
+        )
+        rows_imported += inserted
+        rows_refund = inserted
+        batch_errors.extend(f"Refund adjustments: {e}" for e in errs)
+        for tx in refunds[inserted:]:
+            rows_failed += 1
+            refund_rejection_details.append({
+                "source_row": tx["source_row_number"],
+                "reason": "Database rejected refund adjustment (negative litres); the table may not allow negative values",
+            })
 
-    # 8. Date ranges and final status
+    # 9. Date ranges and final status
     date_from: Optional[str] = min(parsed_dates) if parsed_dates else None
     date_to: Optional[str] = max(parsed_dates) if parsed_dates else None
 
@@ -661,8 +875,8 @@ def execute_fuel_import(
 
     completed_at = datetime.now(timezone.utc).isoformat()
 
-    # 9. Update fuel_imports record
-    update_fuel_import_record(
+    # 10. Update fuel_imports record
+    record_updated = update_fuel_import_record(
         import_id=import_id,
         updates={
             "status": final_status,
@@ -676,6 +890,8 @@ def execute_fuel_import(
         },
         bearer_token=bearer_token,
     )
+    if not record_updated:
+        add_warning(f"Import history record #{import_id} could not be updated; it may still show 'processing'.")
 
     return FuelImportResultResponse(
         import_id=import_id,
@@ -688,5 +904,21 @@ def execute_fuel_import(
         date_from=date_from,
         date_to=date_to,
         error_message=error_message,
-        failed_row_details=failed_row_details[:20] if failed_row_details else None,
+        # Refund rejections first so the cap cannot hide them behind parse failures
+        failed_row_details=(refund_rejection_details + failed_row_details)[:MAX_DETAIL_ROWS] or None,
+        rows_refund=rows_refund,
+        rows_cost_derived=rows_cost_derived,
+        rows_unit_price_derived=rows_unit_price_derived,
+        rows_date_ambiguous=rows_date_ambiguous,
+        rows_optional_parse_failed=rows_optional_parse_failed,
+        warnings=warnings,
+        duplicate_row_details=duplicate_row_details or None,
+        file_sha256=file_sha256,
+        duplicate_check_scope={
+            "date_from": check_from,
+            "date_to": check_to,
+            "existing_rows_scanned": getattr(existing_fingerprints, "rows_scanned", None),
+            "stored_value_shapes": stored_value_shapes,
+            "timestamp_note": TIMESTAMP_COMPARISON_NOTE,
+        },
     )

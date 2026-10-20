@@ -5,6 +5,7 @@ import logging
 import requests
 from app.performance_diagnostics import request_trace_id
 from app.utils.datetime_helpers import now_timestamp
+from app.utils.config import get_env_int
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -134,6 +135,16 @@ if __name__ == "__main__":
 
     print("Wialon login successful")
 
+# Size of each time window requested from messages/load_interval. Kept wide so
+# typical ranges (up to the 168h safety default) stay a single call per vehicle;
+# pagination below guarantees completeness within a window.
+HISTORY_CHUNK_SECONDS = 7 * 24 * 3600
+# Messages requested per call; a page of exactly this size triggers a follow-up request.
+HISTORY_PAGE_LIMIT = 50000
+# Safety cap on Wialon calls for a single get_vehicle_history invocation.
+HISTORY_MAX_REQUESTS = 200
+
+
 def get_vehicle_history(
     sid,
     vehicle_id,
@@ -141,30 +152,94 @@ def get_vehicle_history(
     from_time=None,
     to_time=None
 ):
+    """
+    Load raw messages for one unit over [from, to] (inclusive, UTC epoch seconds).
 
+    Long ranges are split into fixed time windows, and a window whose page comes
+    back full is re-requested from its last message timestamp, so a busy unit is
+    never silently truncated. Results are merged chronologically and the
+    overlap at page boundaries is de-duplicated.
+    """
     if from_time is not None and to_time is not None:
         time_from = int(from_time)
         current_time = int(to_time)
     else:
         current_time = now_timestamp()
-        time_from = current_time - (
+        time_from = current_time - int(
             hours * 3600
         )
 
+    if current_time < time_from:
+        return []
+
+    chunk_seconds = max(3600, get_env_int("WIALON_HISTORY_CHUNK_SECONDS", HISTORY_CHUNK_SECONDS))
+    page_limit = max(100, get_env_int("WIALON_HISTORY_PAGE_LIMIT", HISTORY_PAGE_LIMIT))
+    max_requests = max(1, get_env_int("WIALON_HISTORY_MAX_REQUESTS", HISTORY_MAX_REQUESTS))
+
+    collected = []
+    requests_made = 0
+    window_start = time_from
+
+    while window_start <= current_time:
+        window_end = min(current_time, window_start + chunk_seconds - 1)
+        page_from = window_start
+
+        while page_from <= window_end:
+            if requests_made >= max_requests:
+                logging.warning(
+                    "Wialon history for vehicle %s stopped after %s requests at t=%s; range %s-%s may be incomplete",
+                    vehicle_id, requests_made, page_from, time_from, current_time,
+                )
+                return _merge_history_messages(collected)
+
+            page = _load_history_page(sid, vehicle_id, page_from, window_end, page_limit)
+            requests_made += 1
+            collected.extend(page)
+
+            if len(page) < page_limit:
+                break
+
+            # Full page: more messages may remain in this window. Resume from the
+            # last timestamp (inclusive) so messages sharing that second are kept;
+            # the merge step drops the re-fetched overlap.
+            page_times = [t for t in (_message_time(m) for m in page) if t is not None]
+            last_t = max(page_times) if page_times else None
+            if last_t is None:
+                logging.warning(
+                    "Wialon history for vehicle %s returned a full page without timestamps; window %s-%s may be incomplete",
+                    vehicle_id, page_from, window_end,
+                )
+                break
+            if last_t <= page_from:
+                # A full page inside one second; step past it to guarantee progress.
+                logging.warning(
+                    "Wialon history for vehicle %s has >= %s messages at t=%s; some may be missing",
+                    vehicle_id, page_limit, page_from,
+                )
+                page_from += 1
+            else:
+                page_from = last_t
+
+        window_start = window_end + 1
+
+    return _merge_history_messages(collected)
+
+
+def _load_history_page(sid, vehicle_id, time_from, time_to, load_count):
     message_data = wialon_request(
         "messages/load_interval",
         {
             "itemId": vehicle_id,
             "timeFrom": time_from,
-            "timeTo": current_time,
+            "timeTo": time_to,
 
             # Request position messages
             "flags": 1,
 
             "flagsMask": 0,
 
-            # Maximum messages to load (scale with requested duration to avoid truncation)
-            "loadCount": min(50000, max(5000, int(hours * 250))),
+            # Maximum messages to load in this page
+            "loadCount": load_count,
 
             # Calculate sensor values
             "calcSensors": 1
@@ -176,10 +251,46 @@ def get_vehicle_history(
         reason = message_data.get("reason", message_data.get("error"))
         raise WialonAPIError(f"Wialon history request failed for vehicle {vehicle_id}: {reason}")
 
-    return message_data.get(
-        "messages",
-        []
-    )
+    if not isinstance(message_data, dict):
+        return []
+
+    return message_data.get("messages") or []
+
+
+def _message_time(message):
+    try:
+        return int(message.get("t"))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _merge_history_messages(messages):
+    """Stable-sort messages by timestamp and drop exact duplicates sharing a timestamp."""
+    keyed = [(_message_time(m), m) for m in messages]
+    keyed.sort(key=lambda item: -1 if item[0] is None else item[0])
+
+    merged = []
+    i = 0
+    while i < len(keyed):
+        j = i + 1
+        while j < len(keyed) and keyed[j][0] == keyed[i][0]:
+            j += 1
+
+        if j - i == 1:
+            merged.append(keyed[i][1])
+        else:
+            seen = set()
+            for _, message in keyed[i:j]:
+                try:
+                    key = json.dumps(message, sort_keys=True, default=str)
+                except (TypeError, ValueError):
+                    key = repr(message)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(message)
+        i = j
+
+    return merged
 
 
 def get_vehicle_groups(sid):

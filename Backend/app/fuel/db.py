@@ -7,7 +7,44 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
 
+from app.utils.datetime_helpers import parse_tx_wallclock
+
 logger = logging.getLogger(__name__)
+
+PAGE_SIZE = 1000
+
+
+class FuelDataFetchError(RuntimeError):
+    """Raised when fuel transactions cannot be read completely; callers must not compute on partial data."""
+
+
+class FingerprintSet(set):
+    """Set of existing fingerprints, plus the shapes of the stored transaction_date values seen."""
+
+    def __init__(self, *args, stored_value_shapes: Optional[Dict[str, int]] = None, rows_scanned: int = 0):
+        super().__init__(*args)
+        self.stored_value_shapes: Dict[str, int] = stored_value_shapes or {}
+        self.rows_scanned = rows_scanned
+
+
+_OFFSET_RE = re.compile(r"(Z|[+-]\d{2}(?::?\d{2})?)$", re.IGNORECASE)
+
+
+def describe_stored_date_shape(value: Any) -> str:
+    """
+    Classify a stored transaction_date as 'date_only', 'naive', 'offset:<offset>' or 'unparseable'.
+    Evidence only for the (unverified) DB column type; never used to convert values.
+    """
+    s = str(value or "").strip()
+    if not s or parse_tx_wallclock(s) is None:
+        return "unparseable"
+    if len(s) == 10:
+        return "date_only"
+    m = _OFFSET_RE.search(s)
+    if m:
+        off = m.group(1).upper()
+        return "offset:+00:00" if off == "Z" else f"offset:{off}"
+    return "naive"
 
 
 def _get_supabase_config() -> Tuple[str, str]:
@@ -41,11 +78,39 @@ def get_supabase_rest_url(endpoint: str) -> str:
     return f"{url}/rest/v1/{endpoint.lstrip('/')}"
 
 
+def schema_v2_enabled() -> bool:
+    """
+    FUEL_SCHEMA_V2=1 enables the optional columns from Backend/sql/proposed_fuel_dedup.sql
+    (fuel_transactions.fingerprint/transaction_kind/cost_derived/unit_price_derived and
+    fuel_imports.file_sha256). Set it only after that SQL has been reviewed and applied; with it unset
+    every payload keeps exactly the pre-existing keys (PostgREST rejects unknown columns).
+    """
+    return os.getenv("FUEL_SCHEMA_V2", "").strip() == "1"
+
+
+V2_TRANSACTION_COLUMNS = ("fingerprint", "transaction_kind", "cost_derived", "unit_price_derived")
+
+
+def find_import_by_sha256(file_sha256: str, bearer_token: Optional[str] = None) -> Optional[int]:
+    """Id of an earlier import of the identical file (FUEL_SCHEMA_V2 only), else None. Read-only."""
+    url = get_supabase_rest_url("fuel_imports")
+    params = {"select": "id", "file_sha256": f"eq.{file_sha256}", "order": "id.asc", "limit": "1"}
+    try:
+        response = requests.get(url, params=params, headers=_read_headers(bearer_token), timeout=15)
+    except requests.RequestException as exc:
+        raise FuelDataFetchError(f"Network failure checking file hash: {exc}") from None
+    if not response.ok:
+        raise FuelDataFetchError(f"Error checking file hash: HTTP {response.status_code}")
+    rows = response.json() or []
+    return int(rows[0]["id"]) if rows else None
+
+
 def create_fuel_import_record(
     file_name: str,
     imported_by: str,
     rows_found: int,
     bearer_token: Optional[str] = None,
+    file_sha256: Optional[str] = None,
 ) -> int:
     """
     Create a new record in fuel_imports with status 'processing'.
@@ -70,6 +135,8 @@ def create_fuel_import_record(
     }
     if clean_imported_by:
         payload["imported_by"] = clean_imported_by
+    if file_sha256 and schema_v2_enabled():
+        payload["file_sha256"] = file_sha256
 
     headers = get_headers(bearer_token)
     try:
@@ -123,45 +190,111 @@ def fetch_existing_transaction_fingerprints(
     bearer_token: Optional[str] = None,
 ) -> Set[str]:
     """
-    Fetch existing fuel transactions to identify duplicates.
-    Returns a set of composite fingerprint strings.
+    Fetch fingerprints of ALL existing fuel transactions in [date_from, date_to] (inclusive days).
+    Pages through PostgREST in PAGE_SIZE chunks ordered by id so no rows are skipped.
+    Raises FuelDataFetchError on any failure: an incomplete set would let duplicates through.
+    Returns a FingerprintSet (a set) that also reports the stored date shapes it observed.
     """
     url = get_supabase_rest_url("fuel_transactions")
-    headers = get_headers(bearer_token)
-    params = {
-        "select": "transaction_date,vehicle_identifier,litres,total_cost,invoice_number,odometer_km",
-        "limit": "10000",
+    headers = _read_headers(bearer_token)
+    params: Dict[str, str] = {
+        "select": "id,transaction_date,vehicle_identifier,litres,total_cost,invoice_number,odometer_km",
+        "order": "id.asc",
+        "limit": str(PAGE_SIZE),
     }
-    if date_from:
-        params["transaction_date"] = f"gte.{date_from}"
-    if date_to:
-        # If date_to is specified, combine with gte or use PostgREST and filter
-        if "transaction_date" in params:
-            params["and"] = f"(transaction_date.gte.{date_from},transaction_date.lte.{date_to})"
-            del params["transaction_date"]
-        else:
-            params["transaction_date"] = f"lte.{date_to}"
+    df = normalize_date_filter(date_from, is_end=False)
+    dt = normalize_date_filter(date_to, is_end=True)
+    if df and dt:
+        params["and"] = f"(transaction_date.gte.{df},transaction_date.lte.{dt})"
+    elif df:
+        params["transaction_date"] = f"gte.{df}"
+    elif dt:
+        params["transaction_date"] = f"lte.{dt}"
 
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
-        if response.ok:
-            records = response.json()
-            fingerprints = set()
-            for r in records:
-                fp = build_fingerprint(
-                    vehicle_identifier=r.get("vehicle_identifier"),
-                    transaction_date=r.get("transaction_date"),
-                    litres=r.get("litres"),
-                    total_cost=r.get("total_cost"),
-                    invoice_number=r.get("invoice_number"),
-                    odometer_km=r.get("odometer_km"),
+    rows = _fetch_all_pages(url, params, headers, "existing transactions for duplicate detection")
+    fingerprints: Set[str] = set()
+    shapes: Dict[str, int] = {}
+    for r in rows:
+        shape = describe_stored_date_shape(r.get("transaction_date"))
+        shapes[shape] = shapes.get(shape, 0) + 1
+        fingerprints.add(build_fingerprint(
+            vehicle_identifier=r.get("vehicle_identifier"),
+            transaction_date=r.get("transaction_date"),
+            litres=r.get("litres"),
+            total_cost=r.get("total_cost"),
+            invoice_number=r.get("invoice_number"),
+            odometer_km=r.get("odometer_km"),
+        ))
+
+    return FingerprintSet(fingerprints, stored_value_shapes=shapes, rows_scanned=len(rows))
+
+
+def _read_headers(bearer_token: Optional[str]) -> Dict[str, str]:
+    """
+    Headers for backend-side full-table reads. Uses the service-role key when configured (same as
+    analytics) so row-level security cannot silently hide rows; otherwise the caller's token.
+    """
+    return get_headers(None) if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else get_headers(bearer_token)
+
+
+def _parse_content_range_total(value: Optional[str]) -> Optional[int]:
+    """Total row count from a PostgREST Content-Range header such as '0-999/2335' or '*/0'."""
+    if not value or "/" not in value:
+        return None
+    total = value.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def _fetch_all_pages(
+    url: str,
+    params: Dict[str, str],
+    headers: Dict[str, str],
+    what: str,
+) -> List[Dict[str, Any]]:
+    """
+    Read every row matching params, PAGE_SIZE at a time, or raise FuelDataFetchError.
+    Completion is decided by the exact count PostgREST reports (Prefer: count=exact), never by a
+    short page, so a server max-rows cap below PAGE_SIZE cannot silently truncate the result.
+    Without a usable count, it keeps paging until an empty page.
+    """
+    page_headers = dict(headers)
+    page_headers["Prefer"] = "count=exact"
+    page_params = dict(params)
+    rows: List[Dict[str, Any]] = []
+    total: Optional[int] = None
+
+    while True:
+        page_params["offset"] = str(len(rows))
+        try:
+            response = requests.get(url, params=page_params, headers=page_headers, timeout=20)
+        except requests.RequestException as exc:
+            logger.error("Network failure reading %s: %s", what, exc)
+            raise FuelDataFetchError(f"Could not read {what} completely.") from None
+        if not response.ok:
+            logger.error("Error reading %s: HTTP %s", what, response.status_code)
+            raise FuelDataFetchError(f"Could not read {what} completely (HTTP {response.status_code}).")
+        try:
+            chunk = response.json()
+        except ValueError:
+            raise FuelDataFetchError(f"Invalid response while reading {what}.") from None
+        if not isinstance(chunk, list):
+            raise FuelDataFetchError(f"Unexpected response while reading {what}.")
+
+        reported = _parse_content_range_total(response.headers.get("content-range"))
+        if reported is not None:
+            total = reported
+
+        if not chunk:
+            if total is not None and len(rows) < total:
+                raise FuelDataFetchError(
+                    f"Could not read {what} completely ({len(rows)} of {total} rows; data changed during read)."
                 )
-                fingerprints.add(fp)
-            return fingerprints
-    except Exception as exc:
-        logger.warning("Could not fetch existing transactions for duplicate detection: %s", exc)
+            break
+        rows.extend(chunk)
+        if total is not None and len(rows) >= total:
+            break
 
-    return set()
+    return rows
 
 
 def insert_fuel_transactions_batch(
@@ -204,6 +337,42 @@ def insert_fuel_transactions_batch(
     return inserted_count, errors
 
 
+def insert_fuel_transactions_ignore_duplicates(
+    transactions: List[Dict[str, Any]],
+    batch_size: int = 100,
+    bearer_token: Optional[str] = None,
+) -> Tuple[int, int, List[str]]:
+    """
+    FUEL_SCHEMA_V2 insert: on_conflict=fingerprint with ignore-duplicates, so rows already stored (also by a
+    concurrent import) are skipped by the database. Returns (inserted, ignored_as_duplicate, errors);
+    the counts come from the rows PostgREST returns, never assumed.
+    """
+    if not transactions:
+        return 0, 0, []
+    url = get_supabase_rest_url("fuel_transactions")
+    headers = get_headers(bearer_token)
+    headers["Prefer"] = "resolution=ignore-duplicates,return=representation"
+    inserted = ignored = 0
+    errors: List[str] = []
+    for i in range(0, len(transactions), batch_size):
+        chunk = transactions[i : i + batch_size]
+        try:
+            response = requests.post(url, params={"on_conflict": "fingerprint"}, json=chunk, headers=headers, timeout=30)
+        except requests.RequestException as exc:
+            logger.error("Request failed during transaction batch insert: %s", exc)
+            errors.append(f"Batch {i // batch_size + 1} network failure.")
+            continue
+        if not response.ok:
+            logger.error("Failed inserting batch of %d transactions: %s - %s", len(chunk), response.status_code, response.text[:200])
+            errors.append(f"Batch {i // batch_size + 1} failed: HTTP {response.status_code}")
+            continue
+        body = response.json()
+        returned = len(body) if isinstance(body, list) else len(chunk)
+        inserted += returned
+        ignored += len(chunk) - returned
+    return inserted, ignored, errors
+
+
 def get_fuel_imports_list(
     limit: int = 50,
     offset: int = 0,
@@ -236,10 +405,10 @@ def get_fuel_imports_list(
             return response.json(), total_count
         else:
             logger.error("Failed fetching fuel_imports: %s", response.status_code)
-            return [], 0
     except Exception as exc:
         logger.error("Error fetching fuel_imports: %s", exc)
-        return [], 0
+    # An outage must not look like "no imports yet".
+    raise FuelDataFetchError("Could not read fuel import history.")
 
 
 def normalize_date_filter(date_str: Optional[str], is_end: bool = False) -> Optional[str]:
@@ -310,12 +479,13 @@ def get_fuel_transactions_list(
                 total_count = len(response.json())
 
             return response.json(), total_count
-        else:
-            logger.error("Failed fetching fuel_transactions: %s", response.status_code)
-            return [], 0
+        logger.error("Failed fetching fuel_transactions: %s", response.status_code)
+        raise FuelDataFetchError(f"Fuel transactions could not be read (HTTP {response.status_code}).")
+    except FuelDataFetchError:
+        raise
     except Exception as exc:
         logger.error("Error fetching fuel_transactions: %s", exc)
-        return [], 0
+        raise FuelDataFetchError("Fuel transactions could not be read.") from None
 
 
 def fetch_fuel_transactions_for_analytics(
@@ -324,18 +494,18 @@ def fetch_fuel_transactions_for_analytics(
 ) -> List[Dict[str, Any]]:
     """
     Fetch lightweight transaction records for analytics calculations.
-    Paginates in 1000-row chunks to overcome PostgREST server max-row limits.
+    Reads every page (see _fetch_all_pages) or raises FuelDataFetchError; never returns partial data.
     Selects only: transaction_date, vehicle_identifier, fuel_type, litres, total_cost, unit_price.
     """
     url = get_supabase_rest_url("fuel_transactions")
     # Use server service role key when available for backend analytics aggregations
-    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    headers = get_headers(None) if service_key else get_headers(bearer_token)
+    headers = _read_headers(bearer_token)
 
     params: Dict[str, str] = {
-        "select": "id,import_id,transaction_date,vehicle_identifier,fuel_type,litres,total_cost,unit_price,odometer_km,station_name,invoice_number,driver_name,card_number",
+        "select": "id,import_id,transaction_date,vehicle_identifier,fuel_type,litres,total_cost,unit_price,odometer_km,station_name,invoice_number,driver_name,card_number"
+        + (",cost_derived" if schema_v2_enabled() else ""),
         "order": "transaction_date.asc,id.asc",
-        "limit": "1000",
+        "limit": str(PAGE_SIZE),
     }
 
 
@@ -357,28 +527,7 @@ def fetch_fuel_transactions_for_analytics(
     if filters.get("import_id") is not None:
         params["import_id"] = f"eq.{filters['import_id']}"
 
-    all_records: List[Dict[str, Any]] = []
-    offset = 0
-
-    while True:
-        params["offset"] = str(offset)
-        try:
-            response = requests.get(url, params=params, headers=headers, timeout=20)
-            if not response.ok:
-                logger.error("Error querying transactions for analytics: HTTP %s", response.status_code)
-                break
-            chunk = response.json()
-            if not chunk or not isinstance(chunk, list):
-                break
-            all_records.extend(chunk)
-            offset += len(chunk)
-            if len(chunk) < 1000:
-                break
-        except requests.RequestException as exc:
-            logger.error("Network failure during analytics data query: %s", exc)
-            break
-
-    return all_records
+    return _fetch_all_pages(url, params, headers, "fuel transactions")
 
 
 def build_fingerprint(
@@ -394,7 +543,9 @@ def build_fingerprint(
     Prevents false duplicates when a vehicle refuels multiple times per day.
     """
     v_norm = str(vehicle_identifier or "").strip().lower().replace("-", "").replace(" ", "")
-    d_norm = str(transaction_date or "").strip()[:10]  # Date portion YYYY-MM-DD
+    # Wall-clock timestamp with any offset discarded (see parse_tx_wallclock for the unverified-type caveat).
+    parsed = parse_tx_wallclock(transaction_date)
+    d_norm = parsed[0].strftime("%Y-%m-%dT%H:%M:%S") if parsed else str(transaction_date or "").strip()
     # Normalize liters to 2 decimal places
     l_norm = f"{float(litres):.2f}" if litres is not None else ""
     # Normalize cost to 2 decimal places if available
@@ -403,3 +554,20 @@ def build_fingerprint(
     odo_norm = f"{float(odometer_km):.0f}" if odometer_km is not None else ""
 
     return f"{v_norm}|{d_norm}|{l_norm}|{c_norm}|{inv_norm}|{odo_norm}"
+
+
+def weak_fingerprint_key(fingerprint: str) -> Tuple[str, Optional[str]]:
+    """
+    Split a fingerprint into (date-level key, time part "HH:MM:SS").
+    The date-level key is compared when either side only has date precision (a date-only value,
+    or 00:00:00, which the importer cannot distinguish). time part is None when the date field
+    is not a full wall-clock timestamp.
+    """
+    parts = fingerprint.split("|")
+    if len(parts) < 2:
+        return fingerprint, None
+    stamp = parts[1]
+    if len(stamp) == 19 and stamp[10] == "T":
+        parts[1] = stamp[:10]
+        return "|".join(parts), stamp[11:]
+    return fingerprint, None

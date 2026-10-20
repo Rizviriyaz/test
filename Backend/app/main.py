@@ -87,7 +87,9 @@ app.add_middleware(
 
 @app.exception_handler(WialonAPIError)
 async def wialon_upstream_error_handler(_request: Request, exc: WialonAPIError):
-    return JSONResponse(status_code=502, content={"detail": "Wialon upstream request failed", "reason": str(exc)})
+    # Wialon error text can include raw response payloads; it is logged here and not sent to the client.
+    logging.warning("Wialon upstream error on %s: %s", _request.url.path, exc)
+    return JSONResponse(status_code=502, content={"detail": "Wialon upstream request failed"})
 
 
 @app.middleware("http")

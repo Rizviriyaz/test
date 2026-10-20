@@ -2,33 +2,47 @@
 Wialon Dynamic Vehicle Distance, Activity and Matching Service for ATS Fleet Management.
 Authoritatively resolves vehicle mileage, driving duration, and idling duration
 over date intervals using Wialon's native report engine.
+
+Data-completeness rules:
+  - A Wialon report that still fails after one forced re-login propagates WialonAPIError (HTTP 502).
+  - Anything Wialon did not report, or reported unreadably, is None - never 0. Recorded zeros stay 0.
+  - Fleet telematics are cached with a TTL (short for ranges that include today) and fetched once per
+    key even under concurrent requests. Partial results are cached only briefly.
 """
 import logging
 import re
-from typing import Dict, List, Any, Optional, Tuple
-from app.wialon import login, WialonAPIError
-from app.vehicles import get_all_vehicles, extract_registration_plate
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from app.utils.config import get_env_int
+from app.utils.datetime_helpers import get_uae_now, now_timestamp, parse_date_to_uae_bounds
+from app.utils.ttl_cache import TTLCache
+from app.vehicles import extract_registration_plate, get_all_vehicles
+from app.wialon import WialonAPIError, login
 from app.wialon_reports import (
-    execute_wialon_unit_trips_report,
-    execute_wialon_unit_engine_report,
-    execute_wialon_group_trips_report,
-    execute_wialon_group_engine_idle_report,
     GROUP_ID_ALL_UNITS,
+    _report_lock,
+    execute_wialon_group_engine_idle_report,
+    execute_wialon_group_trips_report,
+    execute_wialon_unit_engine_report,
+    execute_wialon_unit_trips_report,
 )
-from app.utils.datetime_helpers import parse_date_to_uae_bounds
 
 logger = logging.getLogger(__name__)
 
-# Request-scoped in-memory cache for fleet distances: (date_from, date_to) -> {unit_name: mileage_km}
-_FLEET_DIST_CACHE: Dict[Tuple[str, str], Dict[str, float]] = {}
-# Request-scoped in-memory cache for fleet telematics: (date_from, date_to) -> {unit_name: telematics_dict}
-_FLEET_TELEMATICS_CACHE: Dict[Tuple[str, str], Dict[str, Dict[str, Any]]] = {}
+TELEMATICS_TTL_LIVE_S = 120      # ranges ending today or later (data still changing)
+TELEMATICS_TTL_CLOSED_S = 3600   # ranges fully in the past
+TELEMATICS_TTL_PARTIAL_S = 30    # incomplete bundles: retry soon
+
+# Fleet telematics bundles keyed by (date_from, date_to)
+_TELEMATICS_CACHE = TTLCache(max_entries=128)
+# Per-unit trip lists keyed by (unit_id, date_from, date_to), for actual per-period trend distance
+_UNIT_TRIPS_CACHE = TTLCache(max_entries=2048)
 
 
 def clear_distance_cache() -> None:
     """Clear in-memory distance and telematics cache."""
-    _FLEET_DIST_CACHE.clear()
-    _FLEET_TELEMATICS_CACHE.clear()
+    _TELEMATICS_CACHE.clear()
+    _UNIT_TRIPS_CACHE.clear()
 
 
 def normalize_alphanumeric(val: Any) -> str:
@@ -44,7 +58,7 @@ def extract_plate_tokens(val: Any) -> List[str]:
         return []
     s = str(val).strip()
     tokens = [t.lower() for t in re.split(r"[\s\-_/]+", s) if t]
-    
+
     # Extract trailing digits (e.g. '13-AUH-30561' -> '30561', 'T-DXB-15770' -> '15770')
     trailing = re.search(r"(\d+)$", s)
     if trailing:
@@ -146,17 +160,256 @@ def match_fuel_vehicle_to_wialon(
     return None
 
 
+# ─── Report execution helpers ──────────────────────────────────────────────────
+
+def _run_report_with_retry(report_fn: Callable[..., Any], sid: str, *args, **kwargs) -> Tuple[Any, str]:
+    """Run a report; on WialonAPIError re-login once and retry. A second failure propagates (HTTP 502)."""
+    try:
+        return report_fn(sid, *args, **kwargs), sid
+    except WialonAPIError:
+        # Re-login while holding the report lock so no other thread's in-flight report (which reads
+        # its result rows from the current session) has its session replaced mid-report.
+        with _report_lock:
+            fresh_sid = login(force=True)
+        return report_fn(fresh_sid, *args, **kwargs), fresh_sid
+
+
+def _hours(seconds: Optional[int]) -> Optional[float]:
+    return round(seconds / 3600.0, 2) if seconds is not None else None
+
+
+def _ttl_for_bundle(date_to: str, bundle: Dict[str, Any]) -> float:
+    # Only whole-report problems (an empty report) are worth retrying soon. Unit-level gaps still mark
+    # the bundle "partial" for callers but use the normal TTL, so one silent unit cannot force a refetch
+    # of both group reports every 30 seconds.
+    if bundle.get("errors"):
+        return get_env_int("FUEL_TELEMATICS_TTL_PARTIAL_S", TELEMATICS_TTL_PARTIAL_S)
+    if str(date_to)[:10] >= get_uae_now().date().isoformat():
+        return get_env_int("FUEL_TELEMATICS_TTL_LIVE_S", TELEMATICS_TTL_LIVE_S)
+    return get_env_int("FUEL_TELEMATICS_TTL_CLOSED_S", TELEMATICS_TTL_CLOSED_S)
+
+
+def _empty_entry(name: str) -> Dict[str, Any]:
+    return {
+        "vehicle_name": name,
+        "mileage_km": None,
+        "driving_seconds": None,
+        "idle_seconds": None,
+        "engine_hours_seconds": None,
+        "total_time_seconds": None,
+        "driving_hours": None,
+        "idle_hours": None,
+        "engine_hours": None,
+        "total_time_hours": None,
+        "has_telemetry": False,
+        "distance_source": None,
+        "in_trips_report": False,
+        "in_engine_report": False,
+        "incomplete_fields": [],
+    }
+
+
+def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[str]) -> Dict[str, Any]:
+    from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
+    current_sid = sid or login()
+    errors: List[str] = []
+    warnings: List[str] = []
+    duplicate_names = set()
+    by_name: Dict[str, Dict[str, Any]] = {}
+    column_fallbacks: List[str] = []
+
+    def note(msgs):
+        for m in msgs or []:
+            if m not in warnings:
+                warnings.append(m)
+            if m not in column_fallbacks:
+                column_fallbacks.append(m)
+
+    # 1. Group Trips report: authoritative distance
+    group_trips, current_sid = _run_report_with_retry(execute_wialon_group_trips_report, current_sid, from_ts, to_ts)
+    if not group_trips:
+        errors.append("group_trips_empty")
+    for row in group_trips or []:
+        name = str(row.get("vehicle_name", "")).strip()
+        if not name:
+            continue
+        if name in by_name:
+            duplicate_names.add(name)
+            continue
+        entry = _empty_entry(name)
+        entry["in_trips_report"] = True
+        if "mileage_km" in (row.get("incomplete_fields") or []):
+            entry["incomplete_fields"].append("mileage_km")
+        else:
+            entry["mileage_km"] = float(row.get("mileage_km", 0.0))
+            entry["distance_source"] = "wialon_group_trips_report"
+        note(row.get("column_warnings"))
+        by_name[name] = entry
+
+    # 2. Group Engine & Idling report: authoritative engine / in-motion / idle durations
+    group_engine, current_sid = _run_report_with_retry(
+        execute_wialon_group_engine_idle_report,
+        current_sid,
+        from_ts,
+        to_ts,
+        group_id=GROUP_ID_ALL_UNITS,
+        include_events=False,
+    )
+    engine_rows = (group_engine or {}).get("vehicles") or []
+    if not engine_rows:
+        errors.append("group_engine_empty")
+    note((group_engine or {}).get("column_warnings"))
+    engine_seen = set()
+    for row in engine_rows:
+        name = str(row.get("vehicle_name", "")).strip()
+        if not name:
+            continue
+        if name in engine_seen:
+            duplicate_names.add(name)
+            continue
+        engine_seen.add(name)
+        incomplete = set(row.get("incomplete_fields") or [])
+        entry = by_name.get(name)
+        if entry is None:
+            # Present in the engine report but not the trips report: use the engine report's own mileage
+            entry = _empty_entry(name)
+            if row.get("mileage_km") is not None:
+                entry["mileage_km"] = float(row["mileage_km"])
+                entry["distance_source"] = "wialon_group_engine_report"
+            else:
+                entry["incomplete_fields"].append("mileage_km")
+            by_name[name] = entry
+        entry["in_engine_report"] = True
+        for key, field in (("in_motion_seconds", "driving_seconds"), ("total_idle_seconds", "idle_seconds"),
+                           ("engine_hours_seconds", "engine_hours_seconds"), ("total_time_seconds", "total_time_seconds")):
+            if key in incomplete:
+                entry[field] = None
+                entry["incomplete_fields"].append(field)
+            else:
+                entry[field] = int(row.get(key, 0))
+        entry["driving_hours"] = _hours(entry["driving_seconds"])
+        entry["idle_hours"] = _hours(entry["idle_seconds"])
+        entry["engine_hours"] = _hours(entry["engine_hours_seconds"])
+        entry["total_time_hours"] = _hours(entry["total_time_seconds"])
+
+    # 3. Units only in the trips report have no engine data: their hours are unknown, not zero
+    for entry in by_name.values():
+        if not entry["in_engine_report"] and engine_rows:
+            entry["incomplete_fields"].append("not_in_engine_report")
+        entry["has_telemetry"] = any(
+            (entry.get(k) or 0) > 0 for k in ("mileage_km", "driving_seconds", "idle_seconds", "engine_hours_seconds")
+        )
+
+    # 4. Duplicate unit names cannot be attributed: withhold their telemetry entirely
+    for name in duplicate_names:
+        by_name.pop(name, None)
+    if duplicate_names:
+        warnings.append(
+            f"Wialon reports contain duplicate unit names ({', '.join(sorted(duplicate_names))}); their telemetry is withheld."
+        )
+
+    incomplete_units = sorted(n for n, e in by_name.items() if e["incomplete_fields"])
+    if incomplete_units:
+        warnings.append(f"Telematics incomplete for {len(incomplete_units)} unit(s): {', '.join(incomplete_units[:20])}")
+    if "group_engine_empty" in errors:
+        warnings.append("Wialon engine report returned no rows; driving, idle and engine hours are unavailable.")
+    if "group_trips_empty" in errors:
+        warnings.append("Wialon trips report returned no rows; distance is taken only from the engine report where available.")
+
+    # A column read by historical position (header name not found) is unverified, so not "complete"
+    status = "complete" if not (errors or duplicate_names or incomplete_units or column_fallbacks) else "partial"
+    return {
+        "by_name": by_name,
+        "duplicate_names": sorted(duplicate_names),
+        "status": status,
+        "errors": errors,
+        "warnings": warnings,
+        "column_fallbacks": column_fallbacks,
+        "date_from": date_from,
+        "date_to": date_to,
+        "fetched_at_utc": now_timestamp(),
+    }
+
+
+def get_fleet_telematics_bundle(
+    date_from: str,
+    date_to: str,
+    sid: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Fleet telematics for [date_from, date_to] (UAE days) plus completeness metadata:
+      {"by_name": {unit_name: entry}, "duplicate_names": [...], "status": "complete"|"partial",
+       "errors": [...], "warnings": [...], "fetched_at_utc": int}
+    Entries carry None for any metric Wialon did not report readably.
+    Raises WialonAPIError when a report fails after one re-login retry.
+    """
+    return _TELEMATICS_CACHE.get_or_compute(
+        (date_from, date_to),
+        lambda: _build_fleet_telematics_bundle(date_from, date_to, sid),
+        lambda bundle: _ttl_for_bundle(date_to, bundle),
+    )
+
+
+def _fetch_unit_trips(unit_id: int, date_from: str, date_to: str, sid: Optional[str]) -> Dict[str, Any]:
+    """
+    One unit's Wialon trips (template 4) for the range: {status, trips[{start_time, end_time, distance_km}], error}.
+    status: complete | partial (a trip distance was unreadable; that trip's distance_km is None) |
+    failed (report failed after one re-login; never treated as 0 km).
+    """
+    from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
+    try:
+        rep, _ = _run_report_with_retry(execute_wialon_unit_trips_report, sid or login(), int(unit_id), from_ts, to_ts)
+    except WialonAPIError as exc:
+        return {"status": "failed", "trips": [], "error": str(exc)}
+    rep = rep or {}
+    trips = []
+    partial = bool(rep.get("column_warnings")) or bool(rep.get("incomplete_fields"))
+    for t in rep.get("trips") or []:
+        unreadable = "distance_km" in (t.get("incomplete_fields") or [])
+        partial = partial or unreadable
+        trips.append({
+            "start_time": t.get("start_time"),
+            "end_time": t.get("end_time"),
+            "distance_km": None if unreadable else float(t.get("distance_km") or 0.0),
+        })
+    return {"status": "partial" if partial else "complete", "trips": trips, "error": None}
+
+
+def _ttl_for_unit_trips(date_to: str, result: Dict[str, Any]) -> float:
+    if result.get("status") == "failed":
+        return get_env_int("FUEL_TELEMATICS_TTL_PARTIAL_S", TELEMATICS_TTL_PARTIAL_S)
+    return _ttl_for_bundle(date_to, {})
+
+
+def get_units_trips_for_range(
+    unit_ids: List[int], date_from: str, date_to: str, sid: Optional[str] = None
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Trips per Wialon unit id over [date_from, date_to] (UAE days), fetched once per unit and cached, so day,
+    week and month groupings reuse the same reports. Reports run serially under the shared report lock.
+    A unit whose report fails is returned as status 'failed' - callers must not count it as 0 km.
+    """
+    out: Dict[int, Dict[str, Any]] = {}
+    for uid in sorted({int(u) for u in unit_ids}):
+        out[uid] = _UNIT_TRIPS_CACHE.get_or_compute(
+            (uid, date_from, date_to),
+            lambda uid=uid: _fetch_unit_trips(uid, date_from, date_to, sid),
+            lambda r: _ttl_for_unit_trips(date_to, r),
+        )
+    return out
+
+
 def get_fleet_distances_map(
     date_from: str,
     date_to: str,
     sid: Optional[str] = None
 ) -> Dict[str, float]:
     """
-    Retrieves distances for all fleet units in 1 single Wialon call using the Group Trips Report.
-    Returns: {wialon_unit_name: mileage_km}
+    Fleet distances {wialon_unit_name: mileage_km} for units whose distance Wialon reported readably.
+    Units with unknown distance are omitted (treated as unknown downstream), never set to 0.
     """
     telematics = get_fleet_telematics_map(date_from, date_to, sid)
-    return {k: v.get("mileage_km", 0.0) for k, v in telematics.items()}
+    return {k: v["mileage_km"] for k, v in telematics.items() if v.get("mileage_km") is not None}
 
 
 def get_fleet_telematics_map(
@@ -167,115 +420,10 @@ def get_fleet_telematics_map(
     """
     Retrieves authoritative distance, driving duration, idling duration, and engine hours
     for all fleet units in unified cached calls using Wialon Group Reports.
-    Returns: {wialon_unit_name: {"mileage_km": float, "driving_seconds": int, "idle_seconds": int, "engine_hours_seconds": int, "total_time_seconds": int, ...}}
+    Returns: {wialon_unit_name: {"mileage_km", "driving_seconds", "idle_seconds", "engine_hours_seconds", ...}}
+    with None for metrics that are unavailable (see get_fleet_telematics_bundle for status/warnings).
     """
-    cache_key = (date_from, date_to)
-    if cache_key in _FLEET_TELEMATICS_CACHE:
-        return _FLEET_TELEMATICS_CACHE[cache_key]
-
-    from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
-    current_sid = sid or login()
-
-    telematics_map: Dict[str, Dict[str, Any]] = {}
-
-    # 1. Fetch Group Trips for mileage & motion
-    try:
-        group_trips = execute_wialon_group_trips_report(current_sid, from_ts, to_ts)
-    except WialonAPIError:
-        current_sid = login(force=True)
-        group_trips = execute_wialon_group_trips_report(current_sid, from_ts, to_ts)
-    except Exception as exc:
-        logger.warning("Group trips report error: %s", exc)
-        group_trips = []
-
-    if group_trips:
-        for row in group_trips:
-            v_name = str(row.get("vehicle_name", "")).strip()
-            if not v_name:
-                continue
-            dist_km = float(row.get("mileage_km", 0.0))
-            telematics_map[v_name] = {
-                "vehicle_name": v_name,
-                "mileage_km": dist_km,
-                "driving_seconds": 0,
-                "idle_seconds": 0,
-                "engine_hours_seconds": 0,
-                "total_time_seconds": 0,
-                "driving_hours": 0.0,
-                "idle_hours": 0.0,
-                "engine_hours": 0.0,
-                "total_time_hours": 0.0,
-                "has_telemetry": dist_km > 0,
-            }
-
-    # 2. Fetch Group Engine & Idling Report
-    try:
-        group_engine = execute_wialon_group_engine_idle_report(
-            sid=current_sid,
-            from_time_utc=from_ts,
-            to_time_utc=to_ts,
-            group_id=GROUP_ID_ALL_UNITS,
-            include_events=False
-        )
-    except WialonAPIError:
-        current_sid = login(force=True)
-        group_engine = execute_wialon_group_engine_idle_report(
-            sid=current_sid,
-            from_time_utc=from_ts,
-            to_time_utc=to_ts,
-            group_id=GROUP_ID_ALL_UNITS,
-            include_events=False
-        )
-    except Exception as exc:
-        logger.warning("Group engine report error: %s", exc)
-        group_engine = None
-
-    if group_engine and group_engine.get("vehicles"):
-        for row in group_engine.get("vehicles", []):
-            v_name = str(row.get("vehicle_name", "")).strip()
-            if not v_name:
-                continue
-            
-            in_motion_sec = int(row.get("in_motion_seconds", 0))
-            idle_sec = int(row.get("total_idle_seconds", 0))
-            engine_sec = int(row.get("engine_hours_seconds", 0))
-            total_sec = int(row.get("total_time_seconds", 0))
-
-            if v_name not in telematics_map:
-                # Extract mileage if available
-                m_str = str(row.get("mileage_str", "")).replace("km", "").strip()
-                try:
-                    dist_km = float(m_str)
-                except ValueError:
-                    dist_km = 0.0
-                telematics_map[v_name] = {
-                    "vehicle_name": v_name,
-                    "mileage_km": dist_km,
-                    "driving_seconds": in_motion_sec,
-                    "idle_seconds": idle_sec,
-                    "engine_hours_seconds": engine_sec,
-                    "total_time_seconds": total_sec,
-                    "driving_hours": round(in_motion_sec / 3600.0, 2),
-                    "idle_hours": round(idle_sec / 3600.0, 2),
-                    "engine_hours": round(engine_sec / 3600.0, 2),
-                    "total_time_hours": round(total_sec / 3600.0, 2),
-                    "has_telemetry": (dist_km > 0 or engine_sec > 0),
-                }
-            else:
-                telematics_map[v_name]["driving_seconds"] = in_motion_sec
-                telematics_map[v_name]["idle_seconds"] = idle_sec
-                telematics_map[v_name]["engine_hours_seconds"] = engine_sec
-                telematics_map[v_name]["total_time_seconds"] = total_sec
-                telematics_map[v_name]["driving_hours"] = round(in_motion_sec / 3600.0, 2)
-                telematics_map[v_name]["idle_hours"] = round(idle_sec / 3600.0, 2)
-                telematics_map[v_name]["engine_hours"] = round(engine_sec / 3600.0, 2)
-                telematics_map[v_name]["total_time_hours"] = round(total_sec / 3600.0, 2)
-                if in_motion_sec > 0 or idle_sec > 0 or engine_sec > 0:
-                    telematics_map[v_name]["has_telemetry"] = True
-
-    _FLEET_TELEMATICS_CACHE[cache_key] = telematics_map
-    _FLEET_DIST_CACHE[cache_key] = {k: v.get("mileage_km", 0.0) for k, v in telematics_map.items()}
-    return telematics_map
+    return get_fleet_telematics_bundle(date_from, date_to, sid)["by_name"]
 
 
 def get_vehicle_distance(
@@ -287,15 +435,14 @@ def get_vehicle_distance(
     """
     Authoritatively retrieves vehicle distance traveled over a date range directly
     from Wialon's native Trips Report engine for a single unit.
+    Raises WialonAPIError if any trip's distance could not be read (no partial sum is returned).
     """
     from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
     current_sid = sid or login()
 
-    try:
-        rep_result = execute_wialon_unit_trips_report(current_sid, int(wialon_unit_id), from_ts, to_ts)
-    except WialonAPIError:
-        current_sid = login(force=True)
-        rep_result = execute_wialon_unit_trips_report(current_sid, int(wialon_unit_id), from_ts, to_ts)
+    rep_result, current_sid = _run_report_with_retry(
+        execute_wialon_unit_trips_report, current_sid, int(wialon_unit_id), from_ts, to_ts
+    )
 
     if not rep_result:
         return {
@@ -307,6 +454,9 @@ def get_vehicle_distance(
             "trip_count": 0,
             "has_data": False,
         }
+
+    if "distance_km" in (rep_result.get("incomplete_fields") or []):
+        raise WialonAPIError(f"Wialon trips report for unit {wialon_unit_id} contains unreadable trip distances")
 
     trips = rep_result.get("trips", [])
     total_km = sum(float(t.get("distance_km", 0.0)) for t in trips)
@@ -333,44 +483,68 @@ def get_vehicle_telematics_detail(
     """
     Authoritatively retrieves complete telematics detail (trips, engine hours, idle segments)
     for a single unit.
+
+    - Distance: sum of Wialon trip distances (None if any trip distance is unreadable).
+    - Driving hours: the engine report's "In motion" time (None if unavailable). Trip "Total time"
+      includes stops and is never used as driving time.
+    - Idle / engine hours: engine report (None if unreadable).
+    A report that still fails after one re-login propagates WialonAPIError (HTTP 502).
     """
     from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
     current_sid = sid or login()
 
-    # 1. Trips report
-    try:
-        trips_rep = execute_wialon_unit_trips_report(current_sid, int(wialon_unit_id), from_ts, to_ts)
-    except Exception:
-        trips_rep = None
+    trips_rep, current_sid = _run_report_with_retry(
+        execute_wialon_unit_trips_report, current_sid, int(wialon_unit_id), from_ts, to_ts
+    )
+    engine_rep, current_sid = _run_report_with_retry(
+        execute_wialon_unit_engine_report, current_sid, int(wialon_unit_id), from_ts, to_ts
+    )
 
-    # 2. Engine & Idle report
-    try:
-        engine_rep = execute_wialon_unit_engine_report(current_sid, int(wialon_unit_id), from_ts, to_ts)
-    except Exception:
-        engine_rep = None
+    warnings: List[str] = []
+    for rep in (trips_rep, engine_rep):
+        for w in (rep or {}).get("column_warnings") or []:
+            if w not in warnings:
+                warnings.append(w)
+    column_fallback = bool(warnings)
 
     trips = trips_rep.get("trips", []) if trips_rep else []
-    total_distance_km = sum(float(t.get("distance_km", 0.0)) for t in trips)
-    moving_duration_minutes = sum(float(t.get("duration_minutes", 0.0)) for t in trips)
+    trips_incomplete = "distance_km" in ((trips_rep or {}).get("incomplete_fields") or [])
+    total_distance_km = None if trips_incomplete else round(sum(float(t.get("distance_km", 0.0)) for t in trips), 2)
+    if trips_incomplete:
+        warnings.append("One or more Wialon trip distances could not be read; distance unavailable.")
 
-    total_idle_seconds = engine_rep.get("total_idle_seconds", 0) if engine_rep else 0
-    total_engine_seconds = engine_rep.get("total_engine_seconds", 0) if engine_rep else 0
-    idle_events = engine_rep.get("idle_events", []) if engine_rep else []
+    engine_incomplete = set((engine_rep or {}).get("incomplete_fields") or [])
+    total_idle_seconds = None if "idle_seconds" in engine_incomplete else (engine_rep or {}).get("total_idle_seconds", 0)
+    total_engine_seconds = None if "engine_hours" in engine_incomplete else (engine_rep or {}).get("total_engine_seconds", 0)
+    in_motion_seconds = (engine_rep or {}).get("total_in_motion_seconds")
+    idle_events = (engine_rep or {}).get("idle_events", [])
+    if engine_rep is not None and not engine_rep.get("rows_total"):
+        warnings.append("Wialon engine report returned no rows for this unit in the selected period.")
+    if in_motion_seconds is None:
+        warnings.append("Wialon 'In motion' time unavailable; driving hours not reported.")
+    if total_idle_seconds is None or total_engine_seconds is None:
+        warnings.append("Wialon engine/idle durations could not be read; those values are unavailable.")
 
     total_interval_seconds = max(0, to_ts - from_ts)
-    stopped_seconds = max(0, total_interval_seconds - total_engine_seconds)
+    stopped_seconds = max(0, total_interval_seconds - total_engine_seconds) if total_engine_seconds is not None else None
+
+    unavailable = column_fallback or any(
+        v is None for v in (total_distance_km, in_motion_seconds, total_idle_seconds, total_engine_seconds)
+    )
 
     return {
-        "distance_km": round(total_distance_km, 2),
+        "distance_km": total_distance_km,
         "trip_count": len(trips),
-        "driving_duration_hours": round(moving_duration_minutes / 60.0, 2),
-        "idle_duration_hours": round(total_idle_seconds / 3600.0, 2),
-        "engine_hours": round(total_engine_seconds / 3600.0, 2),
-        "stopped_hours": round(stopped_seconds / 3600.0, 2),
+        "driving_duration_hours": _hours(in_motion_seconds),
+        "idle_duration_hours": _hours(total_idle_seconds),
+        "engine_hours": _hours(total_engine_seconds),
+        "stopped_hours": _hours(stopped_seconds),
         "idle_events_count": len(idle_events),
         "idle_events": idle_events,
         "trips": trips,
-        "has_data": (len(trips) > 0 or total_engine_seconds > 0),
+        "has_data": (len(trips) > 0 or (total_engine_seconds or 0) > 0),
+        "status": "partial" if unavailable else "complete",
+        "driving_basis": "engine_report_in_motion" if in_motion_seconds is not None else "unavailable",
+        "distance_source": "wialon_unit_trips_report" if total_distance_km is not None else "unavailable",
+        "warnings": warnings,
     }
-
-

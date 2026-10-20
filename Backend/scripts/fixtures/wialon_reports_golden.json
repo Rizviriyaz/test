@@ -1,0 +1,1132 @@
+{
+ "GET /api/dashboard/mileage": {
+  "all_units": [
+   {
+    "avg_speed": "45 km/h",
+    "driver": "",
+    "engine_hours": "8:00:00",
+    "group": "Logistics",
+    "groups": [
+     "Logistics"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 1234.5,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "avg_speed": "45 km/h",
+    "driver": "Ali",
+    "engine_hours": "8:00:00",
+    "group": "Logistics",
+    "groups": [
+     "Logistics"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 250.75,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "avg_speed": "45 km/h",
+    "driver": "Driver",
+    "engine_hours": "8:00:00",
+    "group": "Contracts",
+    "groups": [
+     "Contracts"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 0.0,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ],
+  "available_units": 3,
+  "average_km": 495.08,
+  "effective_from": 1785715200,
+  "effective_to": 1785974399,
+  "timeframe": "custom",
+  "timezone": "Asia/Dubai",
+  "top_units": [
+   {
+    "avg_speed": "45 km/h",
+    "driver": "",
+    "engine_hours": "8:00:00",
+    "group": "Logistics",
+    "groups": [
+     "Logistics"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 1234.5,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "avg_speed": "45 km/h",
+    "driver": "Ali",
+    "engine_hours": "8:00:00",
+    "group": "Logistics",
+    "groups": [
+     "Logistics"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 250.75,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "avg_speed": "45 km/h",
+    "driver": "Driver",
+    "engine_hours": "8:00:00",
+    "group": "Contracts",
+    "groups": [
+     "Contracts"
+    ],
+    "max_speed": "110 km/h",
+    "mileage": 0.0,
+    "source": "wialon_native_report",
+    "total_time": "10:00:00",
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ],
+  "total_km": 1485.25
+ },
+ "GET /api/fleet/trips": {
+  "by_group": [
+   {
+    "distance_km": 1485.25,
+    "group": "Logistics",
+    "trips": 2,
+    "vehicle_count": 2
+   },
+   {
+    "distance_km": 0.0,
+    "group": "Contracts",
+    "trips": 0,
+    "vehicle_count": 1
+   }
+  ],
+  "from_time": 1785715200,
+  "period_hours": 71,
+  "summary": {
+   "average_trip_distance_km": 742.62,
+   "average_trip_duration_minutes": 0,
+   "fleet_max_speed_kmh": 110.0,
+   "longest_trip_km": 1234.5,
+   "total_distance_km": 1485.25,
+   "total_hardware_distance_km": null,
+   "total_trips": 2
+  },
+  "to_time": 1785974399,
+  "vehicles": [
+   {
+    "avg_speed_kmh": 45.0,
+    "cumulative_odometer_km": 88000.0,
+    "gps_mileage_km": 1234.5,
+    "group": "Logistics",
+    "hardware_mileage_km": null,
+    "max_speed_kmh": 110.0,
+    "trip_count": 1,
+    "trips": [],
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "avg_speed_kmh": 45.0,
+    "cumulative_odometer_km": 120345.6,
+    "gps_mileage_km": 250.75,
+    "group": "Logistics",
+    "hardware_mileage_km": null,
+    "max_speed_kmh": 110.0,
+    "trip_count": 1,
+    "trips": [],
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "avg_speed_kmh": 45.0,
+    "cumulative_odometer_km": null,
+    "gps_mileage_km": 0.0,
+    "group": "Contracts",
+    "hardware_mileage_km": null,
+    "max_speed_kmh": 110.0,
+    "trip_count": 0,
+    "trips": [],
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ]
+ },
+ "GET /api/fleet/utilization": {
+  "driving_to_idle_ratio": 4.53,
+  "fleet_utilization_pct": 17.4,
+  "hours": 24,
+  "total_driving_hours": 12.5,
+  "total_engine_on_hours": 15.3,
+  "total_idle_hours": 2.8,
+  "vehicles": [
+   {
+    "connection_status": "STABLE",
+    "driving_minutes": 480.0,
+    "driving_seconds": 28800,
+    "driving_to_idle_ratio": 6.36,
+    "engine_on_minutes": 555.5,
+    "engine_on_seconds": 33330,
+    "group": "Logistics",
+    "idle_minutes": 75.5,
+    "idle_seconds": 4530,
+    "is_offline": false,
+    "status": "MOVING",
+    "stopped_minutes": 884.5,
+    "stopped_seconds": 53070,
+    "trip_count": 1,
+    "utilization_percentage": 33.3,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "connection_status": "STABLE",
+    "driving_minutes": 270.0,
+    "driving_seconds": 16200,
+    "driving_to_idle_ratio": 3.0,
+    "engine_on_minutes": 360.0,
+    "engine_on_seconds": 21600,
+    "group": "Logistics",
+    "idle_minutes": 90.0,
+    "idle_seconds": 5400,
+    "is_offline": false,
+    "status": "IDLING",
+    "stopped_minutes": 1080.0,
+    "stopped_seconds": 64800,
+    "trip_count": 1,
+    "utilization_percentage": 18.8,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "connection_status": "STABLE",
+    "driving_minutes": 0.0,
+    "driving_seconds": 0,
+    "driving_to_idle_ratio": 0.0,
+    "engine_on_minutes": 0.0,
+    "engine_on_seconds": 0,
+    "group": "Contracts",
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "is_offline": false,
+    "status": "STOPPED",
+    "stopped_minutes": 1440.0,
+    "stopped_seconds": 86400,
+    "trip_count": 0,
+    "utilization_percentage": 0.0,
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ]
+ },
+ "GET /api/idle/fleet-analytics": {
+  "by_group": [
+   {
+    "average_idle_minutes": 41.38,
+    "currently_idling": 1,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 4,
+    "idle_minutes": 165.5,
+    "total_idle_seconds": 9930,
+    "vehicle_count": 2
+   },
+   {
+    "average_idle_minutes": 0,
+    "currently_idling": 0,
+    "group_id": 8,
+    "group_name": "Contracts",
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "total_idle_seconds": 0,
+    "vehicle_count": 1
+   }
+  ],
+  "by_location": [
+   {
+    "event_count": 1,
+    "idle_minutes": 75.5,
+    "label": "UNIT-B start",
+    "latitude": 25.2,
+    "location_key": "25.2,55.27",
+    "longitude": 55.27,
+    "total_idle_seconds": 4530,
+    "vehicle_count": 1,
+    "vehicles": [
+     "UNIT-B"
+    ]
+   },
+   {
+    "event_count": 1,
+    "idle_minutes": 30.0,
+    "label": "Hotspot 0",
+    "latitude": 25.1,
+    "location_key": "25.1,55.4",
+    "longitude": 55.4,
+    "total_idle_seconds": 1800,
+    "vehicle_count": 1,
+    "vehicles": [
+     "UNIT-A"
+    ]
+   },
+   {
+    "event_count": 1,
+    "idle_minutes": 30.0,
+    "label": "Hotspot 1",
+    "latitude": 25.1,
+    "location_key": "25.1,55.41",
+    "longitude": 55.41,
+    "total_idle_seconds": 1800,
+    "vehicle_count": 1,
+    "vehicles": [
+     "UNIT-A"
+    ]
+   },
+   {
+    "event_count": 1,
+    "idle_minutes": 30.0,
+    "label": "Hotspot 2",
+    "latitude": 25.1,
+    "location_key": "25.1,55.42",
+    "longitude": 55.42,
+    "total_idle_seconds": 1800,
+    "vehicle_count": 1,
+    "vehicles": [
+     "UNIT-A"
+    ]
+   }
+  ],
+  "by_vehicle": [
+   {
+    "engine_hours_seconds": 21600,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 3,
+    "idle_minutes": 90.0,
+    "longest_idle_seconds": 1800,
+    "registration_plate": "DXB 101",
+    "status": "IDLING",
+    "total_idle_seconds": 5400,
+    "total_time_seconds": 86400,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "engine_hours_seconds": 33330,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 1,
+    "idle_minutes": 75.5,
+    "longest_idle_seconds": 4530,
+    "registration_plate": "DXB 102",
+    "status": "MOVING",
+    "total_idle_seconds": 4530,
+    "total_time_seconds": 86400,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "engine_hours_seconds": 0,
+    "group_id": 8,
+    "group_name": "Contracts",
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "longest_idle_seconds": 0,
+    "registration_plate": "DXB 103",
+    "status": "STOPPED",
+    "total_idle_seconds": 0,
+    "total_time_seconds": 86400,
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ],
+  "events": [
+   {
+    "address": "Hotspot 2",
+    "bounded_end_time": 1785727800,
+    "bounded_start_time": 1785726000,
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785727800,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "101-1785726000",
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.42
+    },
+    "raw_end_time": 1785727800,
+    "raw_start_time": 1785726000,
+    "registration_plate": "DXB 101",
+    "start_time": 1785726000,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "Hotspot 1",
+    "bounded_end_time": 1785724200,
+    "bounded_start_time": 1785722400,
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785724200,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "101-1785722400",
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.41
+    },
+    "raw_end_time": 1785724200,
+    "raw_start_time": 1785722400,
+    "registration_plate": "DXB 101",
+    "start_time": 1785722400,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "Hotspot 0",
+    "bounded_end_time": 1785720600,
+    "bounded_start_time": 1785718800,
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785720600,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "101-1785718800",
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.4
+    },
+    "raw_end_time": 1785720600,
+    "raw_start_time": 1785718800,
+    "registration_plate": "DXB 101",
+    "start_time": 1785718800,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "UNIT-B start",
+    "bounded_end_time": 1785801200,
+    "bounded_start_time": 1785715200,
+    "duration": 4530,
+    "duration_minutes": 75.5,
+    "end_time": 1785801200,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "102-1785715200",
+    "location": {
+     "latitude": 25.2,
+     "longitude": 55.27
+    },
+    "raw_end_time": 1785801200,
+    "raw_start_time": 1785715200,
+    "registration_plate": "DXB 102",
+    "start_time": 1785715200,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   }
+  ],
+  "groups": [
+   {
+    "id": 7,
+    "name": "Logistics",
+    "vehicle_count": 2
+   },
+   {
+    "id": 8,
+    "name": "Contracts",
+    "vehicle_count": 1
+   }
+  ],
+  "kpis": {
+   "average_idle_seconds": 2482.5,
+   "currently_idling_vehicles": 1,
+   "highest_idle_event": {
+    "address": "UNIT-B start",
+    "bounded_end_time": 1785801200,
+    "bounded_start_time": 1785715200,
+    "duration": 4530,
+    "duration_minutes": 75.5,
+    "end_time": 1785801200,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "102-1785715200",
+    "location": {
+     "latitude": 25.2,
+     "longitude": 55.27
+    },
+    "raw_end_time": 1785801200,
+    "raw_start_time": 1785715200,
+    "registration_plate": "DXB 102",
+    "start_time": 1785715200,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   "idle_event_count": 4,
+   "idling_fleet_ratio": 33.3,
+   "longest_idle_event": {
+    "address": "UNIT-B start",
+    "bounded_end_time": 1785801200,
+    "bounded_start_time": 1785715200,
+    "duration": 4530,
+    "duration_minutes": 75.5,
+    "end_time": 1785801200,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "id": "102-1785715200",
+    "location": {
+     "latitude": 25.2,
+     "longitude": 55.27
+    },
+    "raw_end_time": 1785801200,
+    "raw_start_time": 1785715200,
+    "registration_plate": "DXB 102",
+    "start_time": 1785715200,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   "longest_idle_registration_plate": "DXB 102",
+   "longest_idle_seconds": 4530,
+   "longest_idle_vehicle_id": 102,
+   "longest_idle_vehicle_name": "UNIT-B",
+   "total_idle_hours": 2.76,
+   "total_idle_minutes": 165.5,
+   "total_idle_seconds": 9930,
+   "total_idle_vehicles": 2,
+   "total_vehicles": 3
+  },
+  "timeframe": {
+   "from_time": 1785715200,
+   "hours": 24,
+   "timeframe": null,
+   "to_time": 1785974399
+  },
+  "trend": [
+   {
+    "event_count": 4,
+    "idle_minutes": 165.5,
+    "idle_seconds": 9930,
+    "label": "Aug 03",
+    "timestamp": 1785715200
+   },
+   {
+    "event_count": 0,
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "label": "Aug 04",
+    "timestamp": 1785801600
+   },
+   {
+    "event_count": 0,
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "label": "Aug 05",
+    "timestamp": 1785888000
+   }
+  ]
+ },
+ "GET /api/idle/fleet-analytics?include_events=false": {
+  "by_group": [
+   {
+    "average_idle_minutes": 82.75,
+    "currently_idling": 1,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 2,
+    "idle_minutes": 165.5,
+    "total_idle_seconds": 9930,
+    "vehicle_count": 2
+   },
+   {
+    "average_idle_minutes": 0,
+    "currently_idling": 0,
+    "group_id": 8,
+    "group_name": "Contracts",
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "total_idle_seconds": 0,
+    "vehicle_count": 1
+   }
+  ],
+  "by_location": [],
+  "by_vehicle": [
+   {
+    "engine_hours_seconds": 21600,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 1,
+    "idle_minutes": 90.0,
+    "longest_idle_seconds": 0,
+    "registration_plate": "DXB 101",
+    "status": "IDLING",
+    "total_idle_seconds": 5400,
+    "total_time_seconds": 86400,
+    "vehicle_id": 101,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "engine_hours_seconds": 33330,
+    "group_id": 7,
+    "group_name": "Logistics",
+    "idle_events": 1,
+    "idle_minutes": 75.5,
+    "longest_idle_seconds": 0,
+    "registration_plate": "DXB 102",
+    "status": "MOVING",
+    "total_idle_seconds": 4530,
+    "total_time_seconds": 86400,
+    "vehicle_id": 102,
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "engine_hours_seconds": 0,
+    "group_id": 8,
+    "group_name": "Contracts",
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "longest_idle_seconds": 0,
+    "registration_plate": "DXB 103",
+    "status": "STOPPED",
+    "total_idle_seconds": 0,
+    "total_time_seconds": 86400,
+    "vehicle_id": 103,
+    "vehicle_name": "UNIT-C"
+   }
+  ],
+  "events": [],
+  "groups": [
+   {
+    "id": 7,
+    "name": "Logistics",
+    "vehicle_count": 2
+   },
+   {
+    "id": 8,
+    "name": "Contracts",
+    "vehicle_count": 1
+   }
+  ],
+  "kpis": {
+   "average_idle_seconds": 0,
+   "currently_idling_vehicles": 1,
+   "highest_idle_event": null,
+   "idle_event_count": 0,
+   "idling_fleet_ratio": 33.3,
+   "longest_idle_event": null,
+   "longest_idle_registration_plate": null,
+   "longest_idle_seconds": 0,
+   "longest_idle_vehicle_id": null,
+   "longest_idle_vehicle_name": null,
+   "total_idle_hours": 2.76,
+   "total_idle_minutes": 165.5,
+   "total_idle_seconds": 9930,
+   "total_idle_vehicles": 2,
+   "total_vehicles": 3
+  },
+  "timeframe": {
+   "from_time": 1785715200,
+   "hours": 24,
+   "timeframe": null,
+   "to_time": 1785974399
+  },
+  "trend": [
+   {
+    "event_count": 0,
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "label": "Aug 03",
+    "timestamp": 1785715200
+   },
+   {
+    "event_count": 0,
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "label": "Aug 04",
+    "timestamp": 1785801600
+   },
+   {
+    "event_count": 0,
+    "idle_minutes": 0.0,
+    "idle_seconds": 0,
+    "label": "Aug 05",
+    "timestamp": 1785888000
+   }
+  ]
+ },
+ "GET /api/vehicles/101/idle": {
+  "from_time": 1785715200,
+  "hours": 24,
+  "periods": [
+   {
+    "address": "Idle spot 0",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785717600,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.3
+    },
+    "start_time": 1785715800
+   },
+   {
+    "address": "Idle spot 1",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785722000,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.300999999999995
+    },
+    "start_time": 1785720200
+   },
+   {
+    "address": "Idle spot 2",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785804300,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.302
+    },
+    "start_time": 1785802500
+   }
+  ],
+  "summary": {
+   "average_idle_seconds": 1800.0,
+   "idle_periods": 3,
+   "longest_idle_seconds": 1800,
+   "total_engine_hours": 8.5,
+   "total_engine_seconds": 30600,
+   "total_idle_minutes": 90.0,
+   "total_idle_seconds": 5400
+  },
+  "timeframe": null,
+  "to_time": 1785974399,
+  "vehicle_id": 101
+ },
+ "GET /api/vehicles/101/trips": {
+  "from_time": 1785715200,
+  "hours": 24,
+  "to_time": 1785974399,
+  "trip_count": 3,
+  "trips": [
+   {
+    "average_speed": "31 km/h",
+    "distance_km": 10.5,
+    "duration": "0:35:00",
+    "duration_minutes": 35.0,
+    "duration_str": "0:35:00",
+    "end_latitude": 25.26,
+    "end_location": "To 1",
+    "end_longitude": 55.309999999999995,
+    "end_time": 1785724500,
+    "end_time_str": "end-1",
+    "max_speed": "81 km/h",
+    "moving_duration": "0:30:00",
+    "moving_duration_str": "0:30:00",
+    "start_latitude": 25.21,
+    "start_location": "From 1",
+    "start_longitude": 55.28,
+    "start_time": 1785722400,
+    "start_time_str": "start-1"
+   },
+   {
+    "average_speed": "32 km/h",
+    "distance_km": 21.0,
+    "duration": "0:40:00",
+    "duration_minutes": 40.0,
+    "duration_str": "0:40:00",
+    "end_latitude": 25.27,
+    "end_location": "To 2",
+    "end_longitude": 55.32,
+    "end_time": 1785732000,
+    "end_time_str": "end-2",
+    "max_speed": "82 km/h",
+    "moving_duration": "0:35:00",
+    "moving_duration_str": "0:35:00",
+    "start_latitude": 25.22,
+    "start_location": "From 2",
+    "start_longitude": 55.290000000000006,
+    "start_time": 1785729600,
+    "start_time_str": "start-2"
+   },
+   {
+    "average_speed": "33 km/h",
+    "distance_km": 31.5,
+    "duration": "0:45:00",
+    "duration_minutes": 45.0,
+    "duration_str": "0:45:00",
+    "end_latitude": 25.28,
+    "end_location": "To 3",
+    "end_longitude": 55.33,
+    "end_time": 1785739500,
+    "end_time_str": "end-3",
+    "max_speed": "83 km/h",
+    "moving_duration": "0:40:00",
+    "moving_duration_str": "0:40:00",
+    "start_latitude": 25.23,
+    "start_location": "From 3",
+    "start_longitude": 55.300000000000004,
+    "start_time": 1785736800,
+    "start_time_str": "start-3"
+   }
+  ],
+  "vehicle_id": 101
+ },
+ "execute_wialon_group_engine_idle_report(events)": {
+  "events": [
+   {
+    "address": "Hotspot 0",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785720600,
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.4
+    },
+    "start_time": 1785718800,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "Hotspot 1",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785724200,
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.41
+    },
+    "start_time": 1785722400,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "Hotspot 2",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785727800,
+    "location": {
+     "latitude": 25.1,
+     "longitude": 55.42
+    },
+    "start_time": 1785726000,
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "address": "UNIT-B start",
+    "duration": 4530,
+    "duration_minutes": 75.5,
+    "end_time": 1785801200,
+    "location": {
+     "latitude": 25.2,
+     "longitude": 55.27
+    },
+    "start_time": 1785715200,
+    "vehicle_name": "UNIT-B"
+   }
+  ],
+  "vehicles": [
+   {
+    "engine_hours_seconds": 21600,
+    "engine_hours_str": "6:00:00",
+    "events": [
+     {
+      "address": "Hotspot 0",
+      "duration": 1800,
+      "duration_minutes": 30.0,
+      "end_time": 1785720600,
+      "location": {
+       "latitude": 25.1,
+       "longitude": 55.4
+      },
+      "start_time": 1785718800,
+      "vehicle_name": "UNIT-A"
+     },
+     {
+      "address": "Hotspot 1",
+      "duration": 1800,
+      "duration_minutes": 30.0,
+      "end_time": 1785724200,
+      "location": {
+       "latitude": 25.1,
+       "longitude": 55.41
+      },
+      "start_time": 1785722400,
+      "vehicle_name": "UNIT-A"
+     },
+     {
+      "address": "Hotspot 2",
+      "duration": 1800,
+      "duration_minutes": 30.0,
+      "end_time": 1785727800,
+      "location": {
+       "latitude": 25.1,
+       "longitude": 55.42
+      },
+      "start_time": 1785726000,
+      "vehicle_name": "UNIT-A"
+     }
+    ],
+    "idle_events": 3,
+    "idle_minutes": 90.0,
+    "idling_str": "1:30:00",
+    "in_motion_seconds": 16200,
+    "in_motion_str": "4:30:00",
+    "longest_idle_seconds": 1800,
+    "mileage_str": "180.25 km",
+    "total_idle_seconds": 5400,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "engine_hours_seconds": 33330,
+    "engine_hours_str": "9:15:30",
+    "events": [
+     {
+      "address": "UNIT-B start",
+      "duration": 4530,
+      "duration_minutes": 75.5,
+      "end_time": 1785801200,
+      "location": {
+       "latitude": 25.2,
+       "longitude": 55.27
+      },
+      "start_time": 1785715200,
+      "vehicle_name": "UNIT-B"
+     }
+    ],
+    "idle_events": 1,
+    "idle_minutes": 75.5,
+    "idling_str": "1:15:30",
+    "in_motion_seconds": 28800,
+    "in_motion_str": "8:00:00",
+    "longest_idle_seconds": 4530,
+    "mileage_str": "640.00 km",
+    "total_idle_seconds": 4530,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "engine_hours_seconds": 0,
+    "engine_hours_str": "0:00:00",
+    "events": [],
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "idling_str": "0:00:00",
+    "in_motion_seconds": 0,
+    "in_motion_str": "0:00:00",
+    "longest_idle_seconds": 0,
+    "mileage_str": "0.00 km",
+    "total_idle_seconds": 0,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-C"
+   }
+  ]
+ },
+ "execute_wialon_group_engine_idle_report(summary)": {
+  "events": [],
+  "vehicles": [
+   {
+    "engine_hours_seconds": 21600,
+    "engine_hours_str": "6:00:00",
+    "events": [],
+    "idle_events": 1,
+    "idle_minutes": 90.0,
+    "idling_str": "1:30:00",
+    "in_motion_seconds": 16200,
+    "in_motion_str": "4:30:00",
+    "longest_idle_seconds": 0,
+    "mileage_str": "180.25 km",
+    "total_idle_seconds": 5400,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-A"
+   },
+   {
+    "engine_hours_seconds": 33330,
+    "engine_hours_str": "9:15:30",
+    "events": [],
+    "idle_events": 1,
+    "idle_minutes": 75.5,
+    "idling_str": "1:15:30",
+    "in_motion_seconds": 28800,
+    "in_motion_str": "8:00:00",
+    "longest_idle_seconds": 0,
+    "mileage_str": "640.00 km",
+    "total_idle_seconds": 4530,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-B"
+   },
+   {
+    "engine_hours_seconds": 0,
+    "engine_hours_str": "0:00:00",
+    "events": [],
+    "idle_events": 0,
+    "idle_minutes": 0.0,
+    "idling_str": "0:00:00",
+    "in_motion_seconds": 0,
+    "in_motion_str": "0:00:00",
+    "longest_idle_seconds": 0,
+    "mileage_str": "0.00 km",
+    "total_idle_seconds": 0,
+    "total_time_seconds": 86400,
+    "total_time_str": "24:00:00",
+    "vehicle_name": "UNIT-C"
+   }
+  ]
+ },
+ "execute_wialon_group_trips_report": [
+  {
+   "avg_speed": "45 km/h",
+   "driver": "Ali",
+   "engine_hours": "8:00:00",
+   "max_speed": "110 km/h",
+   "mileage_km": 250.75,
+   "total_time": "10:00:00",
+   "vehicle_name": "UNIT-A"
+  },
+  {
+   "avg_speed": "45 km/h",
+   "driver": "",
+   "engine_hours": "8:00:00",
+   "max_speed": "110 km/h",
+   "mileage_km": 1234.5,
+   "total_time": "10:00:00",
+   "vehicle_name": "UNIT-B"
+  },
+  {
+   "avg_speed": "45 km/h",
+   "driver": "Driver",
+   "engine_hours": "8:00:00",
+   "max_speed": "110 km/h",
+   "mileage_km": 0.0,
+   "total_time": "10:00:00",
+   "vehicle_name": "UNIT-C"
+  }
+ ],
+ "execute_wialon_unit_engine_report": {
+  "idle_events": [
+   {
+    "address": "Idle spot 0",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785717600,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.3
+    },
+    "start_time": 1785715800
+   },
+   {
+    "address": "Idle spot 1",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785722000,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.300999999999995
+    },
+    "start_time": 1785720200
+   },
+   {
+    "address": "Idle spot 2",
+    "duration": 1800,
+    "duration_minutes": 30.0,
+    "end_time": 1785804300,
+    "location": {
+     "latitude": 25.3,
+     "longitude": 55.302
+    },
+    "start_time": 1785802500
+   }
+  ],
+  "total_engine_hours": 8.5,
+  "total_engine_seconds": 30600,
+  "total_idle_minutes": 90.0,
+  "total_idle_seconds": 5400
+ },
+ "execute_wialon_unit_trips_report": {
+  "stats": {},
+  "trips": [
+   {
+    "average_speed": "31 km/h",
+    "distance_km": 10.5,
+    "duration": "0:35:00",
+    "duration_minutes": 35.0,
+    "duration_str": "0:35:00",
+    "end_latitude": 25.26,
+    "end_location": "To 1",
+    "end_longitude": 55.309999999999995,
+    "end_time": 1785724500,
+    "end_time_str": "end-1",
+    "max_speed": "81 km/h",
+    "moving_duration": "0:30:00",
+    "moving_duration_str": "0:30:00",
+    "start_latitude": 25.21,
+    "start_location": "From 1",
+    "start_longitude": 55.28,
+    "start_time": 1785722400,
+    "start_time_str": "start-1"
+   },
+   {
+    "average_speed": "32 km/h",
+    "distance_km": 21.0,
+    "duration": "0:40:00",
+    "duration_minutes": 40.0,
+    "duration_str": "0:40:00",
+    "end_latitude": 25.27,
+    "end_location": "To 2",
+    "end_longitude": 55.32,
+    "end_time": 1785732000,
+    "end_time_str": "end-2",
+    "max_speed": "82 km/h",
+    "moving_duration": "0:35:00",
+    "moving_duration_str": "0:35:00",
+    "start_latitude": 25.22,
+    "start_location": "From 2",
+    "start_longitude": 55.290000000000006,
+    "start_time": 1785729600,
+    "start_time_str": "start-2"
+   },
+   {
+    "average_speed": "33 km/h",
+    "distance_km": 31.5,
+    "duration": "0:45:00",
+    "duration_minutes": 45.0,
+    "duration_str": "0:45:00",
+    "end_latitude": 25.28,
+    "end_location": "To 3",
+    "end_longitude": 55.33,
+    "end_time": 1785739500,
+    "end_time_str": "end-3",
+    "max_speed": "83 km/h",
+    "moving_duration": "0:40:00",
+    "moving_duration_str": "0:40:00",
+    "start_latitude": 25.23,
+    "start_location": "From 3",
+    "start_longitude": 55.300000000000004,
+    "start_time": 1785736800,
+    "start_time_str": "start-3"
+   }
+  ]
+ }
+}

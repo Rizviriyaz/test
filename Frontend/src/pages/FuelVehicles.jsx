@@ -33,6 +33,8 @@ import {
     getEfficiencyTrend,
     getFuelTransactions,
 } from "../api/fleetApi"
+import { formatTrendPoint } from "../components/Fuel/telemetryFormat"
+import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "../components/Fuel/fuelLabels"
 import FuelHeader from "../components/Fuel/FuelHeader"
 import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
 
@@ -44,11 +46,14 @@ export default function FuelVehicles() {
     const [selectedVehicle, setSelectedVehicle] = useState(null)
     const [vehicleSearch, setVehicleSearch] = useState("")
     const [loadingList, setLoadingList] = useState(true)
+    const [listError, setListError] = useState(null)
 
     // Vehicle specific telemetry and transactions
     const [vehicleTrend, setVehicleTrend] = useState([])
     const [transactions, setTransactions] = useState([])
+    const [transactionsTotal, setTransactionsTotal] = useState(0)
     const [loadingDetails, setLoadingDetails] = useState(false)
+    const [detailError, setDetailError] = useState(null)
     const [trendMetric, setTrendMetric] = useState("fuel") // 'fuel' | 'cost' | 'distance'
     const [trendInterval, setTrendInterval] = useState("day")
 
@@ -58,6 +63,7 @@ export default function FuelVehicles() {
         async function loadVehicles() {
             try {
                 setLoadingList(true)
+                setListError(null)
                 const res = await getVehicleEfficiencyList({
                     page: 1,
                     page_size: 250,
@@ -71,15 +77,15 @@ export default function FuelVehicles() {
 
                 // Check URL query param for default selection
                 const initialPlate = searchParams.get("select")
-                if (initialPlate) {
-                    const match = list.find((v) => v.vehicle_identifier.toLowerCase() === initialPlate.toLowerCase())
-                    if (match) setSelectedVehicle(match)
-                    else if (list.length > 0) setSelectedVehicle(list[0])
-                } else if (list.length > 0 && !selectedVehicle) {
-                    setSelectedVehicle(list[0])
-                }
+                const byId = (id) => (id ? list.find((v) => v.vehicle_identifier.toLowerCase() === id.toLowerCase()) : null)
+                // Re-resolve the selection from the new list so its KPI cards match the current period;
+                // a vehicle absent from the new period falls back to the first one (or none).
+                setSelectedVehicle((prev) => byId(initialPlate) || byId(prev?.vehicle_identifier) || list[0] || null)
             } catch (err) {
-                console.error("Failed to load vehicles list:", err)
+                if (!active) return
+                setVehicleList([])
+                setSelectedVehicle(null)
+                setListError(err?.message || "Could not load vehicles.")
             } finally {
                 if (active) setLoadingList(false)
             }
@@ -97,30 +103,46 @@ export default function FuelVehicles() {
         async function loadVehicleTelemetry() {
             try {
                 setLoadingDetails(true)
+                setDetailError(null)
+                // Never show the previous vehicle's rows under the newly selected vehicle.
+                setVehicleTrend([])
+                setTransactions([])
+                setTransactionsTotal(0)
                 const [trendRes, txRes] = await Promise.allSettled([
+                    // Global filters first, so the selected vehicle is never overwritten by them
                     getEfficiencyTrend({
+                        ...queryParams,
                         vehicle_identifier: selectedVehicle.vehicle_identifier,
                         group_by: trendInterval,
-                        ...queryParams,
                     }),
                     getFuelTransactions({
+                        ...queryParams,
                         vehicle_identifier: selectedVehicle.vehicle_identifier,
                         page: 1,
                         page_size: 15,
-                        ...queryParams,
                     }),
                 ])
 
                 if (!active) return
 
+                const failures = []
                 if (trendRes.status === "fulfilled" && Array.isArray(trendRes.value?.data)) {
                     setVehicleTrend(trendRes.value.data)
+                } else {
+                    failures.push("trend")
                 }
                 if (txRes.status === "fulfilled" && Array.isArray(txRes.value?.transactions)) {
                     setTransactions(txRes.value.transactions)
+                    setTransactionsTotal(Number(txRes.value.total) || txRes.value.transactions.length)
+                } else {
+                    failures.push("transactions")
+                }
+                if (failures.length) {
+                    const reason = [trendRes, txRes].find((r) => r.status === "rejected")?.reason?.message
+                    setDetailError(`Could not load vehicle ${failures.join(" and ")}${reason ? `: ${reason}` : "."}`)
                 }
             } catch (err) {
-                console.error("Failed to fetch vehicle details:", err)
+                if (active) setDetailError(err?.message || "Could not load vehicle details.")
             } finally {
                 if (active) setLoadingDetails(false)
             }
@@ -139,13 +161,8 @@ export default function FuelVehicles() {
         )
     }, [vehicleList, vehicleSearch])
 
-    const formattedTrendData = vehicleTrend.map((d) => ({
-        ...d,
-        displayPeriod: d.period ? d.period.slice(5) : "",
-        litres: Math.round((d.litres || 0) * 10) / 10,
-        cost: Math.round(d.cost || 0),
-        distance_km: Math.round((d.distance_km || 0) * 10) / 10,
-    }))
+    // Unknown Wialon distance stays null (a gap), never 0 km
+    const formattedTrendData = vehicleTrend.map(formatTrendPoint)
 
     return (
         <SidebarProvider>
@@ -187,6 +204,10 @@ export default function FuelVehicles() {
                                         <div className="py-12 text-center text-xs text-slate-400">
                                             <Loader2 className="mx-auto h-5 w-5 animate-spin text-[#33758F] mb-2" />
                                             Loading vehicles…
+                                        </div>
+                                    ) : listError ? (
+                                        <div role="alert" className="py-12 px-3 text-center text-xs text-rose-600">
+                                            {listError}
                                         </div>
                                     ) : filteredVehicles.length === 0 ? (
                                         <div className="py-12 text-center text-xs text-slate-400">
@@ -448,13 +469,26 @@ export default function FuelVehicles() {
                                             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                                                 <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                                                     <Receipt className="h-4 w-4 text-[#33758F]" />
-                                                    Recent Refuel Transactions ({transactions.length})
+                                                    Recent Refuel Transactions ({transactionsTotal})
                                                 </h3>
-                                                <span className="text-[11px] text-slate-400 font-medium">Logged Receipts</span>
+                                                <span className="text-[11px] text-slate-400 font-medium">
+                                                    {transactionsTotal > transactions.length ? `Latest ${transactions.length} shown` : "Logged Receipts"}
+                                                </span>
                                             </div>
 
+                                            {detailError && (
+                                                <div role="alert" className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                                                    {detailError}
+                                                </div>
+                                            )}
+
                                             <div className="divide-y divide-slate-100 pt-2">
-                                                {transactions.length === 0 ? (
+                                                {loadingDetails ? (
+                                                    <div className="py-6 flex items-center justify-center text-xs text-slate-400">
+                                                        <Loader2 className="h-4 w-4 animate-spin text-[#33758F] mr-2" />
+                                                        Loading transactions…
+                                                    </div>
+                                                ) : detailError && transactions.length === 0 ? null : transactions.length === 0 ? (
                                                     <div className="py-6 text-center text-xs text-slate-400">
                                                         No transactions recorded for this period.
                                                     </div>
@@ -465,8 +499,13 @@ export default function FuelVehicles() {
                                                                 <div className="font-bold text-slate-800 flex items-center gap-2">
                                                                     <span>{tx.transaction_date?.slice(0, 10)}</span>
                                                                     <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 font-semibold">
-                                                                        {tx.fuel_type || "Standard"}
+                                                                        {fuelTypeLabel(tx.fuel_type)}
                                                                     </span>
+                                                                    {isRefundAdjustment(tx) && (
+                                                                        <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800 font-semibold">
+                                                                            Refund adjustment
+                                                                        </span>
+                                                                    )}
                                                                 </div>
                                                                 <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-3">
                                                                     {tx.station_name && (
@@ -488,11 +527,13 @@ export default function FuelVehicles() {
                                                                 <div>
                                                                     <span className="font-bold text-slate-900">{tx.litres} L</span>
                                                                     <span className="block text-[10px] text-slate-400">
-                                                                        @ AED {tx.unit_price?.toFixed(2)}/L
+                                                                        {tx.unit_price != null ? `@ AED ${fixedOrDash(tx.unit_price)}/L` : "Unit price not recorded"}
                                                                     </span>
                                                                 </div>
                                                                 <div className="min-w-[70px]">
-                                                                    <span className="font-black text-emerald-700">AED {tx.total_cost?.toFixed(2)}</span>
+                                                                    <span className="font-black text-emerald-700">
+                                                                        {tx.total_cost != null ? `AED ${fixedOrDash(tx.total_cost)}` : "—"}
+                                                                    </span>
                                                                     <span className="block text-[10px] text-slate-400">Total</span>
                                                                 </div>
                                                             </div>

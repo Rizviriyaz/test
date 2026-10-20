@@ -10,6 +10,7 @@ import FuelTrendChart from "../components/Fuel/FuelTrendChart"
 import FuelTypeDonut from "../components/Fuel/FuelTypeDonut"
 import FleetEfficiencyGauge from "../components/Fuel/FleetEfficiencyGauge"
 import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
+import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
 
 export default function FuelOverview() {
     const { queryParams, period, periodLabel, setPeriod } = useFuelFilters()
@@ -40,12 +41,18 @@ export default function FuelOverview() {
                 if (effRes.status === "fulfilled") {
                     setEfficiency(effRes.value)
                 } else {
-                    console.error("Efficiency error:", effRes.reason)
+                    // Never leave the previous period's KPIs on screen next to the error
+                    setEfficiency(null)
                     setError(effRes.reason?.message || "Failed to load fleet efficiency metrics.")
                 }
 
                 if (vehRes.status === "fulfilled" && Array.isArray(vehRes.value?.data)) {
                     setTopVehicles(vehRes.value.data)
+                } else {
+                    setTopVehicles([])
+                    if (effRes.status === "fulfilled") {
+                        setError(vehRes.reason?.message || "Failed to load the top vehicles list.")
+                    }
                 }
             } catch (err) {
                 if (!active) return
@@ -60,7 +67,8 @@ export default function FuelOverview() {
         return () => { active = false }
     }, [queryParams])
 
-    const hasNoData = !loading && efficiency?.transaction_count === 0
+    // "No data" only when nothing was fetched at all; rows excluded from KPIs are shown in the excluded panel
+    const hasNoData = !loading && efficiency?.excluded_scope?.all_transaction_count === 0
 
     return (
         <SidebarProvider>
@@ -114,6 +122,9 @@ export default function FuelOverview() {
 
                         {/* 2. Primary 4 KPI Cards */}
                         <KpiCards efficiencyData={efficiency} loading={loading} />
+
+                        {/* Transactions excluded from KPIs (no single Wialon unit, suspected re-imports) */}
+                        <ExcludedFuelPanel />
 
                         {/* 3. Main Fleet Trend Chart */}
                         <FuelTrendChart />

@@ -386,6 +386,10 @@ export async function getEfficiencyTrend(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/efficiency/trend${buildFuelQueryString(params)}`, options, 30000)
 }
 
+export async function getFuelExcluded(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/excluded${buildFuelQueryString(params)}`, options, 30000)
+}
+
 export async function getFuelVehicleDistance(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`, options, 30000)
 }
@@ -408,7 +412,10 @@ export async function executeFuelImport(file, mapping) {
         method: "POST",
         body: formData,
     })
-    return response.json()
+    const result = await response.json()
+    // New rows change every fuel KPI: cached fuel responses must not be served after an import
+    clearClientCache("/api/fuel/")
+    return result
 }
 
 export async function getFuelImports(limit = 50, offset = 0) {

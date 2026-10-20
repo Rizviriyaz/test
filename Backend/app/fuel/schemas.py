@@ -39,6 +39,18 @@ class FuelImportResultResponse(BaseModel):
     date_to: Optional[str] = None
     error_message: Optional[str] = None
     failed_row_details: Optional[List[Dict[str, Any]]] = None
+    rows_refund: int = Field(0, description="Rows imported as signed refund/reversal adjustments (negative litres)")
+    rows_cost_derived: int = Field(0, description="Rows whose total_cost was derived as unit_price x litres (not on the statement)")
+    rows_unit_price_derived: int = Field(0, description="Rows whose unit_price was derived as total_cost / litres (not on the statement)")
+    rows_date_ambiguous: int = Field(0, description="Rows whose date was ambiguous and interpreted as DD/MM/YYYY")
+    rows_optional_parse_failed: int = Field(0, description="Rows where a non-empty optional numeric cell could not be parsed and was left empty")
+    warnings: List[str] = Field(default_factory=list, description="Row-level import warnings (capped)")
+    duplicate_row_details: Optional[List[Dict[str, Any]]] = None
+    file_sha256: Optional[str] = Field(None, description="SHA-256 of the uploaded file (reported only; not stored)")
+    duplicate_check_scope: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Date window, existing rows scanned and stored transaction_date shapes used for duplicate detection",
+    )
 
 
 class FuelImportItem(BaseModel):
@@ -81,6 +93,7 @@ class FuelTransactionItem(BaseModel):
     notes: Optional[str] = None
     source_row_number: Optional[int] = None
     created_at: Optional[str] = None
+    transaction_kind: str = Field("purchase", description="'purchase' or 'refund_adjustment' (negative litres)")
 
 
 class FuelTransactionsListResponse(BaseModel):
@@ -89,9 +102,30 @@ class FuelTransactionsListResponse(BaseModel):
     page_size: int
     total: int
     transactions: List[FuelTransactionItem]
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 # ─── Analytics Schemas ─────────────────────────────────────────────────────────
+
+class ExcludedTransactionGroup(BaseModel):
+    vehicle_identifier: str = Field(..., description="Fuel statement identifier as recorded")
+    reason: str = Field(..., description="unmatched | ambiguous | suspected_duplicate")
+    candidate_unit_names: List[str] = Field(default_factory=list, description="Wialon units the identifier matched (ambiguous only)")
+    transaction_count: int = Field(..., description="Excluded transactions in this group")
+    litres: float = Field(..., description="Signed litres (refund adjustments negative) [Recorded]")
+    cost: float = Field(..., description="Signed cost [Recorded]")
+    first_date: Optional[str] = Field(None, description="Earliest transaction date (YYYY-MM-DD)")
+    last_date: Optional[str] = Field(None, description="Latest transaction date (YYYY-MM-DD)")
+    transaction_ids: List[int] = Field(default_factory=list, description="Up to 50 transaction ids, for review")
+
+
+class ExcludedTransactionsResponse(BaseModel):
+    page: int = Field(..., description="Current page number (1-indexed)")
+    page_size: int = Field(..., description="Page size limit")
+    total: int = Field(..., description="Total excluded groups matching filters")
+    data: List[ExcludedTransactionGroup] = Field(default_factory=list, description="Excluded transaction groups")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="Scope reconciliation for the same filters")
+
 
 class FuelTypeBreakdownItem(BaseModel):
     fuel_type: str = Field(..., description="Fuel type category (e.g. DIESEL, SPECIAL, SUPER)")
@@ -102,12 +136,20 @@ class FuelTypeBreakdownItem(BaseModel):
 
 
 class FuelSummaryResponse(BaseModel):
-    total_litres: float = Field(..., description="Total fleet fuel consumption in litres")
-    total_cost: float = Field(..., description="Total fleet fuel expenditure")
-    transaction_count: int = Field(..., description="Total number of fuel transactions")
+    total_litres: float = Field(..., description="Net fuel purchased in litres (purchases minus refund adjustments); not measured consumption")
+    total_cost: float = Field(..., description="Net fuel expenditure (purchases minus refund adjustments)")
+    transaction_count: int = Field(..., description="Total number of fuel transactions (purchases and refund adjustments)")
     vehicle_count: int = Field(..., description="Number of unique vehicles refueled")
-    average_unit_price: float = Field(..., description="Fleet-wide average unit price per litre")
+    average_unit_price: float = Field(..., description="Average unit price per litre over purchases only")
     fuel_type_breakdown: List[FuelTypeBreakdownItem] = Field(default_factory=list, description="Breakdown by fuel type")
+    purchase_count: int = Field(0, description="Number of purchase transactions (positive litres)")
+    gross_purchased_litres: float = Field(0.0, description="Litres on purchase transactions only")
+    gross_purchased_cost: float = Field(0.0, description="Cost on purchase transactions only")
+    refund_count: int = Field(0, description="Number of refund/reversal adjustments (negative litres)")
+    refund_litres: float = Field(0.0, description="Signed litres on refund adjustments (negative)")
+    refund_cost: float = Field(0.0, description="Signed cost on refund adjustments (zero or negative)")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class FuelTrendItem(BaseModel):
@@ -121,6 +163,7 @@ class FuelTrendItem(BaseModel):
 class FuelTrendResponse(BaseModel):
     group_by: str = Field(..., description="Grouping interval used: 'day', 'week', or 'month'")
     data: List[FuelTrendItem] = Field(default_factory=list, description="Chronological trend data points")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class VehicleAnalyticsItem(BaseModel):
@@ -130,6 +173,8 @@ class VehicleAnalyticsItem(BaseModel):
     transaction_count: int = Field(..., description="Number of refuels for this vehicle")
     average_unit_price: float = Field(..., description="Average unit price per litre paid for this vehicle")
     average_litres_per_transaction: float = Field(..., description="Average litres dispensed per refuel")
+    wialon_unit_id: Optional[int] = Field(None, description="Wialon unit the identifier(s) resolve to")
+    merged_identifiers: List[str] = Field(default_factory=list, description="All fuel identifiers combined into this unit record")
 
 
 class VehicleAnalyticsResponse(BaseModel):
@@ -137,10 +182,12 @@ class VehicleAnalyticsResponse(BaseModel):
     page_size: int = Field(..., description="Page size limit")
     total: int = Field(..., description="Total number of unique vehicles matching filters")
     data: List[VehicleAnalyticsItem] = Field(default_factory=list, description="Paginated vehicle analytics records")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class FuelTypeAnalyticsResponse(BaseModel):
     data: List[FuelTypeBreakdownItem] = Field(default_factory=list, description="Fuel type aggregation records")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class VehicleDistanceResponse(BaseModel):
@@ -158,12 +205,12 @@ class VehicleDistanceResponse(BaseModel):
 
 
 class FleetEfficiencyResponse(BaseModel):
-    total_litres: float = Field(..., description="Total fuel volume across all filtered refuel records [Recorded]")
-    total_cost: float = Field(..., description="Total fuel expenditure across all filtered refuel records [Recorded]")
-    transaction_count: int = Field(..., description="Total refuel transactions recorded [Recorded]")
-    vehicle_count: int = Field(..., description="Total unique vehicles in the filtered fuel data [Recorded]")
+    total_litres: float = Field(..., description="Net fuel purchased by vehicles matched to one Wialon unit (KPI scope) [Recorded]")
+    total_cost: float = Field(..., description="Net fuel expenditure of matched vehicles (KPI scope) [Recorded]")
+    transaction_count: int = Field(..., description="Transactions in the KPI scope [Recorded]")
+    vehicle_count: int = Field(..., description="Wialon units in the KPI scope (identifiers of one unit counted once) [Recorded]")
     matched_vehicle_count: int = Field(..., description="Vehicles successfully matched to an active Wialon GPS unit")
-    unmatched_vehicle_count: int = Field(..., description="Vehicles not tracked by Wialon GPS")
+    unmatched_vehicle_count: int = Field(..., description="Fuel identifiers excluded from KPIs (no Wialon unit, or several)")
     vehicles_with_distance: int = Field(..., description="Tracked vehicles with recorded distance > 0")
     vehicles_without_distance: int = Field(..., description="Tracked vehicles with 0 recorded distance / no trips")
     tracked_litres: float = Field(..., description="Fuel volume dispensed specifically to vehicles with tracked distance")
@@ -183,6 +230,19 @@ class FleetEfficiencyResponse(BaseModel):
     unmatched_transactions_count: int = Field(default=0, description="Number of fuel transactions with unmatched vehicle identifier")
     unmatched_litres: float = Field(default=0.0, description="Fuel volume from unmatched transactions")
     unmatched_cost: float = Field(default=0.0, description="Fuel cost from unmatched transactions")
+    telematics_status: str = Field("complete", description="complete | partial: whether every Wialon value used was reported readably")
+    data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
+    vehicles_telemetry_unknown: int = Field(0, description="Matched vehicles whose Wialon distance is unknown; excluded from L/100 km")
+    telemetry_litres: float = Field(0.0, description="Net litres of vehicles with distance or engine hours (basis of idle estimates)")
+    vehicles_engine_hours_only: int = Field(0, description="Vehicles with engine hours but no distance; in hour totals, not in L/100 km")
+    engine_only_litres: float = Field(0.0, description="Net litres of engine-hours-only vehicles (not in tracked_litres)")
+    vehicles_fuel_type_mixed: int = Field(0, description="Vehicles with several fuel types under a fuel-type filter; excluded from L/100 km")
+    fuel_type_mixed_excluded_litres: float = Field(0.0, description="Filtered-fuel litres of mixed-fuel vehicles, excluded from L/100 km")
+    min_efficiency_distance_km: float = Field(25.0, description="Minimum Wialon distance for a purchase-based ratio (FUEL_MIN_EFFICIENCY_KM)")
+    efficiency_suppressed_reason: Optional[str] = Field(None, description="insufficient_distance | non_positive_net_fuel when the fleet ratio is withheld")
+    efficiency_basis: str = Field("purchase_based", description="L/100 km = fuel purchased / Wialon distance x 100 (derived; not measured consumption)")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class VehicleEfficiencyItem(BaseModel):
@@ -206,8 +266,12 @@ class VehicleEfficiencyItem(BaseModel):
     fuel_efficiency_l_per_100km: Optional[float] = Field(None, description="Fuel consumption in L/100 km, null if distance unavailable")
     fuel_cost_per_km: Optional[float] = Field(None, description="Fuel cost per km, null if distance unavailable")
     status: str = Field(..., description="Data status: 'matched', 'not_tracked', 'no_distance_data', or 'ambiguous'")
-    estimation_status: str = Field(default="unavailable", description="Estimation confidence: 'measured', 'estimated', 'provisional', 'unavailable'")
+    estimation_status: str = Field(default="unavailable", description="Idle/driving split confidence: 'estimated', 'provisional', 'unavailable' (never measured)")
     quality_warnings: List[str] = Field(default_factory=list, description="Data quality issues or reconciliation flags")
+    distance_source: Optional[str] = Field(None, description="wialon_report | unavailable (distance unknown, never substituted with 0)")
+    telemetry_status: Optional[str] = Field(None, description="complete | partial | unavailable for this unit's Wialon values")
+    merged_identifiers: List[str] = Field(default_factory=list, description="All fuel identifiers combined into this unit record (distance counted once)")
+    efficiency_suppressed_reason: Optional[str] = Field(None, description="insufficient_distance | non_positive_net_fuel | mixed_fuel_types when L/100 km is withheld")
 
 
 class VehicleEfficiencyResponse(BaseModel):
@@ -215,6 +279,10 @@ class VehicleEfficiencyResponse(BaseModel):
     page_size: int = Field(..., description="Page size limit")
     total: int = Field(..., description="Total unique vehicles matching filters")
     data: List[VehicleEfficiencyItem] = Field(default_factory=list, description="Paginated vehicle efficiency records")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
+    telematics_status: str = Field("complete", description="complete | partial: whether every Wialon value used was reported readably")
+    data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class EfficiencyTrendItem(BaseModel):
@@ -225,18 +293,32 @@ class EfficiencyTrendItem(BaseModel):
     distance_km: Optional[float] = Field(None, description="Distance traveled in the period in km")
     fuel_efficiency_l_per_100km: Optional[float] = Field(None, description="Weighted efficiency for the period in L/100 km")
     fuel_cost_per_km: Optional[float] = Field(None, description="Weighted fuel cost per km for the period")
+    tracked_litres: float = Field(0.0, description="Litres of units with Wialon trip distance in the period (ratio numerator)")
+    distance_source: str = Field("unavailable", description="wialon_unit_trips (actual trips started in the period) | unavailable")
+    efficiency_basis: str = Field("purchase_based", description="Fuel purchased / Wialon distance (derived; not measured consumption)")
+    efficiency_status: str = Field("unavailable", description="ok | no_fuel | no_distance | insufficient_distance | non_positive_net_fuel | unavailable")
+    cumulative_l_per_100km: Optional[float] = Field(None, description="Running ratio of tracked litres to distance up to this period")
+    boundary_trip_km: float = Field(0.0, description="Km of trips that started in this period and ended in a later one (kept in the start period)")
+    units_with_distance: int = Field(0, description="Units contributing trip distance to the period")
 
 
 class EfficiencyTrendResponse(BaseModel):
     group_by: str = Field(..., description="Grouping interval: 'day', 'week', or 'month'")
     data: List[EfficiencyTrendItem] = Field(default_factory=list, description="Chronological efficiency trend records")
+    distance_reconciliation: Dict[str, Any] = Field(default_factory=dict, description="Per-unit trip totals vs group-report distance (mismatches above max(1 km, 2%))")
+    units_failed: List[Dict[str, Any]] = Field(default_factory=list, description="Units whose trips report failed or was incomplete (excluded, never 0 km)")
+    min_distance_km: float = Field(25.0, description="Minimum period distance for a per-period ratio")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
+    telematics_status: str = Field("complete", description="complete | partial: whether every Wialon value used was reported readably")
+    data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 # ─── Fuel Waste & Anomaly Schemas ──────────────────────────────────────────────
 
 class FuelAnomalyItem(BaseModel):
     id: str = Field(..., description="Unique identifier for the anomaly flag")
-    anomaly_type: str = Field(..., description="Category: 'excessive_idling', 'rapid_refuel', 'volume_spike', 'odometer_inconsistency', 'duplicate_candidate', 'unmatched_vehicle'")
+    anomaly_type: str = Field(..., description="Category: 'excessive_idling', 'rapid_refuel', 'same_day_multiple_refuels', 'volume_spike', 'odometer_inconsistency', 'missing_odometer', 'invalid_transaction_date', 'duplicate_candidate', 'unmatched_vehicle'")
     severity: str = Field(..., description="Severity level: 'critical', 'warning', 'info'")
     finding_type: str = Field(..., description="Evidence classification: 'measured', 'estimated', 'provisional'")
     vehicle_identifier: str = Field(..., description="Vehicle registration plate affected")
@@ -249,6 +331,7 @@ class FuelAnomalyItem(BaseModel):
     wasted_litres: Optional[float] = Field(None, description="Estimated fuel wasted in litres if applicable")
     wasted_cost: Optional[float] = Field(None, description="Estimated expenditure wasted in AED if applicable")
     details: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context metadata")
+    classification: str = Field("recorded", description="recorded (from statements/Wialon records) | estimated (rate x hours)")
 
 
 class FuelWasteResponse(BaseModel):
@@ -262,6 +345,15 @@ class FuelWasteResponse(BaseModel):
     idle_rate_lph: float = Field(default=2.0, description="Idle consumption coefficient in L/h")
     anomalies: List[FuelAnomalyItem] = Field(default_factory=list, description="Prioritized list of anomalies")
     top_idle_wasters: List[VehicleEfficiencyItem] = Field(default_factory=list, description="Top vehicles ranked by estimated idle cost")
+    fleet_estimated_idle_fuel_litres: Optional[float] = Field(None, description="Idle hours x rate across all matched vehicles with known idle hours (same basis as the efficiency KPI) [Estimated]")
+    idle_waste_basis: str = Field("vehicles_at_or_above_threshold", description="total_idle_waste_* sums only vehicles at or above the effective idle threshold")
+    idle_threshold_mode: str = Field("per_day", description="per_day: threshold x period_days | total: threshold for the whole period")
+    effective_idle_threshold_hours: Optional[float] = Field(None, description="Threshold actually applied to the period's idle hours")
+    period_days: Optional[int] = Field(None, description="Days in the analysed period")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
+    telematics_status: str = Field("complete", description="complete | partial: whether every Wialon value used was reported readably")
+    data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
 class VehicleFuelDetailResponse(BaseModel):
@@ -271,4 +363,6 @@ class VehicleFuelDetailResponse(BaseModel):
     activity_breakdown: Dict[str, Any] = Field(default_factory=dict, description="Driving vs Idling duration and fuel breakdown")
     anomalies: List[FuelAnomalyItem] = Field(default_factory=list, description="Specific anomalies identified for this vehicle")
     calculation_transparency: Dict[str, Any] = Field(default_factory=dict, description="Disclosed formulas, coefficient, and data sources")
+    value_classification: Dict[str, str] = Field(default_factory=dict, description="vehicle_summary field -> recorded | derived | estimated")
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 

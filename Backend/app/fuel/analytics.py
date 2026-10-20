@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from app.fuel.scope import tx_local_date, unit_key
 from app.fuel.schemas import (
     FuelSummaryResponse,
     FuelTrendItem,
@@ -38,8 +39,15 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
             fuel_type_breakdown=[],
         )
 
+    # Totals are net: refund adjustments (negative litres) reduce them. The average price uses purchases only.
     total_litres = 0.0
     total_cost = 0.0
+    purchase_count = 0
+    purchase_litres = 0.0
+    purchase_cost = 0.0
+    refund_count = 0
+    refund_litres = 0.0
+    refund_cost = 0.0
     vehicles = set()
     ft_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"litres": 0.0, "cost": 0.0, "count": 0})
 
@@ -51,8 +59,18 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
 
         total_litres += litres
         total_cost += cost
-        if v_ident and str(v_ident).strip():
-            vehicles.add(str(v_ident).strip())
+        if litres < 0:
+            refund_count += 1
+            refund_litres += litres
+            refund_cost += cost
+        else:
+            purchase_count += 1
+            purchase_litres += litres
+            purchase_cost += cost
+        if t.get("_unit_id") is not None:
+            vehicles.add(unit_key(t))  # identifiers of one Wialon unit count once
+        elif v_ident and str(v_ident).strip():
+            vehicles.add(("id", str(v_ident).strip()))
 
         ft_map[ft]["litres"] += litres
         ft_map[ft]["cost"] += cost
@@ -60,7 +78,9 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
 
     total_litres_rounded = round(total_litres, 2)
     total_cost_rounded = round(total_cost, 2)
-    avg_price = round(total_cost_rounded / total_litres_rounded, 2) if total_litres_rounded > 0 else 0.0
+    purchase_litres_rounded = round(purchase_litres, 2)
+    purchase_cost_rounded = round(purchase_cost, 2)
+    avg_price = round(purchase_cost_rounded / purchase_litres_rounded, 2) if purchase_litres_rounded > 0 else 0.0
 
     breakdown: List[FuelTypeBreakdownItem] = []
     for ft_name, data in ft_map.items():
@@ -86,6 +106,12 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
         vehicle_count=len(vehicles),
         average_unit_price=avg_price,
         fuel_type_breakdown=breakdown,
+        purchase_count=purchase_count,
+        gross_purchased_litres=purchase_litres_rounded,
+        gross_purchased_cost=purchase_cost_rounded,
+        refund_count=refund_count,
+        refund_litres=round(refund_litres, 2),
+        refund_cost=round(refund_cost, 2),
     )
 
 
@@ -105,7 +131,7 @@ def calculate_fuel_trend(transactions: List[Dict[str, Any]], group_by: str = "da
         if not raw_date:
             continue
 
-        date_str = str(raw_date)[:10]
+        date_str = tx_local_date(raw_date) or str(raw_date)[:10]
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
@@ -172,7 +198,8 @@ def calculate_vehicle_analytics(
     if not transactions:
         return VehicleAnalyticsResponse(page=page, page_size=page_size, total=0, data=[])
 
-    veh_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"litres": 0.0, "cost": 0.0, "count": 0})
+    # Grouped per Wialon unit when rows are scope-tagged (identifiers of one unit combined), else per identifier.
+    veh_map: Dict[Any, Dict[str, Any]] = defaultdict(lambda: {"litres": 0.0, "cost": 0.0, "count": 0, "ids": defaultdict(int)})
 
     for t in transactions:
         v_ident = str(t.get("vehicle_identifier") or "").strip()
@@ -182,23 +209,29 @@ def calculate_vehicle_analytics(
         litres = float(t.get("litres") or 0)
         cost = float(t.get("total_cost") or 0)
 
-        veh_map[v_ident]["litres"] += litres
-        veh_map[v_ident]["cost"] += cost
-        veh_map[v_ident]["count"] += 1
+        key = unit_key(t) if t.get("_unit_id") is not None else ("id", v_ident)
+        veh_map[key]["litres"] += litres
+        veh_map[key]["cost"] += cost
+        veh_map[key]["count"] += 1
+        veh_map[key]["ids"][v_ident] += 1
 
     records: List[VehicleAnalyticsItem] = []
-    for v_ident, data in veh_map.items():
+    for key, data in veh_map.items():
         l_round = round(data["litres"], 2)
         c_round = round(data["cost"], 2)
         count = data["count"]
+        ids = data["ids"]
+        primary = sorted(ids.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
         records.append(
             VehicleAnalyticsItem(
-                vehicle_identifier=v_ident,
+                vehicle_identifier=primary,
                 litres=l_round,
                 total_cost=c_round,
                 transaction_count=count,
                 average_unit_price=round(c_round / l_round, 2) if l_round > 0 else 0.0,
                 average_litres_per_transaction=round(l_round / count, 2) if count > 0 else 0.0,
+                wialon_unit_id=key[1] if key[0] == "unit" else None,
+                merged_identifiers=sorted(ids) if len(ids) > 1 else [],
             )
         )
 

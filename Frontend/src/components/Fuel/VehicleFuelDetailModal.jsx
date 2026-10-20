@@ -2,27 +2,18 @@ import { useState, useEffect } from "react"
 import { createPortal } from "react-dom"
 import {
     X,
-    Droplets,
-    DollarSign,
-    Route,
-    Gauge,
-    Clock,
     Flame,
-    ShieldCheck,
     AlertTriangle,
     Info,
-    Calendar,
-    MapPin,
-    FileText,
-    Activity,
     Loader2,
     CheckCircle2,
     Fuel,
-    Sliders,
-    ArrowUpRight,
 } from "lucide-react"
 import { getVehicleFuelDetail } from "../../api/fleetApi"
 import VehicleStatusBadge from "./VehicleStatusBadge"
+import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber } from "./telemetryFormat"
+import ClassificationBadge from "./ClassificationBadge"
+import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -46,6 +37,8 @@ export default function VehicleFuelDetailModal({
     dateFrom,
     dateTo,
     idleRate = 2.0,
+    idleThreshold = 5.0,
+    idleThresholdMode = "per_day",
 }) {
     const [data, setData] = useState(null)
     const [loading, setLoading] = useState(true)
@@ -54,28 +47,34 @@ export default function VehicleFuelDetailModal({
 
     useEffect(() => {
         if (!vehicleIdentifier) return
+        let active = true
 
         async function fetchDetail() {
             try {
                 setLoading(true)
                 setError(null)
+                setData(null)
                 const res = await getVehicleFuelDetail({
                     vehicle_identifier: vehicleIdentifier,
                     date_from: dateFrom,
                     date_to: dateTo,
                     idle_rate_lph: idleRate,
+                    idle_threshold_hours: idleThreshold,
+                    idle_threshold_mode: idleThresholdMode,
                 })
+                if (!active) return
                 setData(res)
             } catch (err) {
-                console.error("Vehicle detail fetch error:", err)
+                if (!active) return
                 setError(err.message || "Failed to load vehicle fuel details.")
             } finally {
-                setLoading(false)
+                if (active) setLoading(false)
             }
         }
 
         fetchDetail()
-    }, [vehicleIdentifier, dateFrom, dateTo, idleRate])
+        return () => { active = false }
+    }, [vehicleIdentifier, dateFrom, dateTo, idleRate, idleThreshold, idleThresholdMode])
 
     if (!vehicleIdentifier) return null
 
@@ -84,13 +83,13 @@ export default function VehicleFuelDetailModal({
     const activity = data?.activity_breakdown || {}
     const anomalies = data?.anomalies || []
     const transparency = data?.calculation_transparency || {}
+    const vc = data?.value_classification
 
     const totalLitres = summary?.litres || 0
     const totalCost = summary?.total_cost || 0
     const distanceKm = summary?.distance_km
-    const drivingHours = summary?.driving_duration_hours || activity.driving_duration_hours || 0
-    const idleHours = summary?.idle_duration_hours || activity.idle_duration_hours || 0
-    const engineHours = summary?.engine_hours || activity.engine_hours || 0
+    const { drivingHours, idleHours, engineHours } = resolveActivityHours(summary, data?.activity_breakdown)
+    const telemetryNotice = data ? collectTelemetryNotice(summary, data.activity_breakdown) : null
     const estIdleFuel = summary?.estimated_idle_fuel_litres
     const estIdleCost = summary?.estimated_idle_cost
     const estDrivingFuel = summary?.estimated_driving_fuel_litres
@@ -98,8 +97,6 @@ export default function VehicleFuelDetailModal({
     const drivingPct = summary?.estimated_driving_percentage
     const efficiency = summary?.fuel_efficiency_l_per_100km
     const costPerKm = summary?.fuel_cost_per_km
-
-    const isMatched = summary?.status === "matched"
 
     return createPortal(
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto" onClick={onClose}>
@@ -175,14 +172,28 @@ export default function VehicleFuelDetailModal({
                                 ))}
                             </div>
 
+                            {telemetryNotice && (
+                                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
+                                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+                                    <div className="space-y-0.5">
+                                        <span className="font-bold block">
+                                            Wialon telemetry {telemetryNotice.status}: values shown as "—" were not reported.
+                                        </span>
+                                        {telemetryNotice.warnings.map((w) => (
+                                            <span key={w} className="block">{w}</span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
                             {/* ─── TAB 1: OVERVIEW ─────────────────────────────────── */}
                             {activeTab === "overview" && (
                                 <div className="space-y-6">
                                     {/* 4 Core Vehicle KPIs */}
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                                                Fuel Purchased [Rec]
+                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                                Fuel Purchased <ClassificationBadge classification={vc} field="litres" />
                                             </span>
                                             <span className="text-xl font-black text-slate-900 block">
                                                 {formatNumber(totalLitres, 1)} <span className="text-xs font-semibold text-slate-400">L</span>
@@ -193,8 +204,8 @@ export default function VehicleFuelDetailModal({
                                         </div>
 
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                                                Total Expenditure [Rec]
+                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                                Total Expenditure <ClassificationBadge classification={vc} field="total_cost" />
                                             </span>
                                             <span className="text-xl font-black text-slate-900 block">
                                                 AED {formatCurrency(totalCost)}
@@ -205,20 +216,20 @@ export default function VehicleFuelDetailModal({
                                         </div>
 
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                                                Distance Traveled [Rec]
+                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                                Distance Traveled <ClassificationBadge classification={vc} field="distance_km" />
                                             </span>
                                             <span className="text-xl font-black text-sky-900 block">
                                                 {distanceKm !== null && distanceKm !== undefined ? `${formatNumber(distanceKm, 1)}` : "—"} <span className="text-xs font-semibold text-slate-400">km</span>
                                             </span>
                                             <span className="text-[11px] text-slate-500 mt-1 block">
-                                                Wialon GPS verified
+                                                Wialon trip report
                                             </span>
                                         </div>
 
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                                                Fuel Efficiency [Calc]
+                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                                Purchase-based Efficiency <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />
                                             </span>
                                             <span className="text-xl font-black text-[#33758F] block">
                                                 {efficiency !== null && efficiency !== undefined ? `${efficiency.toFixed(1)}` : "—"} <span className="text-xs font-semibold text-slate-400">L/100km</span>
@@ -257,7 +268,7 @@ export default function VehicleFuelDetailModal({
                                                 </span>
                                                 <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-between">
                                                     <span>Moving duration:</span>
-                                                    <span className="font-bold text-slate-800">{drivingHours.toFixed(1)} hrs</span>
+                                                    <span className="font-bold text-slate-800">{formatMeasurement(drivingHours, 1, "hrs")}</span>
                                                 </div>
                                             </div>
 
@@ -279,7 +290,7 @@ export default function VehicleFuelDetailModal({
                                                 </div>
                                                 <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-between">
                                                     <span>Qualifying idle time:</span>
-                                                    <span className="font-bold text-slate-800">{idleHours.toFixed(1)} hrs</span>
+                                                    <span className="font-bold text-slate-800">{formatMeasurement(idleHours, 1, "hrs")}</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -289,18 +300,18 @@ export default function VehicleFuelDetailModal({
                                             <div className="mt-4 pt-3 border-t border-slate-200/60">
                                                 <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 mb-1.5">
                                                     <span>Fuel Segregation Distribution</span>
-                                                    <span>{drivingPct?.toFixed(1)}% Driving • {idlePct?.toFixed(1)}% Idling</span>
+                                                    <span>{formatMeasurement(drivingPct, 1, "%")} Driving • {formatMeasurement(idlePct, 1, "%")} Idling</span>
                                                 </div>
                                                 <div className="h-3 w-full rounded-full bg-slate-100 overflow-hidden flex border border-slate-200/50">
                                                     <div
                                                         className="h-full bg-sky-500 transition-all"
-                                                        style={{ width: `${drivingPct || 0}%` }}
-                                                        title={`Driving: ${drivingPct?.toFixed(1)}%`}
+                                                        style={{ width: `${isKnownNumber(drivingPct) ? drivingPct : 0}%` }}
+                                                        title={`Driving: ${formatMeasurement(drivingPct, 1, "%")}`}
                                                     />
                                                     <div
                                                         className="h-full bg-rose-500 transition-all"
-                                                        style={{ width: `${idlePct || 0}%` }}
-                                                        title={`Idling: ${idlePct?.toFixed(1)}%`}
+                                                        style={{ width: `${isKnownNumber(idlePct) ? idlePct : 0}%` }}
+                                                        title={`Idling: ${formatMeasurement(idlePct, 1, "%")}`}
                                                     />
                                                 </div>
                                             </div>
@@ -368,16 +379,19 @@ export default function VehicleFuelDetailModal({
                                                                 {t.station_name || "—"}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 font-bold text-slate-800 whitespace-nowrap">
-                                                                {t.fuel_type || "DIESEL"}
+                                                                {fuelTypeLabel(t.fuel_type)}
+                                                                {isRefundAdjustment(t) && (
+                                                                    <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-bold text-amber-800">Refund</span>
+                                                                )}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-black text-slate-900 whitespace-nowrap">
                                                                 {formatNumber(t.litres, 1)}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
-                                                                {t.unit_price ? `AED ${t.unit_price.toFixed(2)}` : "—"}
+                                                                {t.unit_price != null ? `AED ${fixedOrDash(t.unit_price)}` : "—"}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-black text-emerald-800 whitespace-nowrap">
-                                                                {t.total_cost ? `AED ${formatNumber(t.total_cost, 2)}` : "—"}
+                                                                {t.total_cost != null ? `AED ${formatNumber(t.total_cost, 2)}` : "—"}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
                                                                 {t.odometer_km ? `${formatNumber(t.odometer_km, 0)} km` : (
@@ -403,7 +417,7 @@ export default function VehicleFuelDetailModal({
                                         <div className="rounded-2xl border border-sky-200 bg-sky-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-sky-700 block">Driving Time</span>
                                             <span className="text-2xl font-black text-sky-900 block mt-1">
-                                                {drivingHours.toFixed(1)} hrs
+                                                {formatMeasurement(drivingHours, 1, "hrs")}
                                             </span>
                                             <span className="text-[11px] text-sky-700 mt-1 block">
                                                 {activity.trip_count ? `${activity.trip_count} trips recorded` : "Moving telemetry"}
@@ -413,7 +427,7 @@ export default function VehicleFuelDetailModal({
                                         <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-amber-700 block">Idling Time</span>
                                             <span className="text-2xl font-black text-amber-900 block mt-1">
-                                                {idleHours.toFixed(1)} hrs
+                                                {formatMeasurement(idleHours, 1, "hrs")}
                                             </span>
                                             <span className="text-[11px] text-amber-700 mt-1 block">
                                                 {activity.idle_events_count ? `${activity.idle_events_count} idle sessions` : "Stationary ignition"}
@@ -423,7 +437,7 @@ export default function VehicleFuelDetailModal({
                                         <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-slate-500 block">Engine Hours</span>
                                             <span className="text-2xl font-black text-slate-800 block mt-1">
-                                                {engineHours.toFixed(1)} hrs
+                                                {formatMeasurement(engineHours, 1, "hrs")}
                                             </span>
                                             <span className="text-[11px] text-slate-500 mt-1 block">
                                                 Total operational runtime
@@ -450,7 +464,9 @@ export default function VehicleFuelDetailModal({
                                                         </div>
                                                         <div className="text-right">
                                                             <span className="font-mono font-bold text-amber-700">
-                                                                {ev.duration_minutes ? `${ev.duration_minutes.toFixed(0)} mins` : `${(ev.duration / 60).toFixed(0)} mins`}
+                                                                {isKnownNumber(ev.duration_minutes)
+                                                                    ? formatMeasurement(ev.duration_minutes, 0, "mins")
+                                                                    : formatMeasurement(isKnownNumber(ev.duration) ? ev.duration / 60 : null, 0, "mins")}
                                                             </span>
                                                         </div>
                                                     </div>

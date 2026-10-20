@@ -19,6 +19,7 @@ Validates:
 import os
 import sys
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -222,14 +223,23 @@ class TestFuelEfficiency(unittest.TestCase):
         ]
         mock_dist_map = {"V-1": 1000.0}
         mock_units = [{"id": 1, "nm": "V-1"}]
+        # Actual Wialon trips per day (12:00 UAE starts): 300 + 100 + 600 = 1000 km
+        noon = lambda d: int(datetime(2026, 8, d, 8, 0, tzinfo=timezone.utc).timestamp())
+        unit_trips = {1: {"status": "complete", "error": None, "trips": [
+            {"start_time": noon(3), "end_time": noon(3) + 3600, "distance_km": 300.0},
+            {"start_time": noon(4), "end_time": noon(4) + 3600, "distance_km": 100.0},
+            {"start_time": noon(10), "end_time": noon(10) + 3600, "distance_km": 600.0},
+        ]}}
 
-        # Day trend
-        day_trend = calculate_efficiency_trend(mock_txs, mock_dist_map, mock_units, group_by="day")
+        # Day trend: real per-day distance, never apportioned by fuel share
+        day_trend = calculate_efficiency_trend(mock_txs, mock_dist_map, mock_units, group_by="day", unit_trips=unit_trips)
         self.assertEqual(len(day_trend.data), 3)
         self.assertEqual(day_trend.data[0].period, "2026-08-03")
+        self.assertEqual([d.distance_km for d in day_trend.data], [300.0, 100.0, 600.0])
+        self.assertEqual([d.fuel_efficiency_l_per_100km for d in day_trend.data], [16.67, 50.0, 16.67])
 
         # Month trend
-        month_trend = calculate_efficiency_trend(mock_txs, mock_dist_map, mock_units, group_by="month")
+        month_trend = calculate_efficiency_trend(mock_txs, mock_dist_map, mock_units, group_by="month", unit_trips=unit_trips)
         self.assertEqual(len(month_trend.data), 1)
         self.assertEqual(month_trend.data[0].period, "2026-08")
         self.assertEqual(month_trend.data[0].litres, 200.0)
@@ -242,7 +252,13 @@ class TestFuelEfficiency(unittest.TestCase):
 
     def test_09_wialon_caching_and_deduplication(self):
         """Verify repeated calls for same date range reuse cache without re-querying Wialon."""
-        with patch("app.fuel.wialon_distance.execute_wialon_group_trips_report") as mock_group:
+        # Engine report and login are patched too so this test never reaches live Wialon
+        with patch("app.fuel.wialon_distance.execute_wialon_group_trips_report") as mock_group, \
+             patch("app.fuel.wialon_distance.execute_wialon_group_engine_idle_report",
+                   return_value={"vehicles": [{"vehicle_name": "17428", "in_motion_seconds": 3600,
+                                               "total_idle_seconds": 600, "engine_hours_seconds": 4200,
+                                               "total_time_seconds": 86400, "incomplete_fields": []}]}), \
+             patch("app.fuel.wialon_distance.login", return_value="mock-sid"):
             mock_group.return_value = [{"vehicle_name": "17428", "mileage_km": 500.0}]
 
             # Call 1

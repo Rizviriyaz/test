@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from app.main import app
 from app.fuel.db import build_fingerprint
 from app.fuel.importer import execute_fuel_import, validate_confirmed_mapping, FuelImportError
+from offline_guard import OfflineGuard
 
 
 def create_test_excel(headers, rows, sheet_name="Fuel Statement", start_row=1, title_rows=None):
@@ -113,6 +114,15 @@ def run_phase2_tests():
             filtered = [r for r in filtered if r.get("fuel_type") and filters["fuel_type"].lower() in r["fuel_type"].lower()]
         return filtered[offset: offset + limit], len(filtered)
 
+    def mock_fetch_for_analytics(filters, bearer_token=None):
+        # Mirrors the current substring (ilike) vehicle filter of fetch_fuel_transactions_for_analytics
+        rows, _ = mock_get_transactions_list(filters, limit=len(mock_db_transactions) or 1, offset=0)
+        return rows
+
+    def mock_wialon_units(sid=None):
+        plates = sorted({t["vehicle_identifier"] for t in mock_db_transactions})
+        return [{"id": 9000 + i, "nm": plate} for i, plate in enumerate(plates, start=1)]
+
     mock_vehicle_lookup = {
         "dxb10293": 4201,
         "shj88211": 4202,
@@ -195,7 +205,7 @@ def run_phase2_tests():
             ["2026-03-05", "AUH 44120", "80.0"],       # Valid
             ["NOT_A_DATE", "AUH 44120", "80.0"],       # Invalid date
             ["2026-03-06", "", "80.0"],                # Missing vehicle
-            ["2026-03-07", "AUH 44120", "-15.0"],      # Negative litres
+            ["2026-03-07", "AUH 44120", "-15.0"],      # Negative litres: refund adjustment (Phase 1)
         ]
     )
     with patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
@@ -212,9 +222,11 @@ def run_phase2_tests():
         )
         print(f"Import status: {res_bad.status}, imported: {res_bad.rows_imported}, failed: {res_bad.rows_failed}")
         assert res_bad.status == "completed_with_errors"
-        assert res_bad.rows_imported == 1
-        assert res_bad.rows_failed == 3
-        print("[PASS] Invalid rows correctly isolated without destroying valid transactions.")
+        # Negative litres are now stored as a signed refund adjustment instead of being rejected
+        assert res_bad.rows_imported == 2
+        assert res_bad.rows_refund == 1
+        assert res_bad.rows_failed == 2
+        print("[PASS] Invalid rows correctly isolated without destroying valid transactions; refund kept as adjustment.")
 
     # Test 5 & 6 & 7: Deduplication (Internal, External, Legitimate Multi-Refuel)
     print("\n--- Test 5, 6, 7: Duplicate Detection & Multi-Refuel Validation ---")
@@ -300,6 +312,9 @@ def run_phase2_tests():
     with patch("app.main.authenticate_access_token", return_value={"id": "test-uuid-admin", "email": "admin@ats.ae", "role": "admin"}), \
          patch("app.fuel.routes.get_fuel_imports_list", side_effect=mock_get_imports_list), \
          patch("app.fuel.routes.get_fuel_transactions_list", side_effect=mock_get_transactions_list), \
+         patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", side_effect=mock_fetch_for_analytics), \
+         patch("app.fuel.routes.login", return_value="mock-sid"), \
+         patch("app.fuel.routes.get_all_vehicles", side_effect=mock_wialon_units), \
          patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
@@ -333,7 +348,8 @@ def run_phase2_tests():
         print("[PASS] GET /api/fuel/imports returned history successfully.")
 
         # 12: HTTP GET /api/fuel/transactions (with pagination & filter)
-        res_txns = client.get("/api/fuel/transactions?page=1&page_size=10&vehicle_identifier=DXB", headers=auth_headers)
+        # Exact vehicle filter (Phase 3): a plate, not a substring such as "DXB"
+        res_txns = client.get("/api/fuel/transactions?page=1&page_size=10&vehicle_identifier=DXB 10293", headers=auth_headers)
         assert res_txns.status_code == 200
         txns_data = res_txns.json()
         print(f"Filtered transactions count: {txns_data['count']}, page: {txns_data['page']}")
@@ -353,4 +369,9 @@ def run_phase2_tests():
 
 
 if __name__ == "__main__":
-    run_phase2_tests()
+    guard = OfflineGuard().start()
+    try:
+        run_phase2_tests()
+    finally:
+        guard.stop()
+    guard.assert_no_live_calls()

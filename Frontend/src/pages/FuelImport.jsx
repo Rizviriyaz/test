@@ -39,6 +39,7 @@ export default function FuelImport() {
     // Import history state
     const [history, setHistory] = useState([])
     const [loadingHistory, setLoadingHistory] = useState(true)
+    const [historyError, setHistoryError] = useState(null)
 
     const fileInputRef = useRef(null)
 
@@ -46,10 +47,13 @@ export default function FuelImport() {
     const loadHistory = async () => {
         try {
             setLoadingHistory(true)
+            setHistoryError(null)
             const res = await getFuelImports(20, 0)
             setHistory(Array.isArray(res?.imports) ? res.imports : [])
         } catch (err) {
-            console.error("Failed to fetch import history:", err)
+            // An outage must not read as "no previous imports"
+            setHistory([])
+            setHistoryError(err?.message || "Could not load import history.")
         } finally {
             setLoadingHistory(false)
         }
@@ -474,6 +478,10 @@ export default function FuelImport() {
                                     <div className="py-8 text-center text-xs text-slate-400">
                                         <Loader2 className="mx-auto h-5 w-5 animate-spin text-[#33758F] mb-2" />
                                         Loading import history…
+                                    </div>
+                                ) : historyError ? (
+                                    <div role="alert" className="py-8 text-center text-xs text-rose-600">
+                                        {historyError}
                                     </div>
                                 ) : history.length === 0 ? (
                                     <div className="py-8 text-center text-xs text-slate-400">

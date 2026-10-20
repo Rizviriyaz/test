@@ -20,6 +20,7 @@ import { useFuelFilters } from "../context/FuelFilterContext"
 import { getVehicleEfficiencyList } from "../../src/api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
 import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
+import { fixedOrDash, sortOrderLabels } from "../components/Fuel/fuelLabels"
 
 const SORT_OPTIONS = [
     { label: "Fuel Volume (Litres)", value: "litres" },
@@ -58,9 +59,10 @@ export default function VehicleRanking() {
                     page_size: pageSize,
                     sort_by: sortBy,
                     sort_order: sortOrder,
-                    status: statusFilter || undefined,
-                    vehicle_identifier: searchQuery || undefined,
+                    // Global filters first, so the local search box is never overwritten by them
                     ...queryParams,
+                    status: statusFilter || undefined,
+                    vehicle_identifier: searchQuery || queryParams.vehicle_identifier || undefined,
                 })
                 if (!active) return
                 setVehiclesData(res || { data: [], total: 0, page: 1 })
@@ -92,14 +94,26 @@ export default function VehicleRanking() {
                     ...queryParams,
                 })
                 if (!active) return
-                setAttentionVehicles(worstEffRes?.data || [])
+                // Only vehicles with a purchase-based ratio (suppressed ratios are null)
+                setAttentionVehicles((worstEffRes?.data || []).filter((v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined))
             } catch (err) {
+                if (!active) return
+                // Optional panel: hide it rather than keep the previous period's outliers
+                setAttentionVehicles([])
                 console.warn("Failed to fetch attention outliers:", err)
             }
         }
         fetchAttention()
         return () => { active = false }
     }, [queryParams])
+
+    // A new global period/filter starts from the first page (the old page may not exist any more).
+    // Adjusted during render, so the ranking effect never requests the stale page.
+    const [pageFilters, setPageFilters] = useState(queryParams)
+    if (pageFilters !== queryParams) {
+        setPageFilters(queryParams)
+        setPage(1)
+    }
 
     const totalPages = Math.max(1, Math.ceil((vehiclesData.total || 0) / pageSize))
 
@@ -168,7 +182,7 @@ export default function VehicleRanking() {
                                                         {v.vehicle_identifier}
                                                     </span>
                                                     <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
-                                                        High Burn
+                                                        Top L/100 km
                                                     </span>
                                                 </div>
 
@@ -182,7 +196,7 @@ export default function VehicleRanking() {
                                                 <div className="flex items-baseline justify-between text-[11px] text-slate-500">
                                                     <span>Cost / km:</span>
                                                     <span className="font-bold text-slate-800">
-                                                        AED {v.fuel_cost_per_km?.toFixed(2)}
+                                                        {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}` : "—"}
                                                     </span>
                                                 </div>
 
@@ -249,7 +263,7 @@ export default function VehicleRanking() {
                                                     : "text-slate-600 hover:text-slate-900"
                                             }`}
                                         >
-                                            Highest First (Best)
+                                            {sortOrderLabels(sortBy).desc}
                                         </button>
                                         <button
                                             type="button"
@@ -260,7 +274,7 @@ export default function VehicleRanking() {
                                                     : "text-slate-600 hover:text-slate-900"
                                             }`}
                                         >
-                                            Lowest First
+                                            {sortOrderLabels(sortBy).asc}
                                         </button>
                                     </div>
 

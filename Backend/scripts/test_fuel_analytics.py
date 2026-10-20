@@ -192,9 +192,11 @@ def run_api_endpoint_tests():
     assert res_unauth.status_code == 401
     print("[PASS] Unauthenticated request rejected with 401.")
 
-    # Mock auth and matching for unit testing endpoints with synthetic vehicles
+    # Mock auth and Wialon units: every mock identifier resolves to exactly one unit, so all rows are in KPI scope
+    mock_units = [{"id": 1, "nm": "DXB-101"}, {"id": 2, "nm": "AUH-202"}, {"id": 3, "nm": "SHJ-303"}]
     with patch("app.main.authenticate_access_token", return_value={"id": "test-uuid", "email": "admin@ats.ae", "role": "admin"}), \
-         patch("app.fuel.routes._filter_wialon_matched_transactions", side_effect=lambda tx, u: tx):
+         patch("app.fuel.routes.login", return_value="mock-sid"), \
+         patch("app.fuel.routes.get_all_vehicles", return_value=mock_units):
         auth_headers = {"Authorization": "Bearer test-valid-jwt"}
 
         # 10. Summary endpoint with mock DB

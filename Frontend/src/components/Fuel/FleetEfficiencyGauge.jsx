@@ -11,6 +11,18 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
         )
     }
 
+    // No response (request failed or not loaded): show nothing rather than a row of zero counts.
+    if (!efficiencyData) {
+        return (
+            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col items-center justify-center text-center">
+                <Info className="h-6 w-6 text-slate-400 mb-2" />
+                <h3 className="text-sm font-bold text-slate-700">Efficiency telemetry unavailable</h3>
+                <p className="text-[11px] text-slate-500 mt-1">No efficiency data was returned for this period.</p>
+            </div>
+        )
+    }
+
+    const telemetryUnknown = efficiencyData?.vehicles_telemetry_unknown || 0
     const eff = efficiencyData?.fuel_efficiency_l_per_100km
     const costPerKm = efficiencyData?.fuel_cost_per_km
     const totalDist = efficiencyData?.total_distance_km
@@ -133,6 +145,11 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
                         </div>
                     </div>
                 </div>
+                {telemetryUnknown > 0 && (
+                    <p className="mt-2 text-[10px] text-amber-700">
+                        {telemetryUnknown} tracked vehicle{telemetryUnknown === 1 ? "" : "s"} with unknown Wialon distance (excluded from L/100 km)
+                    </p>
+                )}
             </div>
         </div>
     )
