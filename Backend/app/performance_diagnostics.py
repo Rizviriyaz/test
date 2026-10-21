@@ -21,11 +21,11 @@ def timed_calculation(endpoint: str):
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
             started = time.perf_counter()
-            logging.info("PERF calculation start request_id=%s endpoint=%s", request_trace_id.get(), endpoint)
+            logging.debug("PERF calculation start request_id=%s endpoint=%s", request_trace_id.get(), endpoint)
             try:
                 return func(*args, **kwargs)
             finally:
-                logging.info(
+                logging.debug(
                     "PERF calculation end request_id=%s endpoint=%s duration_ms=%.1f",
                     request_trace_id.get(), endpoint, (time.perf_counter() - started) * 1000,
                 )
@@ -43,14 +43,14 @@ def map_with_request_context(executor, function, values):
 
 
 def log_cache_state(endpoint: str, hit: bool) -> None:
-    logging.info(
+    logging.debug(
         "PERF analytics cache request_id=%s endpoint=%s state=%s",
         request_trace_id.get(), endpoint, "hit" if hit else "miss",
     )
 
 
 def log_data_window(endpoint: str, from_time: int, to_time: int) -> None:
-    logging.info(
+    logging.debug(
         "PERF data_window request_id=%s endpoint=%s from_utc=%s to_utc=%s duration_hours=%.3f",
         request_trace_id.get(), endpoint, from_time, to_time, max(0, to_time - from_time) / 3600,
     )

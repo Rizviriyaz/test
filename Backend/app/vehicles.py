@@ -505,7 +505,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         fleet.append(vehicle_record)
 
     if seed_vehicles:
-        logging.info(
+        logging.debug(
             "PERF idle_seed request_id=%s vehicles=%d history_reads=%d duration_ms=%.1f",
             request_trace_id.get(), seed_vehicles, seed_history_reads, seed_seconds * 1000,
         )

@@ -44,12 +44,16 @@ from app.vehicles import (
 from app.status import calculate_idle_duration
 from app.fuel.routes import router as fuel_router
 
-# Without a root handler, logging.info (PERF and trace diagnostics) is dropped at the default WARNING level.
+# Routine PERF timings, cache state and calculation traces log at DEBUG; set LOG_LEVEL=DEBUG to see them.
+# INFO keeps startup events and concise request failures; warnings and errors are always shown.
 _log_level = os.getenv("LOG_LEVEL", "INFO").strip().upper()
 logging.basicConfig(
     level=_log_level if isinstance(logging.getLevelName(_log_level), int) else logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+# The Groq SDK's httpx client logs every HTTP call at INFO; keep its warnings and errors only
+if logging.getLogger().getEffectiveLevel() > logging.DEBUG:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -121,7 +125,7 @@ async def require_supabase_auth(request: Request, call_next):
     trace_token = request_trace_id.set(trace_id)
     request_started = time.perf_counter()
     if tracked_path:
-        logging.info("PERF request start request_id=%s method=%s path=%s", trace_id, request.method, request.url.path)
+        logging.debug("PERF request start request_id=%s method=%s path=%s", trace_id, request.method, request.url.path)
     response = None
     try:
         response = await _authenticate_and_dispatch(request, call_next)
@@ -129,7 +133,15 @@ async def require_supabase_auth(request: Request, call_next):
     finally:
         if tracked_path:
             status_code = response.status_code if response is not None else "exception"
-            logging.info(
+            # Successful timings are routine (DEBUG); client errors stay at INFO, 5xx and exceptions at WARNING
+            if response is None or status_code >= 500:
+                end_level = logging.WARNING
+            elif status_code >= 400:
+                end_level = logging.INFO
+            else:
+                end_level = logging.DEBUG
+            logging.log(
+                end_level,
                 "PERF request end request_id=%s path=%s status=%s total_ms=%.1f",
                 trace_id, request.url.path, status_code, (time.perf_counter() - request_started) * 1000,
             )
@@ -1002,7 +1014,7 @@ def get_dashboard_mileage(
 
                 # Diagnostic logging for high mileage, NEVER capping or zeroing legitimate Wialon values
                 if raw_mileage > 1000.0:
-                    logging.info(
+                    logging.debug(
                         f"Diagnostic: High Wialon mileage {raw_mileage:.2f} km reported for vehicle {v_name} (ID: {vid}) in window {eff_from}..{eff_to}"
                     )
 

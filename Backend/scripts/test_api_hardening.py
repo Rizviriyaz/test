@@ -3,7 +3,7 @@ Offline tests for the medium- and low-severity audit items (M1-M16, L1-L10) that
 
   - M1: auth 401 responses carry CORS headers (CORS is the outermost middleware)
   - M2: 500/502 bodies never contain exception text
-  - M6: the root logger is configured so PERF/info diagnostics are emitted
+  - M6: the root logger is configured at LOG_LEVEL; routine PERF timings log at DEBUG, failures stay visible
   - M7: startup survives a Wialon login failure; login failures raise WialonAPIError
 
 Auth, login and Wialon calls are mocked; outbound `requests` calls are blocked. Run from Backend/:
@@ -69,7 +69,69 @@ def test_logging_configured():
     expected = logging.getLevelName(os.getenv("LOG_LEVEL", "INFO").strip().upper())
     expected = expected if isinstance(expected, int) else logging.INFO
     assert root.getEffectiveLevel() == expected, (root.getEffectiveLevel(), expected)
-    print(f"[PASS] M6: root logger has a handler at LOG_LEVEL ({logging.getLevelName(expected)}; default INFO emits PERF).")
+    print(f"[PASS] M6: root logger has a handler at LOG_LEVEL ({logging.getLevelName(expected)}).")
+
+
+class _Response:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def test_log_levels():
+    """Routine PERF timings log at DEBUG; request failures and Wialon errors stay visible at default INFO."""
+    records = []
+    handler = logging.Handler(level=logging.DEBUG)
+    handler.emit = records.append
+    root = logging.getLogger()
+    previous_level = root.level
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+
+    def levels(prefix):
+        return [r.levelno for r in records if r.getMessage().startswith(prefix)]
+
+    try:
+        for payload, expected in (({"items": []}, logging.DEBUG), ({"error": 7}, logging.WARNING),
+                                  ({"error": 1003}, logging.DEBUG)):
+            records.clear()
+            with patch.object(wialon._wialon_http_session, "post", return_value=_Response(payload)), \
+                    patch("app.wialon.time.sleep"):
+                assert wialon.wialon_request("report/exec_report", {}, sid="s", max_retries=1) == payload
+            assert levels("PERF wialon end") == [expected], (payload, levels("PERF wialon end"))
+
+        client = _client()
+        main._cache.clear()
+        main.set_cache("fleet-vehicles-live", {"count": 0, "vehicles": []})
+        cases = [
+            (logging.DEBUG, 200, patch("app.main.login")),
+            (logging.INFO, 401, None),
+            (logging.WARNING, 502, patch("app.main.login", side_effect=WialonAPIError("raw"))),
+        ]
+        for expected, status, login_patch in cases:
+            if status == 502:
+                main._cache.clear()
+            records.clear()
+            headers = AUTH_HEADERS if login_patch else {}
+            with patch("app.main.authenticate_access_token", return_value=USER):
+                if login_patch:
+                    with login_patch:
+                        res = client.get("/api/vehicles", headers=headers)
+                else:
+                    res = client.get("/api/vehicles", headers=headers)
+            assert res.status_code == status, (status, res.status_code, res.text)
+            assert levels("PERF request start") == [logging.DEBUG], levels("PERF request start")
+            assert levels("PERF request end") == [expected], (status, levels("PERF request end"))
+            if status == 200:
+                assert levels("PERF calculation") == [logging.DEBUG, logging.DEBUG], levels("PERF calculation")
+        main._cache.clear()
+    finally:
+        root.removeHandler(handler)
+        root.setLevel(previous_level)
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING or previous_level <= logging.DEBUG
+    print("[PASS] Log levels: PERF timings at DEBUG; 4xx request end at INFO; 5xx and Wialon errors at WARNING.")
 
 
 def test_startup_survives_login_failure():
@@ -514,6 +576,7 @@ TESTS = [
     test_auth_errors_carry_cors_headers,
     test_internal_errors_are_generic,
     test_logging_configured,
+    test_log_levels,
     test_startup_survives_login_failure,
     test_caches_are_bounded,
     test_expired_or_stale_tokens_rejected,

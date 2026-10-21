@@ -445,8 +445,9 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                     "driving_to_idle_ratio": drive_idle_ratio,
                     "trip_count": len(trips)
                 }
-            except Exception:
-                logging.exception("Wialon utilization data failed for vehicle %s", vid)
+            except Exception as exc:
+                # The route handler logs the traceback when this propagates; keep the vehicle context here
+                logging.error("Wialon utilization data failed for vehicle %s: %s", vid, exc)
                 raise
 
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -669,7 +670,7 @@ def get_trips_mileage_analytics(
                     }
 
                 fallback_started = time.perf_counter()
-                logging.info(
+                logging.debug(
                     "PERF trips fallback start request_id=%s reason=%s",
                     request_trace_id.get(), fallback_reason,
                 )
@@ -684,7 +685,7 @@ def get_trips_mileage_analytics(
                 trip_duration_seconds = sum(t.get("duration", 0) for t in trips)
                 avg_spd = round(gps_dist * 3600 / trip_duration_seconds, 1) if trip_duration_seconds > 0 else None
 
-                logging.info(
+                logging.debug(
                     "PERF trips fallback end request_id=%s duration_ms=%.1f history_messages=%s",
                     request_trace_id.get(), (time.perf_counter() - fallback_started) * 1000, len(raw_msgs),
                 )
@@ -712,13 +713,13 @@ def get_trips_mileage_analytics(
                         for t in trips
                     ]
                 }
-            except Exception:
+            except Exception as exc:
                 if fallback_started is not None:
-                    logging.info(
+                    logging.debug(
                         "PERF trips fallback failed request_id=%s duration_ms=%.1f",
                         request_trace_id.get(), (time.perf_counter() - fallback_started) * 1000,
                     )
-                logging.exception("Wialon trip data failed for vehicle %s", vid)
+                logging.error("Wialon trip data failed for vehicle %s: %s", vid, exc)
                 raise
 
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -874,8 +875,8 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
                     prev_active_event = None
 
             return events
-        except Exception:
-            logging.exception("Wialon safety data failed for vehicle %s", vid)
+        except Exception as exc:
+            logging.error("Wialon safety data failed for vehicle %s: %s", vid, exc)
             raise
 
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -1001,7 +1002,7 @@ def _run_alerts_background_refresh() -> None:
         # Bypass the health/safety caches so the new entry's timestamp reflects data read now
         _build_fleet_alerts(use_cache=False)
         _alerts_refresh_failed_at = 0.0
-        logging.info("PERF alerts background refresh request_id=%s state=ok duration_ms=%.1f",
+        logging.debug("PERF alerts background refresh request_id=%s state=ok duration_ms=%.1f",
                      request_trace_id.get(), (time.perf_counter() - started) * 1000)
     except Exception:
         _alerts_refresh_failed_at = time.monotonic()

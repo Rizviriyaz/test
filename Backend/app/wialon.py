@@ -65,7 +65,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
 
             res_json = response.json()
         except Exception as e:
-            logging.info(
+            logging.warning(
                 "PERF wialon end request_id=%s service=%s duration_ms=%.1f attempt=%s outcome=transport_error",
                 request_trace_id.get(), svc, (time.perf_counter() - request_started) * 1000, attempt + 1,
             )
@@ -74,8 +74,13 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
             time.sleep(0.3 * (attempt + 1))
             continue
 
-        outcome = f"wialon_error_{res_json.get('error')}" if isinstance(res_json, dict) and "error" in res_json else "success"
-        logging.info(
+        error_code = res_json.get("error") if isinstance(res_json, dict) else None
+        # {"error": 0} is Wialon's success reply for void services such as report/cleanup_result
+        is_error = isinstance(res_json, dict) and "error" in res_json and error_code != 0
+        outcome = f"wialon_error_{error_code}" if is_error else "success"
+        # Per-call timings are routine; Wialon errors stay visible except 1003, which is retried with backoff below
+        logging.log(
+            logging.DEBUG if outcome == "success" or error_code == 1003 else logging.WARNING,
             "PERF wialon end request_id=%s service=%s duration_ms=%.1f attempt=%s outcome=%s",
             request_trace_id.get(), svc, (time.perf_counter() - request_started) * 1000, attempt + 1, outcome,
         )
@@ -89,7 +94,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
         if isinstance(res_json, dict) and res_json.get("error") == 1 and not is_retry and svc != "token/login":
             with _login_lock:
                 if SID == current_sid or not SID:
-                    print("Wialon session invalid (error 1). Refreshing session...")
+                    logging.warning("Wialon session invalid (error 1). Refreshing session...")
                     new_sid = login(force=True)
                 else:
                     new_sid = SID

@@ -1,11 +1,10 @@
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
 import { useNavigate } from "react-router-dom"
 import {
     Bot,
     X,
     Send,
     Trash2,
-    Minus,
     Loader2,
     RefreshCw,
     User,
@@ -14,6 +13,7 @@ import {
     Navigation,
     Clock,
     Sparkles,
+    ChevronDown,
 } from "lucide-react"
 import { useAuth } from "../../context/useAuth"
 import { sendAiChatMessage } from "../../api/fleetApi"
@@ -108,8 +108,8 @@ export default function AiAssistantWidget() {
     const { isAuthenticated } = useAuth()
     const navigate = useNavigate()
 
-    const [isOpen, setIsOpen] = useState(false)
-    const [isVisible, setIsVisible] = useState(false)
+    // Lifecycle states: "closed" | "entering" | "open" | "closing"
+    const [status, setStatus] = useState("closed")
     const [messages, setMessages] = useState([
         {
             role: "assistant",
@@ -122,32 +122,80 @@ export default function AiAssistantWidget() {
     const [error, setError] = useState(null)
     const messagesEndRef = useRef(null)
     const inputRef = useRef(null)
+    const panelRef = useRef(null)
+    const safetyTimerRef = useRef(null)
 
-    // Smooth open animation: mount first, then animate transform/opacity
-    const handleOpen = () => {
-        setIsVisible(true)
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                setIsOpen(true)
-            })
-        })
-    }
+    const isPrefersReducedMotion = useCallback(() => {
+        return (
+            typeof window !== "undefined" &&
+            Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches)
+        )
+    }, [])
 
-    // Smooth close animation: animate out first, then unmount from DOM
-    const handleClose = () => {
-        setIsOpen(false)
-        setTimeout(() => {
-            setIsVisible(false)
-        }, 220)
-    }
+    const clearSafetyTimer = useCallback(() => {
+        if (safetyTimerRef.current) {
+            clearTimeout(safetyTimerRef.current)
+            safetyTimerRef.current = null
+        }
+    }, [])
 
-    const toggleOpen = () => {
-        if (isOpen) {
+    // Smooth open animation: mount with entering animation, transition to open
+    const handleOpen = useCallback(() => {
+        clearSafetyTimer()
+        if (isPrefersReducedMotion()) {
+            setStatus("open")
+            return
+        }
+
+        setStatus("entering")
+        safetyTimerRef.current = setTimeout(() => {
+            setStatus("open")
+            safetyTimerRef.current = null
+        }, 350)
+    }, [clearSafetyTimer, isPrefersReducedMotion])
+
+    // Smooth close animation: transition to closing animation, unmount when done
+    const handleClose = useCallback(() => {
+        clearSafetyTimer()
+        if (isPrefersReducedMotion()) {
+            setStatus("closed")
+            return
+        }
+
+        setStatus("closing")
+        safetyTimerRef.current = setTimeout(() => {
+            setStatus("closed")
+            safetyTimerRef.current = null
+        }, 300)
+    }, [clearSafetyTimer, isPrefersReducedMotion])
+
+    const toggleOpen = useCallback(() => {
+        if (status === "open" || status === "entering") {
             handleClose()
         } else {
             handleOpen()
         }
-    }
+    }, [status, handleClose, handleOpen])
+
+    const handleAnimationEnd = useCallback(
+        (e) => {
+            if (e.target !== panelRef.current) return
+            clearSafetyTimer()
+
+            if (status === "entering") {
+                setStatus("open")
+            } else if (status === "closing") {
+                setStatus("closed")
+            }
+        },
+        [status, clearSafetyTimer]
+    )
+
+    useEffect(() => {
+        return () => {
+            clearSafetyTimer()
+        }
+    }, [clearSafetyTimer])
 
     useEffect(() => {
         const handleTrigger = () => {
@@ -155,17 +203,22 @@ export default function AiAssistantWidget() {
         }
         window.addEventListener("open-ai-assistant", handleTrigger)
         return () => window.removeEventListener("open-ai-assistant", handleTrigger)
-    }, [])
+    }, [handleOpen])
+
+    const isMounted = status !== "closed"
+    const isOpenedOrOpening = status === "open" || status === "entering"
 
     useEffect(() => {
-        if (isOpen) {
+        if (isMounted) {
             messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
-            setTimeout(() => inputRef.current?.focus(), 150)
+            const timer = setTimeout(() => {
+                inputRef.current?.focus({ preventScroll: true })
+            }, 150)
+            return () => clearTimeout(timer)
         }
-    }, [isOpen, messages, isLoading])
+    }, [isMounted, messages, isLoading])
 
     if (!isAuthenticated) return null
-
 
     const handleSend = async (textToSend) => {
         const query = (textToSend || input).trim()
@@ -277,7 +330,7 @@ export default function AiAssistantWidget() {
                                 key={aIdx}
                                 type="button"
                                 onClick={() => handleActionClick(act)}
-                                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-slate-50 hover:bg-brand text-brand hover:text-white border border-brand/25 transition-all duration-150 cursor-pointer select-none"
+                                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg bg-brand-light hover:bg-brand text-brand hover:text-white border border-brand-border/80 hover:border-brand transition-all duration-150 cursor-pointer select-none shadow-2xs"
                             >
                                 {act.type === "map" && <MapPin className="w-3 h-3 shrink-0" />}
                                 {act.type === "vehicle" && <ExternalLink className="w-3 h-3 shrink-0" />}
@@ -294,52 +347,63 @@ export default function AiAssistantWidget() {
     }
 
     return (
-        <div className="fixed bottom-6 right-6 z-[9999] font-sans antialiased">
+        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-[9999] font-sans antialiased flex flex-col items-end">
             {/* ─── CHAT PANEL WITH SMOOTH UX ANIMATIONS ────────────────────── */}
-            {isVisible && (
+            {isMounted && (
                 <div
-                    className={`mb-3 w-[calc(100vw-3rem)] max-w-[360px] sm:w-[410px] sm:max-w-none h-[550px] max-h-[calc(100dvh-100px)] bg-white border border-slate-200 rounded-xl shadow-xl flex flex-col overflow-hidden origin-bottom-right transition-all duration-[220ms] ease-out ${
-                        isOpen
-                            ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
-                            : "opacity-0 translate-y-2 scale-[0.96] pointer-events-none"
+                    ref={panelRef}
+                    onAnimationEnd={handleAnimationEnd}
+                    role="dialog"
+                    aria-label="Fleet Operations Copilot"
+                    className={`mb-3 w-[calc(100vw-2rem)] sm:w-[420px] max-w-[420px] h-[560px] max-h-[calc(100dvh-6rem)] bg-white border border-slate-200/90 rounded-2xl shadow-[0_10px_35px_-5px_rgba(15,23,42,0.14),0_20px_48px_-10px_rgba(15,23,42,0.18)] flex flex-col overflow-hidden origin-bottom-right ${
+                        status === "entering"
+                            ? "ai-assistant-entering"
+                            : status === "closing"
+                              ? "ai-assistant-closing"
+                              : "ai-assistant-open"
                     }`}
                 >
                     {/* Header */}
-                    <div className="px-4 py-3 bg-brand text-white flex items-center justify-between select-none shrink-0">
-                        <div className="flex items-center gap-2.5">
-                            <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center text-white">
+                    <div className="px-4 py-3 bg-gradient-to-r from-[#295F74] to-[#33758F] text-white flex items-center justify-between select-none shrink-0 shadow-xs">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                            <div className="relative w-8 h-8 rounded-lg bg-white/15 border border-white/20 flex items-center justify-center text-white shrink-0 shadow-xs">
                                 <Bot className="w-4.5 h-4.5" />
+                                <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-[#295F74]" />
                             </div>
-                            <div>
-                                <h3 className="font-semibold text-sm leading-tight text-white">
+                            <div className="min-w-0">
+                                <h3 className="font-semibold text-sm leading-tight text-white truncate">
                                     Fleet Operations Copilot
                                 </h3>
-                                <p className="text-[11px] text-white/80">
+                                <p className="text-[11px] text-white/80 leading-tight truncate">
                                     Live telemetry & fleet assistant
                                 </p>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1 shrink-0">
                             <button
+                                type="button"
                                 onClick={handleClearChat}
                                 title="Clear conversation"
-                                className="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
+                                aria-label="Clear conversation"
+                                className="p-1.5 text-white/80 hover:text-white hover:bg-white/15 rounded-lg transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
                             >
                                 <Trash2 className="w-4 h-4" />
                             </button>
                             <button
+                                type="button"
                                 onClick={handleClose}
                                 title="Close assistant"
-                                className="p-1.5 text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-colors cursor-pointer"
+                                aria-label="Close assistant"
+                                className="p-1.5 text-white/80 hover:text-white hover:bg-white/15 rounded-lg transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40"
                             >
-                                <Minus className="w-4 h-4" />
+                                <X className="w-4 h-4" />
                             </button>
                         </div>
                     </div>
 
                     {/* Messages Container */}
-                    <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs sm:text-sm text-slate-800 bg-slate-50/60">
+                    <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs sm:text-[13px] text-slate-800 bg-slate-50/70">
                         {messages.map((msg, idx) => (
                             <div
                                 key={idx}
@@ -348,23 +412,23 @@ export default function AiAssistantWidget() {
                                 }`}
                             >
                                 {msg.role === "assistant" && (
-                                    <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+                                    <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
                                         <Bot className="w-4 h-4" />
                                     </div>
                                 )}
 
                                 <div
-                                    className={`max-w-[85%] px-3.5 py-2.5 rounded-xl ${
+                                    className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl ${
                                         msg.role === "user"
-                                            ? "bg-brand text-white rounded-br-xs"
-                                            : "bg-white border border-slate-200 text-slate-800 rounded-bl-xs"
+                                            ? "bg-brand text-white rounded-br-xs shadow-xs"
+                                            : "bg-white border border-slate-200/90 text-slate-800 rounded-bl-xs shadow-2xs"
                                     }`}
                                 >
                                     {renderMessageContent(msg)}
                                 </div>
 
                                 {msg.role === "user" && (
-                                    <div className="w-7 h-7 rounded-lg bg-slate-200 text-slate-700 flex items-center justify-center flex-shrink-0 mt-0.5">
+                                    <div className="w-7 h-7 rounded-lg bg-slate-200 text-slate-700 flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
                                         <User className="w-4 h-4" />
                                     </div>
                                 )}
@@ -374,23 +438,24 @@ export default function AiAssistantWidget() {
                         {/* Loading Indicator */}
                         {isLoading && (
                             <div className="flex gap-2.5 justify-start">
-                                <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+                                <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center shrink-0 mt-0.5 shadow-2xs">
                                     <Bot className="w-4 h-4" />
                                 </div>
-                                <div className="bg-white border border-slate-200 px-3.5 py-2.5 rounded-xl rounded-bl-xs flex items-center gap-2 text-slate-500">
-                                    <Loader2 className="w-4 h-4 animate-spin text-brand" />
-                                    <span className="text-xs">Checking fleet telemetry...</span>
+                                <div className="bg-white border border-slate-200/90 px-3.5 py-2.5 rounded-2xl rounded-bl-xs flex items-center gap-2.5 text-slate-500 shadow-2xs">
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-brand shrink-0" />
+                                    <span className="text-xs font-medium text-slate-600">Analyzing fleet telemetry...</span>
                                 </div>
                             </div>
                         )}
 
                         {/* Error Alert */}
                         {error && (
-                            <div className="bg-rose-50 border border-rose-200 text-rose-700 p-3 rounded-xl text-xs flex items-center justify-between gap-2">
-                                <span>{error}</span>
+                            <div className="bg-rose-50 border border-rose-200 text-rose-700 p-3 rounded-xl text-xs flex items-center justify-between gap-2 shadow-2xs">
+                                <span className="leading-snug">{error}</span>
                                 <button
+                                    type="button"
                                     onClick={() => handleSend()}
-                                    className="px-2 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[11px] rounded font-medium transition-colors flex items-center gap-1 cursor-pointer"
+                                    className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white text-[11px] rounded-lg font-medium transition-colors flex items-center gap-1 cursor-pointer shrink-0 shadow-2xs active:scale-95"
                                 >
                                     <RefreshCw className="w-3 h-3" /> Retry
                                 </button>
@@ -402,60 +467,78 @@ export default function AiAssistantWidget() {
 
                     {/* Quick Prompts */}
                     {messages.length <= 2 && !isLoading && (
-                        <div className="px-3 py-2 border-t border-slate-200 bg-white flex flex-wrap gap-1.5 shrink-0">
-                            {QUICK_PROMPTS.map((prompt, pIdx) => (
-                                <button
-                                    key={pIdx}
-                                    onClick={() => handleSend(prompt)}
-                                    className="text-[11px] bg-slate-100 hover:bg-brand/10 hover:border-brand/40 border border-slate-200 text-slate-700 hover:text-brand px-2.5 py-1 rounded-full transition-all text-left truncate max-w-full cursor-pointer"
-                                >
-                                    {prompt}
-                                </button>
-                            ))}
+                        <div className="px-3.5 py-2.5 border-t border-slate-200/80 bg-white flex flex-col gap-1.5 shrink-0">
+                            <div className="flex items-center gap-1 text-[11px] font-medium text-slate-500">
+                                <Sparkles className="w-3 h-3 text-brand" />
+                                <span>Suggested prompts</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {QUICK_PROMPTS.map((prompt, pIdx) => (
+                                    <button
+                                        key={pIdx}
+                                        type="button"
+                                        onClick={() => handleSend(prompt)}
+                                        className="text-[11px] font-medium bg-slate-50 hover:bg-brand-light border border-slate-200/90 hover:border-brand-border text-slate-700 hover:text-brand px-2.5 py-1 rounded-full transition-all text-left truncate max-w-full cursor-pointer shadow-2xs active:scale-[0.98]"
+                                    >
+                                        {prompt}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     )}
 
                     {/* Input Area */}
-                    <div className="p-3 bg-white border-t border-slate-200 flex items-center gap-2 shrink-0">
-                        <textarea
-                            ref={inputRef}
-                            value={input}
-                            onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={handleKeyDown}
-                            placeholder="Ask about idling, vehicles, alerts..."
-                            rows={1}
-                            disabled={isLoading}
-                            className="flex-1 bg-slate-50 border border-slate-200 focus:border-brand focus:ring-1 focus:ring-brand rounded-xl px-3.5 py-2 text-xs sm:text-sm text-slate-900 placeholder-slate-400 resize-none outline-none transition-all disabled:opacity-50 max-h-24"
-                        />
-                        <button
-                            onClick={() => handleSend()}
-                            disabled={!input.trim() || isLoading}
-                            className="w-9 h-9 bg-brand hover:bg-brand-hover disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl flex items-center justify-center flex-shrink-0 transition-colors cursor-pointer"
-                        >
-                            <Send className="w-4 h-4" />
-                        </button>
+                    <div className="p-3 bg-white border-t border-slate-200/80 shrink-0">
+                        <div className="flex items-end gap-2 bg-slate-50/90 border border-slate-200/90 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15 focus-within:bg-white rounded-xl p-1.5 transition-all shadow-2xs">
+                            <textarea
+                                ref={inputRef}
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyDown={handleKeyDown}
+                                placeholder="Ask about idling, vehicles, alerts..."
+                                rows={1}
+                                disabled={isLoading}
+                                className="flex-1 bg-transparent px-2.5 py-1.5 text-xs sm:text-sm text-slate-900 placeholder-slate-400 resize-none outline-none disabled:opacity-50 max-h-24 leading-relaxed"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => handleSend()}
+                                disabled={!input.trim() || isLoading}
+                                title="Send message"
+                                aria-label="Send message"
+                                className="w-8 h-8 sm:w-9 sm:h-9 bg-brand hover:bg-brand-hover disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-lg flex items-center justify-center shrink-0 transition-all cursor-pointer disabled:cursor-not-allowed active:scale-95 shadow-2xs disabled:shadow-none"
+                            >
+                                <Send className="w-4 h-4" />
+                            </button>
+                        </div>
+                        <div className="mt-1.5 px-1 flex items-center justify-between text-[10px] text-slate-400 select-none">
+                            <span>Press <kbd className="font-mono bg-slate-100 px-1 py-0.5 rounded text-[9px] text-slate-600 border border-slate-200">Enter</kbd> to send</span>
+                            <span>ATS Fleet AI</span>
+                        </div>
                     </div>
                 </div>
             )}
 
-            {/* ─── STABLE TOGGLE BUTTON WITH SUBTLE ICON CROSS-FADE ────────── */}
+            {/* ─── STABLE TOGGLE BUTTON WITH SMOOTH ICON TRANSITION ────────── */}
             <button
                 type="button"
                 onClick={toggleOpen}
-                title={isOpen ? "Close Assistant" : "Open Fleet AI Assistant"}
-                className="relative w-12 h-12 rounded-full bg-brand hover:bg-brand-hover text-white shadow-lg flex items-center justify-center transition-colors duration-150 active:scale-95 cursor-pointer select-none"
+                title={isOpenedOrOpening ? "Collapse assistant" : "Open Fleet AI Assistant"}
+                aria-label={isOpenedOrOpening ? "Collapse assistant" : "Open Fleet AI Assistant"}
+                className="relative w-12 h-12 rounded-full bg-brand hover:bg-brand-hover text-white shadow-lg hover:shadow-xl flex items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
             >
                 <Bot
                     className={`w-5 h-5 absolute transition-all duration-200 ease-out ${
-                        isOpen ? "opacity-0 scale-75 pointer-events-none" : "opacity-100 scale-100"
+                        isOpenedOrOpening ? "opacity-0 scale-75 pointer-events-none" : "opacity-100 scale-100"
                     }`}
                 />
-                <X
+                <ChevronDown
                     className={`w-5 h-5 absolute transition-all duration-200 ease-out ${
-                        isOpen ? "opacity-100 scale-100" : "opacity-0 scale-75 pointer-events-none"
+                        isOpenedOrOpening ? "opacity-100 scale-100" : "opacity-0 scale-75 pointer-events-none"
                     }`}
                 />
             </button>
         </div>
     )
 }
+
