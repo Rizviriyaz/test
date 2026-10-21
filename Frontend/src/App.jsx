@@ -30,7 +30,7 @@ function App() {
         <AuthProvider>
             <FuelFilterProvider>
                 <BrowserRouter>
-                    <Suspense fallback={<div className="min-h-screen grid place-items-center text-sm font-semibold text-slate-500">Loading ATS…</div>}>
+                    <Suspense fallback={<div role="status" className="grid min-h-dvh place-items-center bg-white text-xs font-semibold text-slate-500">Loading…</div>}>
                         <Routes>
                             {/* Public Routes */}
                             <Route path="/" element={<Landing />} />

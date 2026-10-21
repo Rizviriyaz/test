@@ -36,7 +36,7 @@ export default function ExcludedFuelPanel() {
 
     if (loading) {
         return (
-            <div className="rounded-2xl border border-slate-200 bg-white p-4 mb-6 text-xs text-slate-500 flex items-center gap-2">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 mb-6 text-xs text-slate-500 flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin text-[#33758F]" />
                 <span>Reconciling transactions excluded from KPIs…</span>
             </div>
@@ -44,7 +44,7 @@ export default function ExcludedFuelPanel() {
     }
     if (error) {
         return (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50/70 p-4 mb-6 text-xs font-semibold text-rose-700 flex items-center gap-2">
+            <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-4 mb-6 text-xs font-semibold text-rose-700 flex items-center gap-2">
                 <AlertTriangle className="h-4 w-4 shrink-0" />
                 <span>{error}</span>
             </div>
@@ -54,7 +54,7 @@ export default function ExcludedFuelPanel() {
     const summary = excludedSummary(data?.excluded_scope)
     if (!summary) {
         return (
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-3 mb-6 text-xs text-emerald-800 flex items-center gap-2">
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 mb-6 text-xs text-emerald-800 flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 shrink-0" />
                 <span>Every transaction in this period is attributed to exactly one Wialon unit; nothing excluded from KPIs.</span>
             </div>
@@ -63,7 +63,7 @@ export default function ExcludedFuelPanel() {
 
     const groups = Array.isArray(data?.data) ? data.data : []
     return (
-        <div className="rounded-2xl border border-amber-200 bg-amber-50/40 p-4 mb-6 text-xs">
+        <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4 mb-6 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 text-amber-900">
                     <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />

@@ -46,6 +46,12 @@ export default function VehicleFuelDetailModal({
     const [activeTab, setActiveTab] = useState("overview") // "overview", "transactions", "activity", "anomalies"
 
     useEffect(() => {
+        const onKey = (e) => { if (e.key === "Escape") onClose?.() }
+        document.addEventListener("keydown", onKey)
+        return () => document.removeEventListener("keydown", onKey)
+    }, [onClose])
+
+    useEffect(() => {
         if (!vehicleIdentifier) return
         let active = true
 
@@ -100,27 +106,33 @@ export default function VehicleFuelDetailModal({
 
     return createPortal(
         <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto" onClick={onClose}>
-            <div className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-3xl border border-slate-200 bg-white shadow-2xl overflow-hidden my-auto" onClick={(e) => e.stopPropagation()}>
+            <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${vehicleIdentifier} fuel details`}
+                className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden my-auto"
+                onClick={(e) => e.stopPropagation()}
+            >
                 {/* ─── MODAL HEADER ────────────────────────────────────────── */}
-                <div className="flex items-center justify-between px-6 py-4.5 border-b border-slate-100 bg-slate-50/70">
-                    <div className="flex items-center gap-3">
-                        <div className="rounded-2xl bg-[#33758F]/10 p-2.5 text-[#33758F] border border-[#33758F]/20">
+                <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50/70 px-4 py-4 sm:items-center sm:px-6">
+                    <div className="flex min-w-0 items-center gap-3">
+                        <div className="hidden rounded-xl border border-[#33758F]/20 bg-[#33758F]/10 p-2.5 text-[#33758F] sm:block">
                             <Fuel className="h-5 w-5" />
                         </div>
-                        <div>
-                            <div className="flex items-center gap-2.5">
-                                <h3 className="font-mono text-lg font-black tracking-tight text-slate-900">
+                        <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="font-mono text-lg font-bold tracking-tight text-slate-900">
                                     {vehicleIdentifier}
                                 </h3>
                                 <VehicleStatusBadge status={summary?.status || "matched"} />
                                 {summary?.estimation_status && (
-                                    <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600 border border-slate-200">
-                                        [{summary.estimation_status.toUpperCase()}]
+                                    <span className="rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                                        {summary.estimation_status}
                                     </span>
                                 )}
                             </div>
-                            <p className="text-xs text-slate-500 mt-0.5">
-                                {summary?.wialon_unit_name ? `Matched GPS Unit: ${summary.wialon_unit_name}` : "Vehicle Fuel Intelligence Drill-Down"}
+                            <p className="mt-0.5 text-xs text-slate-500">
+                                {summary?.wialon_unit_name ? `GPS unit: ${summary.wialon_unit_name}` : "Vehicle fuel details"}
                                 {transparency.period_date_from && transparency.period_date_to ? ` • Period: ${transparency.period_date_from} to ${transparency.period_date_to}` : ""}
                             </p>
                         </div>
@@ -130,27 +142,28 @@ export default function VehicleFuelDetailModal({
                         type="button"
                         onClick={onClose}
                         className="rounded-xl p-2 text-slate-400 hover:bg-slate-200/60 hover:text-slate-700 transition-colors cursor-pointer"
+                        aria-label="Close"
                     >
                         <X className="h-5 w-5" />
                     </button>
                 </div>
 
                 {/* ─── MODAL BODY ──────────────────────────────────────────── */}
-                <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
                     {loading ? (
-                        <div className="py-16 text-center text-xs text-slate-500">
-                            <Loader2 className="mx-auto h-8 w-8 animate-spin text-[#33758F] mb-3" />
-                            <span>Aggregating fuel transactions and Wialon activity telemetry…</span>
+                        <div role="status" className="py-16 text-center text-xs font-semibold text-slate-500">
+                            <Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin text-[#33758F]" />
+                            <span>Loading fuel transactions and activity…</span>
                         </div>
                     ) : error ? (
-                        <div className="rounded-2xl border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700 flex items-center gap-3">
+                        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700 flex items-center gap-3">
                             <AlertTriangle className="h-5 w-5 shrink-0 text-rose-600" />
                             <span>{error}</span>
                         </div>
                     ) : (
                         <>
                             {/* Navigation Sub-Tabs */}
-                            <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+                            <div role="tablist" className="-mx-1 flex items-center gap-1.5 overflow-x-auto border-b border-slate-100 px-1 pb-3">
                                 {[
                                     { id: "overview", label: "Performance Overview" },
                                     { id: "transactions", label: `Transactions (${txns.length})` },
@@ -160,8 +173,10 @@ export default function VehicleFuelDetailModal({
                                     <button
                                         key={t.id}
                                         type="button"
+                                        role="tab"
+                                        aria-selected={activeTab === t.id}
                                         onClick={() => setActiveTab(t.id)}
-                                        className={`rounded-xl px-3.5 py-1.5 text-xs font-bold transition-all cursor-pointer ${
+                                        className={`shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
                                             activeTab === t.id
                                                 ? "bg-[#33758F] text-white shadow-xs"
                                                 : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
@@ -173,7 +188,7 @@ export default function VehicleFuelDetailModal({
                             </div>
 
                             {telemetryNotice && (
-                                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
+                                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
                                     <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
                                     <div className="space-y-0.5">
                                         <span className="font-bold block">
@@ -191,7 +206,7 @@ export default function VehicleFuelDetailModal({
                                 <div className="space-y-6">
                                     {/* 4 Core Vehicle KPIs */}
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
                                                 Fuel Purchased <ClassificationBadge classification={vc} field="litres" />
                                             </span>
@@ -203,7 +218,7 @@ export default function VehicleFuelDetailModal({
                                             </span>
                                         </div>
 
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
                                                 Total Expenditure <ClassificationBadge classification={vc} field="total_cost" />
                                             </span>
@@ -215,7 +230,7 @@ export default function VehicleFuelDetailModal({
                                             </span>
                                         </div>
 
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
                                                 Distance Traveled <ClassificationBadge classification={vc} field="distance_km" />
                                             </span>
@@ -227,7 +242,7 @@ export default function VehicleFuelDetailModal({
                                             </span>
                                         </div>
 
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
                                                 Purchase-based Efficiency <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />
                                             </span>
@@ -241,7 +256,7 @@ export default function VehicleFuelDetailModal({
                                     </div>
 
                                     {/* Driving vs Idling Breakdown Panel */}
-                                    <div className="rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50/40 via-white to-sky-50/40 p-5 shadow-2xs">
+                                    <div className="rounded-xl border border-amber-200/80 bg-gradient-to-r from-amber-50/40 via-white to-sky-50/40 p-5 shadow-2xs">
                                         <div className="flex items-center justify-between mb-3">
                                             <div className="flex items-center gap-2">
                                                 <Flame className="h-4 w-4 text-amber-700" />
@@ -319,7 +334,7 @@ export default function VehicleFuelDetailModal({
                                     </div>
 
                                     {/* Transparency & Assumptions Note */}
-                                    <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 text-xs space-y-2">
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-xs space-y-2">
                                         <div className="flex items-center gap-1.5 font-bold text-slate-800">
                                             <Info className="h-4 w-4 text-[#33758F]" />
                                             <span>Calculation Transparency & Data Sources</span>
@@ -348,7 +363,7 @@ export default function VehicleFuelDetailModal({
                             {/* ─── TAB 2: TRANSACTIONS ─────────────────────────────── */}
                             {activeTab === "transactions" && (
                                 <div className="space-y-4">
-                                    <div className="overflow-x-auto rounded-2xl border border-slate-200 bg-white">
+                                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
                                         <table className="w-full text-left text-xs">
                                             <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-500">
                                                 <tr>
@@ -414,7 +429,7 @@ export default function VehicleFuelDetailModal({
                             {activeTab === "activity" && (
                                 <div className="space-y-4">
                                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
-                                        <div className="rounded-2xl border border-sky-200 bg-sky-50/50 p-4">
+                                        <div className="rounded-xl border border-sky-200 bg-sky-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-sky-700 block">Driving Time</span>
                                             <span className="text-2xl font-black text-sky-900 block mt-1">
                                                 {formatMeasurement(drivingHours, 1, "hrs")}
@@ -424,7 +439,7 @@ export default function VehicleFuelDetailModal({
                                             </span>
                                         </div>
 
-                                        <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4">
+                                        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-amber-700 block">Idling Time</span>
                                             <span className="text-2xl font-black text-amber-900 block mt-1">
                                                 {formatMeasurement(idleHours, 1, "hrs")}
@@ -434,7 +449,7 @@ export default function VehicleFuelDetailModal({
                                             </span>
                                         </div>
 
-                                        <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
                                             <span className="text-[10px] font-bold uppercase text-slate-500 block">Engine Hours</span>
                                             <span className="text-2xl font-black text-slate-800 block mt-1">
                                                 {formatMeasurement(engineHours, 1, "hrs")}
@@ -447,7 +462,7 @@ export default function VehicleFuelDetailModal({
 
                                     {/* Discrete Idle Events if present */}
                                     {activity.idle_events && activity.idle_events.length > 0 && (
-                                        <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                                        <div className="rounded-xl border border-slate-200 bg-white p-4">
                                             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
                                                 Discrete Idling Events Log
                                             </h4>
@@ -481,7 +496,7 @@ export default function VehicleFuelDetailModal({
                             {activeTab === "anomalies" && (
                                 <div className="space-y-3">
                                     {anomalies.length === 0 ? (
-                                        <div className="py-12 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
+                                        <div className="py-12 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
                                             <CheckCircle2 className="mx-auto h-7 w-7 text-emerald-500 mb-2" />
                                             <span className="font-bold text-slate-800">No anomalies detected</span> for this vehicle in the selected timeframe.
                                         </div>
@@ -489,7 +504,7 @@ export default function VehicleFuelDetailModal({
                                         anomalies.map((a) => (
                                             <div
                                                 key={a.id}
-                                                className="rounded-2xl border border-amber-200 bg-amber-50/30 p-4 text-xs space-y-1"
+                                                className="rounded-xl border border-amber-200 bg-amber-50/30 p-4 text-xs space-y-1"
                                             >
                                                 <div className="flex items-center justify-between">
                                                     <span className="font-black text-slate-900">{a.title}</span>

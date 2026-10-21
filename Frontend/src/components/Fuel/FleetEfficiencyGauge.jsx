@@ -3,7 +3,7 @@ import { Gauge, Route, Info } from "lucide-react"
 export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     if (loading) {
         return (
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between animate-pulse">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between animate-pulse">
                 <div className="h-5 w-40 bg-slate-200 rounded mb-4" />
                 <div className="h-28 bg-slate-100 rounded-xl mb-4" />
                 <div className="h-16 bg-slate-100 rounded-xl" />
@@ -14,7 +14,7 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     // No response (request failed or not loaded): show nothing rather than a row of zero counts.
     if (!efficiencyData) {
         return (
-            <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col items-center justify-center text-center">
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col items-center justify-center text-center">
                 <Info className="h-6 w-6 text-slate-400 mb-2" />
                 <h3 className="text-sm font-bold text-slate-700">Efficiency telemetry unavailable</h3>
                 <p className="text-[11px] text-slate-500 mt-1">No efficiency data was returned for this period.</p>
@@ -36,7 +36,7 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     const gaugePercent = Math.min((gaugeValue / 60) * 100, 100)
 
     return (
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
             {/* Header */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">

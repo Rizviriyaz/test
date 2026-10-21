@@ -9,14 +9,12 @@ export default function ProtectedRoute({ children }) {
 
     if (loading) {
         return (
-            <div className="flex h-screen w-screen flex-col items-center justify-center bg-slate-900 text-white">
+            <div role="status" className="flex h-dvh w-full flex-col items-center justify-center bg-white">
                 <div className="flex flex-col items-center gap-4">
-                    <div className="relative flex items-center justify-center">
-                        <AtsLogo className="h-12 max-h-12 animate-pulse" />
-                    </div>
-                    <div className="flex items-center gap-2 text-sm font-semibold text-slate-300">
-                        <Loader2 className="h-4 w-4 animate-spin text-[#38bdf8]" />
-                        <span>Verifying fleet session...</span>
+                    <AtsLogo className="h-10 max-h-10" />
+                    <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
+                        <Loader2 className="h-4 w-4 animate-spin text-[#33758F]" />
+                        <span>Verifying session…</span>
                     </div>
                 </div>
             </div>

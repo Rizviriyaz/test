@@ -298,7 +298,7 @@ export default function AiAssistantWidget() {
             {/* ─── CHAT PANEL WITH SMOOTH UX ANIMATIONS ────────────────────── */}
             {isVisible && (
                 <div
-                    className={`mb-3 w-[360px] sm:w-[410px] h-[550px] max-h-[calc(100vh-100px)] bg-white border border-slate-200 rounded-2xl shadow-xl flex flex-col overflow-hidden origin-bottom-right transition-all duration-[220ms] ease-out ${
+                    className={`mb-3 w-[calc(100vw-3rem)] max-w-[360px] sm:w-[410px] sm:max-w-none h-[550px] max-h-[calc(100dvh-100px)] bg-white border border-slate-200 rounded-2xl shadow-xl flex flex-col overflow-hidden origin-bottom-right transition-all duration-[220ms] ease-out ${
                         isOpen
                             ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
                             : "opacity-0 translate-y-2 scale-[0.96] pointer-events-none"

@@ -307,11 +307,11 @@ export default function AnalyticsChart({
     const ActiveIcon = TYPE_CONFIG[activeType]?.icon || BarChart3
 
     return (
-        <div className="flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-5 shadow-sm transition hover:border-slate-300">
+        <div className="flex min-w-0 flex-col justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
             {/* Chart Header with Interactive Type Switcher */}
             <div className="flex items-start justify-between gap-2 pb-3">
-                <div>
-                    <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+                <div className="min-w-0">
+                    <h3 className="truncate text-sm font-semibold text-slate-900">{title}</h3>
                     {subtitle && (
                         <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
                     )}
@@ -323,8 +323,10 @@ export default function AnalyticsChart({
                         <button
                             type="button"
                             onClick={() => setDropdownOpen(!dropdownOpen)}
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-slate-50/80 px-2.5 py-1 text-xs font-medium text-slate-700 shadow-2xs transition hover:bg-slate-100 hover:text-slate-900 active:scale-95"
+                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:border-slate-300 hover:text-slate-900 cursor-pointer"
                             title="Change visualization type"
+                            aria-haspopup="listbox"
+                            aria-expanded={dropdownOpen}
                         >
                             <ActiveIcon className="h-3.5 w-3.5 text-[#33758F]" />
                             <span className="capitalize">{TYPE_CONFIG[activeType]?.label || activeType}</span>
@@ -352,17 +354,17 @@ export default function AnalyticsChart({
                                                     setChartType(typeKey)
                                                     setDropdownOpen(false)
                                                 }}
-                                                className={`flex w-full items-center justify-between px-3 py-1.5 text-xs transition ${
+                                                className={`flex w-full items-center justify-between px-3 py-1.5 text-xs transition cursor-pointer ${
                                                     isSelected
-                                                        ? "bg-orange-50 font-semibold text-orange-700"
+                                                        ? "bg-[#F0F6F9] font-semibold text-[#33758F]"
                                                         : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                                                 }`}
                                             >
                                                 <div className="flex items-center gap-2">
-                                                    <Icon className={`h-3.5 w-3.5 ${isSelected ? "text-orange-600" : "text-slate-400"}`} />
+                                                    <Icon className={`h-3.5 w-3.5 ${isSelected ? "text-[#33758F]" : "text-slate-400"}`} />
                                                     <span>{cfg.label}</span>
                                                 </div>
-                                                {isSelected && <Check className="h-3.5 w-3.5 text-orange-600" />}
+                                                {isSelected && <Check className="h-3.5 w-3.5 text-[#33758F]" />}
                                             </button>
                                         )
                                     })}

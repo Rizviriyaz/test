@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import {
     Droplets,
@@ -39,12 +39,19 @@ function formatCurrency(val) {
 export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const [selectedKpi, setSelectedKpi] = useState(null)
 
+    useEffect(() => {
+        if (!selectedKpi) return undefined
+        const onKey = (e) => { if (e.key === "Escape") setSelectedKpi(null) }
+        document.addEventListener("keydown", onKey)
+        return () => document.removeEventListener("keydown", onKey)
+    }, [selectedKpi])
+
     if (loading) {
         return (
             <div className="space-y-4 mb-6">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                     {[1, 2, 3, 4].map((i) => (
-                        <div key={i} className="animate-pulse rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                        <div key={i} className="animate-pulse rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
                             <div className="flex items-center justify-between mb-2.5">
                                 <div className="h-3 w-24 bg-slate-200 rounded" />
                                 <div className="h-7 w-7 bg-slate-100 rounded-lg" />
@@ -56,7 +63,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                     {[5, 6, 7, 8].map((i) => (
-                        <div key={i} className="animate-pulse rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs">
+                        <div key={i} className="animate-pulse rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
                             <div className="flex items-center justify-between mb-2.5">
                                 <div className="h-3 w-24 bg-slate-200 rounded" />
                                 <div className="h-7 w-7 bg-slate-100 rounded-lg" />
@@ -285,7 +292,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     return (
         <div className="space-y-4 mb-6">
             {(excluded || showTelemetryNotice) && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
                     <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
                     <div className="space-y-0.5">
                         {excluded && (
@@ -326,7 +333,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("total_litres")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -358,7 +365,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("total_cost")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -390,7 +397,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("transaction_count")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -424,7 +431,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("vehicle_count")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -482,7 +489,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("estimated_idle_fuel")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-amber-200/80 bg-gradient-to-br from-amber-50/40 to-white p-4 shadow-xs hover:border-amber-400 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-amber-200/80 bg-gradient-to-br from-amber-50/40 to-white p-4 shadow-xs hover:border-amber-400 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -518,7 +525,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("estimated_idle_cost")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-rose-200/80 bg-gradient-to-br from-rose-50/40 to-white p-4 shadow-xs hover:border-rose-400 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-rose-200/80 bg-gradient-to-br from-rose-50/40 to-white p-4 shadow-xs hover:border-rose-400 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -550,7 +557,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("estimated_driving_fuel")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-sky-200/80 bg-gradient-to-br from-sky-50/30 to-white p-4 shadow-xs hover:border-sky-400 hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-sky-200/80 bg-gradient-to-br from-sky-50/30 to-white p-4 shadow-xs hover:border-sky-400 hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -586,7 +593,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     <button
                         type="button"
                         onClick={() => setSelectedKpi("efficiency")}
-                        className="group text-left relative overflow-hidden rounded-2xl border border-[#33758F]/30 bg-gradient-to-br from-[#33758F]/5 to-white p-4 shadow-xs hover:border-[#33758F] hover:shadow-sm transition-all cursor-pointer"
+                        className="group text-left relative overflow-hidden rounded-xl border border-[#33758F]/30 bg-gradient-to-br from-[#33758F]/5 to-white p-4 shadow-xs hover:border-[#33758F] hover:shadow-sm transition-all cursor-pointer"
                         title="Click to view exact formula and calculation breakdown"
                     >
                         <div className="flex items-center justify-between mb-1.5">
@@ -631,7 +638,10 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     onClick={() => setSelectedKpi(null)}
                 >
                     <div
-                        className="w-full max-w-xl rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl my-8 animate-in fade-in zoom-in-95 duration-150"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={`${activeBreakdown.title} calculation breakdown`}
+                        className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl my-8 sm:p-6"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* Header */}
@@ -667,13 +677,14 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                                 type="button"
                                 onClick={() => setSelectedKpi(null)}
                                 className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                                aria-label="Close"
                             >
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
 
                         {/* Top Result & Metadata Card */}
-                        <div className="my-4 rounded-2xl border border-slate-200/90 bg-slate-50/70 p-4">
+                        <div className="my-4 rounded-xl border border-slate-200/90 bg-slate-50/70 p-4">
                             <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pb-3 border-b border-slate-200/60">
                                 <div>
                                     <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">

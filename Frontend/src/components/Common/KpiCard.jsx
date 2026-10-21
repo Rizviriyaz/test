@@ -40,8 +40,8 @@ export default function KpiCard({
                         </span>
                     )}
                     {Icon && (
-                        <div className={`flex h-8 w-8 items-center justify-center rounded-lg ${iconBg}`}>
-                            <Icon className="h-4 w-4" />
+                        <div className={`flex h-7 w-7 items-center justify-center rounded-lg ${iconBg}`}>
+                            <Icon className="h-3.5 w-3.5" />
                         </div>
                     )}
                     {to && (
@@ -50,11 +50,11 @@ export default function KpiCard({
                 </div>
             </div>
 
-            <div className="my-2.5">
+            <div className="my-2">
                 {loading ? (
-                    <div className="h-8 w-24 bg-slate-100 animate-pulse rounded-lg my-1" />
+                    <div className="my-0.5 h-7 w-20 animate-pulse rounded-md bg-slate-100" />
                 ) : (
-                    <p className={`text-2xl sm:text-3xl font-black tracking-tight ${valueColor}`}>
+                    <p className={`truncate text-2xl font-bold tracking-tight tabular-nums ${valueColor}`}>
                         {value ?? "—"}
                     </p>
                 )}
@@ -68,7 +68,7 @@ export default function KpiCard({
         </>
     )
 
-    const baseClasses = `flex flex-col justify-between rounded-xl border bg-white p-4 sm:p-5 shadow-xs transition-all text-left ${
+    const baseClasses = `flex min-w-0 flex-col justify-between rounded-xl border bg-white p-4 shadow-xs transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#33758F]/40 ${
         selected
             ? "border-[#33758F] ring-2 ring-[#33758F]/20 shadow-sm"
             : "border-slate-200/90 hover:border-slate-300"

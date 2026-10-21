@@ -1,4 +1,4 @@
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import {
     LayoutDashboard,
     Fuel,
@@ -8,6 +8,7 @@ import {
     Settings,
     Clock3,
     LogOut,
+    Menu,
 } from "lucide-react"
 
 import { NavLink, Link, useNavigate } from "react-router-dom"
@@ -23,6 +24,25 @@ export function SidebarProvider({ children }) {
         <SidebarContext.Provider value={{ collapsed: true }}>
             {children}
         </SidebarContext.Provider>
+    )
+}
+
+
+// ─── Mobile navigation trigger ────────────────────────────────────────────────
+// On small screens the sidebar is hidden off-canvas; page headers render this button to open it.
+
+const OPEN_SIDEBAR_EVENT = "ats:open-sidebar"
+
+export function MobileNavButton() {
+    return (
+        <button
+            type="button"
+            onClick={() => window.dispatchEvent(new CustomEvent(OPEN_SIDEBAR_EVENT))}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 shadow-2xs transition hover:bg-slate-50 cursor-pointer md:hidden"
+            aria-label="Open navigation"
+        >
+            <Menu className="h-4.5 w-4.5" />
+        </button>
     )
 }
 
@@ -57,6 +77,12 @@ export default function Sidebar() {
     const { user, profile, logout } = useAuth()
     const navigate = useNavigate()
 
+    useEffect(() => {
+        const open = () => setExpanded(true)
+        window.addEventListener(OPEN_SIDEBAR_EVENT, open)
+        return () => window.removeEventListener(OPEN_SIDEBAR_EVENT, open)
+    }, [])
+
     const handleMouseEnter = () => {
         if (leaveTimer.current) {
             clearTimeout(leaveTimer.current)
@@ -85,6 +111,11 @@ export default function Sidebar() {
         }
     }
 
+    // On small screens the sidebar is an overlay drawer: close it once a destination is chosen
+    const closeOnMobile = () => {
+        if (window.matchMedia("(max-width: 767px)").matches) setExpanded(false)
+    }
+
     const handleLogout = async () => {
         await logout()
         navigate("/login")
@@ -98,7 +129,7 @@ export default function Sidebar() {
                 the floating sidebar expands or collapses on hover.
             */}
             <div
-                className="shrink-0 select-none pointer-events-none transition-none"
+                className="hidden shrink-0 select-none pointer-events-none transition-none md:block"
                 style={{ width: "74px" }}
                 aria-hidden="true"
             />
@@ -120,10 +151,10 @@ export default function Sidebar() {
                 onBlurCapture={handleBlurCapture}
                 aria-expanded={expanded}
                 aria-label="Main Navigation"
-                className={`fixed left-3 top-3 bottom-3 z-40 flex flex-col bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 select-none overflow-hidden motion-reduce:transition-none transition-[width,box-shadow,border-color] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                className={`fixed left-3 top-3 bottom-3 z-40 flex flex-col bg-white/95 backdrop-blur-md rounded-2xl border border-slate-200/90 select-none overflow-hidden motion-reduce:transition-none transition-[width,box-shadow,border-color,translate] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
                     expanded
                         ? "shadow-[0_20px_45px_-10px_rgba(15,23,42,0.18),0_4px_16px_0_rgba(15,23,42,0.06)] border-slate-300/80"
-                        : "shadow-[0_4px_20px_-2px_rgba(15,23,42,0.06),0_1px_3px_0_rgba(15,23,42,0.04)]"
+                        : "shadow-[0_4px_20px_-2px_rgba(15,23,42,0.06),0_1px_3px_0_rgba(15,23,42,0.04)] max-md:-translate-x-[calc(100%+1rem)]"
                 }`}
                 style={{
                     width: expanded ? "244px" : "58px",
@@ -219,6 +250,7 @@ export default function Sidebar() {
                                         <NavLink
                                             key={item.name}
                                             to={item.path}
+                                            onClick={closeOnMobile}
                                             title={!expanded ? item.name : undefined}
                                             aria-label={item.name}
                                             className={({ isActive }) =>
@@ -257,6 +289,7 @@ export default function Sidebar() {
                     {/* Settings Navigation */}
                     <NavLink
                         to="/settings"
+                        onClick={closeOnMobile}
                         title={!expanded ? "Settings" : undefined}
                         aria-label="Settings"
                         className={({ isActive }) =>

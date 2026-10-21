@@ -99,7 +99,7 @@ export default function FuelTrendChart() {
     const formattedData = trendData.map(formatTrendPoint)
 
     return (
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs mb-6">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs mb-6">
             {/* Header with Title and Interactive Controls */}
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between pb-4 border-b border-slate-100">
                 <div className="flex items-center gap-2.5">

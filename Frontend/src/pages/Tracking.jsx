@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
     Navigation,
-    AlertCircle,
     Truck,
     User,
     ChevronRight,
@@ -18,6 +17,7 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import SearchInput from "../components/Common/SearchInput"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
+import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import { MorphingDialogTrigger } from "../components/core/morphing-dialog"
 
@@ -241,27 +241,28 @@ function Tracking() {
 
     return (
         <SidebarProvider>
-            <div className="flex h-screen overflow-hidden bg-white text-slate-900">
+            <div className="flex h-dvh overflow-hidden bg-white font-sans text-slate-900 antialiased">
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
                     {/* Header Bar */}
-                    <div className="shrink-0 border-b border-slate-200 bg-white px-5 py-2.5 sm:px-6 sm:py-3">
+                    <div className="shrink-0 border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
                         <PageHeader
-                            title="Live Fleet Tracking"
-                            subtitle="Real-time GPS telemetry, status monitoring, and asset location"
+                            title="Live Tracking"
+                            subtitle="Real-time vehicle location and status"
                             icon={Navigation}
                             onRefresh={() => loadVehicles(true)}
                             loading={refreshing}
-                            lastUpdated={lastSyncTime ? `Updated ${lastSyncTime}` : null}
+                            lastUpdated={lastSyncTime}
                             className="mb-0 pb-0 border-b-0"
                         >
                             {/* Mobile View Toggle */}
-                            <div className="flex lg:hidden items-center rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs">
+                            <div className="flex h-8 lg:hidden items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs">
                                 <button
                                     type="button"
                                     onClick={() => setMobileTab("map")}
-                                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-bold transition ${
+                                    aria-pressed={mobileTab === "map"}
+                                    className={`inline-flex h-full items-center gap-1.5 rounded-md px-3 font-semibold transition ${
                                         mobileTab === "map"
                                             ? "bg-[#33758F] text-white shadow-2xs"
                                             : "text-slate-600 hover:text-slate-900"
@@ -273,7 +274,8 @@ function Tracking() {
                                 <button
                                     type="button"
                                     onClick={() => setMobileTab("list")}
-                                    className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1 font-bold transition ${
+                                    aria-pressed={mobileTab === "list"}
+                                    className={`inline-flex h-full items-center gap-1.5 rounded-md px-3 font-semibold transition ${
                                         mobileTab === "list"
                                             ? "bg-[#33758F] text-white shadow-2xs"
                                             : "text-slate-600 hover:text-slate-900"
@@ -319,7 +321,8 @@ function Tracking() {
                                                 key={item.key}
                                                 type="button"
                                                 onClick={() => handleFilterChange(item.key)}
-                                                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold transition cursor-pointer ${
+                                                aria-pressed={isActive}
+                                                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition cursor-pointer ${
                                                     isActive
                                                         ? "bg-[#33758F] text-white shadow-xs"
                                                         : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:border-slate-300"
@@ -330,7 +333,7 @@ function Tracking() {
                                                 )}
                                                 <span>{item.label}</span>
                                                 <span
-                                                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-semibold ${
+                                                    className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${
                                                         isActive
                                                             ? "bg-white/20 text-white"
                                                             : "bg-slate-100 text-slate-600"
@@ -362,49 +365,31 @@ function Tracking() {
                             {/* Vehicles List Container */}
                             <div className="flex-1 overflow-y-auto divide-y divide-slate-100 bg-white">
                                 {loading && (
-                                    <div className="p-10 text-center space-y-2">
-                                        <div className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-slate-300 border-t-[#33758F]" />
-                                        <p className="text-xs font-semibold text-slate-500">
-                                            Loading vehicle telemetry stream…
-                                        </p>
-                                    </div>
+                                    <LoadingState label="Loading vehicle telemetry…" className="m-3 border-none" />
                                 )}
 
                                 {error && (
-                                    <div className="m-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-xs space-y-2">
-                                        <div className="flex items-center gap-2 text-rose-800 font-bold">
-                                            <AlertCircle className="h-4 w-4 shrink-0" />
-                                            <span>Telemetry Connection Error</span>
-                                        </div>
-                                        <p className="text-rose-700">{error}</p>
-                                        <button
-                                            type="button"
-                                            onClick={() => loadVehicles(true)}
-                                            className="rounded-lg bg-rose-600 px-3 py-1.5 font-bold text-white hover:bg-rose-700 transition"
-                                        >
-                                            Retry
-                                        </button>
-                                    </div>
+                                    <ErrorBanner message={error} onRetry={() => loadVehicles(true)} className="m-3" />
                                 )}
 
                                 {!loading && !error && filteredVehicles.length === 0 && (
-                                    <div className="p-10 text-center space-y-3">
-                                        <Truck className="mx-auto h-8 w-8 text-slate-300" />
-                                        <p className="text-sm font-bold text-slate-700">No vehicles match filters</p>
-                                        <p className="text-xs text-slate-400">
-                                            Try adjusting your search query or status filter.
-                                        </p>
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setSearchTerm("")
-                                                handleFilterChange("ALL")
-                                            }}
-                                            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 transition"
-                                        >
-                                            Reset Filters
-                                        </button>
-                                    </div>
+                                    <EmptyState
+                                        icon={Truck}
+                                        title="No vehicles match your filters"
+                                        className="m-3 border-none"
+                                        action={
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    setSearchTerm("")
+                                                    handleFilterChange("ALL")
+                                                }}
+                                                className="text-xs font-semibold text-[#33758F] hover:underline cursor-pointer"
+                                            >
+                                                Clear filters
+                                            </button>
+                                        }
+                                    />
                                 )}
 
                                 {!loading && !error && filteredVehicles.map(vehicle => {
@@ -420,8 +405,18 @@ function Tracking() {
                                     return (
                                         <div
                                             key={vid}
+                                            role="button"
+                                            tabIndex={0}
+                                            aria-pressed={isSelected}
                                             onClick={() => selectVehicle(vehicle)}
-                                            className={`p-3.5 transition cursor-pointer select-none border-l-4 ${
+                                            onKeyDown={(e) => {
+                                                if (e.target !== e.currentTarget) return
+                                                if (e.key === "Enter" || e.key === " ") {
+                                                    e.preventDefault()
+                                                    selectVehicle(vehicle)
+                                                }
+                                            }}
+                                            className={`px-3.5 py-3 transition cursor-pointer select-none border-l-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#33758F]/40 ${
                                                 isSelected
                                                     ? "bg-[#F0F6F9] border-l-[#33758F]"
                                                     : "bg-white hover:bg-slate-50 border-l-transparent"
@@ -490,7 +485,7 @@ function Tracking() {
 
                                             {/* Driver & Inspect Action Line */}
                                             <div className="mt-2 flex items-center justify-between text-[11px] pt-1">
-                                                <div className="flex items-center gap-1 text-slate-500 truncate max-w-[200px]">
+                                                <div className="flex min-w-0 items-center gap-1 text-slate-500">
                                                     <User className="h-3 w-3 text-slate-400 shrink-0" />
                                                     <span className="truncate text-[10px]">
                                                         {driverName ? String(driverName) : "Unassigned"}
@@ -531,13 +526,13 @@ function Tracking() {
                             />
 
                             {/* Floating Map Status Overlay (Bottom Left) */}
-                            <div className="absolute bottom-4 left-4 z-[400] flex items-center gap-2 rounded-xl border border-slate-200 bg-white/95 px-3.5 py-2 shadow-xs backdrop-blur-xs">
+                            <div className="absolute bottom-5 left-5 z-[400] flex items-center gap-2 rounded-lg border border-slate-200 bg-white/95 px-3 py-1.5 shadow-xs backdrop-blur-xs">
                                 <span className="relative flex h-2 w-2">
                                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                                     <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
                                 </span>
-                                <span className="text-xs font-bold text-slate-800">
-                                    {mapVehicles.length} of {vehicles.length} Units on Map
+                                <span className="text-xs font-semibold text-slate-800 tabular-nums">
+                                    {mapVehicles.length} of {vehicles.length} on map
                                 </span>
                                 {statusFilter !== "ALL" && (
                                     <span className="text-[11px] text-slate-500 font-medium">
@@ -548,7 +543,7 @@ function Tracking() {
 
                             {/* Floating Selected Vehicle Overlay (Top Left) */}
                             {selectedVehicle && (
-                                <div className="absolute top-4 left-4 z-[400] max-w-sm rounded-xl border border-slate-200 bg-white/95 p-3.5 shadow-md backdrop-blur-xs animate-in fade-in slide-in-from-top-2 duration-150">
+                                <div className="absolute top-5 left-5 right-5 z-[400] rounded-xl border border-slate-200 bg-white/95 p-3.5 shadow-md backdrop-blur-xs sm:right-auto sm:w-80">
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="min-w-0">
                                             <div className="flex items-center gap-1.5">
@@ -565,8 +560,9 @@ function Tracking() {
                                         <button
                                             type="button"
                                             onClick={() => selectVehicle(null)}
-                                            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
+                                            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
                                             title="Clear selected unit"
+                                            aria-label="Clear selected unit"
                                         >
                                             <X className="h-4 w-4" />
                                         </button>

@@ -90,7 +90,7 @@ export default function FuelTypeDonut() {
     }, [fuelTypes, totalLitres])
 
     return (
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-xs flex flex-col justify-between">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2">
                     <div className="rounded-xl bg-[#33758F]/10 p-1.5 text-[#33758F]">
