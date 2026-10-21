@@ -15,6 +15,7 @@ import {
     Compass,
 } from "lucide-react"
 import AtsLogo from "../assets/AtsLogo"
+import { Magnetic } from "../components/core/magnetic"
 import { useAuth } from "../context/useAuth"
 
 // Real captured screenshots from the active ATS Fleet Management dashboard
@@ -22,41 +23,6 @@ import fleetOverviewImg from "../assets/screenshots/fleet-overview.png"
 import liveTrackingImg from "../assets/screenshots/live-tracking.png"
 import vehicleTelemetryImg from "../assets/screenshots/vehicle-telemetry.png"
 import fleetAlertsImg from "../assets/screenshots/fleet-alerts.png"
-
-const SCREENSHOT_TABS = [
-    {
-        id: "overview",
-        label: "Fleet Overview",
-        badge: "103 Units Live",
-        title: "Fleet Operations Command",
-        desc: "Unified operational visibility with live moving, idling, stopped, and offline unit breakdown.",
-        image: fleetOverviewImg,
-    },
-    {
-        id: "tracking",
-        label: "Live Tracking",
-        badge: "GPS Active",
-        title: "Interactive Operations Map",
-        desc: "Sub-second GPS tracking across the UAE with cluster density, plate search, and live status filters.",
-        image: liveTrackingImg,
-    },
-    {
-        id: "telemetry",
-        label: "Vehicle Health",
-        badge: "28.8V Battery",
-        title: "Deep Electrical Telemetry",
-        desc: "Instant voltage, ignition state, satellite locks, trip count, and today's accumulated distance.",
-        image: vehicleTelemetryImg,
-    },
-    {
-        id: "alerts",
-        label: "Safety Alerts",
-        badge: "Sensor Events",
-        title: "Harsh Driving & Alert Feed",
-        desc: "Threshold-triggered harsh cornering, acceleration, and critical event tracking with G-force telemetry.",
-        image: fleetAlertsImg,
-    },
-]
 
 const CORE_CAPABILITIES = [
     {
@@ -97,10 +63,63 @@ const CORE_CAPABILITIES = [
     },
 ]
 
+const HERO_SCREENSHOTS = [
+    {
+        id: "tracking",
+        title: "Live GPS Tracking · UAE",
+        badge: "Active",
+        tag: "UAE Map",
+        image: liveTrackingImg,
+        alt: "Live GPS tracking operational map",
+        dotColor: "bg-emerald-500",
+        posClass: "top-0 left-0 -rotate-2 z-10",
+    },
+    {
+        id: "alerts",
+        title: "Fleet Sensor Alerts",
+        badge: "Live",
+        tag: "1.48G",
+        image: fleetAlertsImg,
+        alt: "Real-time sensor alerts and diagnostics",
+        dotColor: "bg-rose-500",
+        posClass: "top-3 sm:top-4 right-0 rotate-2 z-15",
+    },
+    {
+        id: "telemetry",
+        title: "Unit Telemetry · #13158",
+        badge: "Online",
+        tag: "28.87 V",
+        image: vehicleTelemetryImg,
+        alt: "Live vehicle battery and GPS telemetry",
+        dotColor: "bg-[#33758F]",
+        posClass: "top-7 sm:top-8 left-2 sm:left-4 -rotate-1 z-20",
+    },
+    {
+        id: "overview",
+        title: "Fleet Operations Command",
+        badge: "Connected",
+        tag: "103 Units",
+        image: fleetOverviewImg,
+        alt: "ATS Fleet Overview console dashboard",
+        dotColor: "bg-emerald-500",
+        posClass: "top-11 sm:top-13 right-1 sm:right-3 rotate-1 z-25 shadow-2xl",
+    },
+]
+
 export default function Landing() {
     const { isAuthenticated } = useAuth()
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-    const [activeTab, setActiveTab] = useState("overview")
+    const [activeScreenshot, setActiveScreenshot] = useState(null)
+
+    // Cursor tracking for subtle ambient spotlight
+    const [cursorPos, setCursorPos] = useState({ x: -1000, y: -1000 })
+    const handleHeroMouseMove = (e) => {
+        const rect = e.currentTarget.getBoundingClientRect()
+        setCursorPos({
+            x: e.clientX - rect.left,
+            y: e.clientY - rect.top,
+        })
+    }
 
     // Close mobile menu on resize to desktop
     useEffect(() => {
@@ -116,11 +135,11 @@ export default function Landing() {
     return (
         <div className="bg-[#FAFBFD] min-h-screen flex flex-col justify-between text-slate-900 font-sans selection:bg-[#33758F] selection:text-white antialiased">
             {/* ─── SITE HEADER ──────────────────────────────────────────────── */}
-            <header className="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200/80 transition-all">
+            <header className="sticky top-0 z-50 bg-white/90 backdrop-blur-md border-b border-slate-200/80 transition-all">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
-                    {/* Brand Logo */}
+                    {/* Brand Logo (Enlarged & Prominent) */}
                     <a href="#" className="flex items-center gap-3 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#33758F] rounded-lg">
-                        <AtsLogo className="h-9 sm:h-10 max-h-10" />
+                        <AtsLogo className="h-11 sm:h-12 md:h-13 max-h-14 w-auto" />
                     </a>
 
                     {/* On-Page Anchor Navigation (No internal page routes) */}
@@ -130,12 +149,6 @@ export default function Landing() {
                             className="px-4 py-1.5 rounded-full hover:text-slate-900 hover:bg-white transition-all"
                         >
                             Capabilities
-                        </a>
-                        <a
-                            href="#showcase"
-                            className="px-4 py-1.5 rounded-full hover:text-slate-900 hover:bg-white transition-all"
-                        >
-                            Live Console
                         </a>
                         <a
                             href="#telemetry"
@@ -186,10 +199,10 @@ export default function Landing() {
 
             {/* ─── MOBILE DRAWER (NO INTERNAL PAGE ROUTES) ──────────────────── */}
             {mobileMenuOpen && (
-                <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-50 md:hidden flex justify-end">
+                <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs z-[60] md:hidden flex justify-end">
                     <div className="w-full max-w-sm bg-white h-full shadow-2xl flex flex-col p-6 animate-in slide-in-from-right duration-200">
                         <div className="flex items-center justify-between pb-6 border-b border-slate-100">
-                            <AtsLogo className="h-8 max-h-8" />
+                            <AtsLogo className="h-9 sm:h-10 max-h-10 w-auto" />
                             <button
                                 type="button"
                                 onClick={() => setMobileMenuOpen(false)}
@@ -207,13 +220,6 @@ export default function Landing() {
                                 className="py-2.5 px-3 rounded-lg hover:bg-slate-50 hover:text-[#33758F] transition-colors"
                             >
                                 Capabilities
-                            </a>
-                            <a
-                                href="#showcase"
-                                onClick={() => setMobileMenuOpen(false)}
-                                className="py-2.5 px-3 rounded-lg hover:bg-slate-50 hover:text-[#33758F] transition-colors"
-                            >
-                                Live Console
                             </a>
                             <a
                                 href="#telemetry"
@@ -257,215 +263,115 @@ export default function Landing() {
             )}
 
             <main className="flex-grow">
-                {/* ─── HERO SECTION ─────────────────────────────────────────── */}
-                <section className="relative pt-12 sm:pt-18 pb-16 sm:pb-24 overflow-hidden">
+                {/* ─── HERO SECTION: TWO-COLUMN LAYOUT (SCOPED STACKING CONTEXT z-10) ── */}
+                <section
+                    onMouseMove={handleHeroMouseMove}
+                    className="relative z-10 pt-10 sm:pt-14 pb-16 sm:pb-20 overflow-hidden"
+                >
                     {/* Background Subtle Gradient Blobs */}
-                    <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] h-[350px] bg-gradient-to-tr from-[#33758F]/12 via-[#285E73]/8 to-transparent rounded-full blur-3xl pointer-events-none -z-10" />
+                    <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[850px] h-[450px] bg-gradient-to-tr from-[#33758F]/10 via-[#285E73]/5 to-transparent rounded-full blur-3xl pointer-events-none -z-10" />
 
-                    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-                        {/* Live Telemetry Indicator Pill */}
-                        <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#F0F6F9] border border-[#D1E2EA] text-[#33758F] text-xs font-semibold mb-6 shadow-2xs">
-                            <span className="w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-emerald-500/30 animate-pulse" />
-                            <span>ATS Enterprise Fleet Platform · Live Wialon GPS Engine</span>
-                        </div>
+                    {/* Interactive Cursor Spotlight Glow */}
+                    <div
+                        className="pointer-events-none absolute -inset-px transition-opacity duration-300 opacity-60 hidden md:block -z-10"
+                        style={{
+                            background: `radial-gradient(650px circle at ${cursorPos.x}px ${cursorPos.y}px, rgba(51, 117, 143, 0.09), transparent 70%)`,
+                        }}
+                    />
 
-                        {/* Main Headline */}
-                        <h1 className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-extrabold tracking-tight font-display text-slate-900 leading-[1.08]">
-                            Every Vehicle. <br className="hidden sm:block" />
-                            <span className="text-[#33758F]">One Clear View.</span>
-                        </h1>
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-8 xl:gap-12 items-center">
+                            {/* ─── LEFT COLUMN: HEADLINE, COPY & CTA ──────────────── */}
+                            <div className="lg:col-span-5 text-center lg:text-left">
+                                <h1 className="text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight font-display text-slate-900 leading-[1.08]">
+                                    Every Vehicle. <br />
+                                    <span className="text-[#33758F]">One Clear View.</span>
+                                </h1>
 
-                        {/* Subtitle */}
-                        <p className="mt-6 text-base sm:text-lg md:text-xl text-slate-600 max-w-2xl mx-auto font-normal leading-relaxed">
-                            Live fleet tracking, idle cost intelligence, battery health telemetry, and safety diagnostics — centralized in one operational command center.
-                        </p>
+                                <p className="mt-5 text-base sm:text-lg text-slate-600 max-w-xl mx-auto lg:mx-0 font-normal leading-relaxed">
+                                    Live fleet tracking, idle cost intelligence, battery health telemetry, and safety diagnostics — centralized in one operational command center.
+                                </p>
 
-                        {/* Hero CTAs (Single internal link conditioned strictly on auth) */}
-                        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-                            {isAuthenticated ? (
-                                <Link
-                                    to="/dashboard"
-                                    className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-7 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all active:scale-98"
-                                >
-                                    <span>Launch Dashboard</span>
-                                    <ArrowRight className="w-4 h-4" />
-                                </Link>
-                            ) : (
-                                <Link
-                                    to="/login"
-                                    className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-7 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow-md transition-all active:scale-98"
-                                >
-                                    <span>Sign In to Platform</span>
-                                    <ArrowRight className="w-4 h-4" />
-                                </Link>
-                            )}
+                                {/* Action Buttons with Magnetic Cursor-Following Effect */}
+                                <div className="mt-8 flex flex-wrap items-center justify-center lg:justify-start gap-3">
+                                    <Magnetic intensity={0.25} range={90}>
+                                        {isAuthenticated ? (
+                                            <Link
+                                                to="/dashboard"
+                                                className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-6 sm:px-7 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
+                                            >
+                                                <span>Launch Dashboard</span>
+                                                <ArrowRight className="w-4 h-4" />
+                                            </Link>
+                                        ) : (
+                                            <Link
+                                                to="/login"
+                                                className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-6 sm:px-7 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
+                                            >
+                                                <span>Sign In</span>
+                                                <ArrowRight className="w-4 h-4" />
+                                            </Link>
+                                        )}
+                                    </Magnetic>
 
-                            <a
-                                href="#showcase"
-                                className="inline-flex items-center gap-2 rounded-full border border-slate-200/90 hover:border-slate-300 bg-white hover:bg-slate-50 px-6 py-3.5 text-sm font-semibold text-slate-700 transition-all shadow-2xs"
-                            >
-                                <span>Inspect Console</span>
-                                <ChevronRight className="w-4 h-4 text-slate-400" />
-                            </a>
-                        </div>
-
-                        {/* Operational Stats Badge Row */}
-                        <div className="mt-10 pt-8 border-t border-slate-200/60 max-w-3xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
-                            <div>
-                                <div className="text-xl sm:text-2xl font-bold text-slate-900 font-display">100+</div>
-                                <div className="text-xs text-slate-500 font-medium">Active Fleet Units</div>
-                            </div>
-                            <div>
-                                <div className="text-xl sm:text-2xl font-bold text-[#33758F] font-display">Sub-Second</div>
-                                <div className="text-xs text-slate-500 font-medium">GPS Telemetry Pings</div>
-                            </div>
-                            <div>
-                                <div className="text-xl sm:text-2xl font-bold text-slate-900 font-display">4 Statuses</div>
-                                <div className="text-xs text-slate-500 font-medium">Moving · Idle · Stop · Off</div>
-                            </div>
-                            <div>
-                                <div className="text-xl sm:text-2xl font-bold text-emerald-600 font-display">24 / 7</div>
-                                <div className="text-xs text-slate-500 font-medium">Autonomous Monitoring</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* ─── REAL SCREENSHOT SHOWCASE (HERO REQUIREMENT) ────────── */}
-                    <div id="showcase" className="mt-14 sm:mt-18 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
-                        {/* Selector Tabs for Desktop / Mobile */}
-                        <div className="flex items-center justify-center gap-1 sm:gap-2 mb-6 sm:mb-8 overflow-x-auto pb-2 scrollbar-none">
-                            {SCREENSHOT_TABS.map((tab) => (
-                                <button
-                                    key={tab.id}
-                                    type="button"
-                                    onClick={() => setActiveTab(tab.id)}
-                                    className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-semibold transition-all shrink-0 cursor-pointer flex items-center gap-2 ${
-                                        activeTab === tab.id
-                                            ? "bg-[#33758F] text-white shadow-xs"
-                                            : "bg-white border border-slate-200 text-slate-600 hover:text-slate-900 hover:bg-slate-50"
-                                    }`}
-                                >
-                                    <span>{tab.label}</span>
-                                    <span
-                                        className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono ${
-                                            activeTab === tab.id
-                                                ? "bg-white/20 text-white"
-                                                : "bg-slate-100 text-slate-500"
-                                        }`}
-                                    >
-                                        {tab.badge}
-                                    </span>
-                                </button>
-                            ))}
-                        </div>
-
-                        {/* Interactive Overlapping Dashboard Stage */}
-                        <div className="relative">
-                            {/* Layer 1: Left Background Overlapping Layer (Live Tracking Map) */}
-                            <div
-                                onClick={() => setActiveTab("tracking")}
-                                className={`hidden lg:block absolute -left-10 top-12 w-2/3 z-10 rounded-2xl bg-white p-2 shadow-[0_20px_45px_-12px_rgba(15,23,42,0.16)] border border-slate-200/90 -rotate-2 hover:rotate-0 hover:z-30 transition-all duration-300 cursor-pointer ${
-                                    activeTab === "tracking" ? "opacity-20 pointer-events-none" : "opacity-90 hover:opacity-100"
-                                }`}
-                                title="Click to view Live Tracking Map"
-                            >
-                                <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-100 mb-1.5 text-[11px] font-semibold text-slate-600">
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        <span>Live Tracking · UAE Operations Map</span>
-                                    </div>
-                                    <span className="text-slate-400 font-mono text-[10px]">103 units active</span>
+                                    <Magnetic intensity={0.2} range={80}>
+                                        <a
+                                            href="#features"
+                                            className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/90 hover:border-slate-300 bg-white hover:bg-slate-50 px-5 sm:px-6 py-3.5 text-sm font-semibold text-slate-700 transition-all shadow-2xs"
+                                        >
+                                            <span>Explore Capabilities</span>
+                                            <ChevronRight className="w-4 h-4 text-slate-400" />
+                                        </a>
+                                    </Magnetic>
                                 </div>
-                                <img
-                                    src={liveTrackingImg}
-                                    alt="Live Tracking interactive map screenshot"
-                                    className="w-full h-auto rounded-xl object-cover object-top max-h-[360px]"
-                                />
                             </div>
 
-                            {/* Layer 2: Right Background Overlapping Layer (Vehicle Telemetry Drawer) */}
-                            <div
-                                onClick={() => setActiveTab("telemetry")}
-                                className={`hidden lg:block absolute -right-10 top-8 w-5/12 z-10 rounded-2xl bg-white p-2 shadow-[0_20px_45px_-12px_rgba(15,23,42,0.18)] border border-slate-200/90 rotate-2 hover:rotate-0 hover:z-30 transition-all duration-300 cursor-pointer ${
-                                    activeTab === "telemetry" ? "opacity-20 pointer-events-none" : "opacity-90 hover:opacity-100"
-                                }`}
-                                title="Click to view Vehicle Telemetry"
-                            >
-                                <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-100 mb-1.5 text-[11px] font-semibold text-slate-600">
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-blue-500" />
-                                        <span>Unit 13158 · Battery & Ignition</span>
-                                    </div>
-                                    <span className="text-slate-400 font-mono text-[10px]">28.87 V</span>
-                                </div>
-                                <img
-                                    src={vehicleTelemetryImg}
-                                    alt="Vehicle Telemetry Drawer screenshot"
-                                    className="w-full h-auto rounded-xl object-cover object-top max-h-[340px]"
-                                />
-                            </div>
+                            {/* ─── RIGHT COLUMN: COMPACT OVERLAPPING SCREENSHOT STACK (EXACT SAME SIZE) ── */}
+                            <div className="lg:col-span-7 relative w-full max-w-lg lg:max-w-none mx-auto select-none py-4 sm:py-6 lg:py-8">
+                                {/* Ambient Background Glow */}
+                                <div className="absolute inset-4 bg-gradient-to-tr from-[#33758F]/15 via-[#285E73]/8 to-transparent rounded-3xl blur-2xl -z-10 pointer-events-none" />
 
-                            {/* Layer 3: Right Bottom Overlapping Layer (Fleet Alerts) */}
-                            <div
-                                onClick={() => setActiveTab("alerts")}
-                                className={`hidden lg:block absolute -right-6 bottom-4 w-5/12 z-10 rounded-2xl bg-white p-2 shadow-[0_22px_45px_-12px_rgba(15,23,42,0.2)] border border-slate-200/90 -rotate-1 hover:rotate-0 hover:z-30 transition-all duration-300 cursor-pointer ${
-                                    activeTab === "alerts" ? "opacity-20 pointer-events-none" : "opacity-90 hover:opacity-100"
-                                }`}
-                                title="Click to view Safety Alerts"
-                            >
-                                <div className="flex items-center justify-between px-3 py-1.5 border-b border-slate-100 mb-1.5 text-[11px] font-semibold text-slate-600">
-                                    <div className="flex items-center gap-1.5">
-                                        <span className="w-2 h-2 rounded-full bg-rose-500" />
-                                        <span>Fleet Alerts · Sensor Thresholds</span>
-                                    </div>
-                                    <span className="text-slate-400 font-mono text-[10px]">91 events</span>
-                                </div>
-                                <img
-                                    src={fleetAlertsImg}
-                                    alt="Fleet Alerts screenshot"
-                                    className="w-full h-auto rounded-xl object-cover object-top max-h-[280px]"
-                                />
-                            </div>
+                                <div className="relative mx-auto w-full max-w-[480px] sm:max-w-[540px] h-[340px] sm:h-[370px]">
+                                    {HERO_SCREENSHOTS.map((item) => {
+                                        const isSelected = activeScreenshot === item.id
+                                        return (
+                                            <div
+                                                key={item.id}
+                                                onClick={() => setActiveScreenshot(isSelected ? null : item.id)}
+                                                className={`absolute w-[86%] sm:w-[84%] rounded-2xl bg-white p-2 sm:p-2.5 shadow-xl border border-slate-200/90 transition-all duration-300 hover:rotate-0 hover:scale-[1.02] hover:z-30 cursor-pointer ${
+                                                    isSelected ? "z-30 !rotate-0 !scale-[1.03] shadow-2xl ring-2 ring-[#33758F]/30" : item.posClass
+                                                }`}
+                                                title={`Click to focus: ${item.title}`}
+                                            >
+                                                {/* Identical Window Chrome Header Bar */}
+                                                <div className="flex items-center justify-between px-2.5 py-1.5 bg-slate-50 border border-slate-100 rounded-lg mb-1.5 text-xs text-slate-600">
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                        <div className="flex items-center gap-1 shrink-0">
+                                                            <span className="w-2 h-2 rounded-full bg-rose-400" />
+                                                            <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                                            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                                                        </div>
+                                                        <span className="text-[11px] sm:text-xs font-semibold text-slate-800 truncate">
+                                                            {item.title}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                                                        <span className={`w-1.5 h-1.5 rounded-full ${item.dotColor} animate-pulse`} />
+                                                        <span className="text-[10px] font-mono text-slate-500">{item.tag}</span>
+                                                    </div>
+                                                </div>
 
-                            {/* Main Active Spotlight Window (Centered, High Elevation) */}
-                            <div className="relative z-20 rounded-2xl bg-white p-2.5 sm:p-3 shadow-[0_25px_60px_-15px_rgba(15,23,42,0.24)] border border-slate-200/90 overflow-hidden transition-all duration-200">
-                                {/* Chrome Window Header Bar */}
-                                <div className="flex items-center justify-between px-3 py-2 bg-slate-50 border border-slate-100 rounded-xl mb-2 text-xs text-slate-600">
-                                    <div className="flex items-center gap-2">
-                                        <div className="flex items-center gap-1.5">
-                                            <span className="w-2.5 h-2.5 rounded-full bg-rose-400/90" />
-                                            <span className="w-2.5 h-2.5 rounded-full bg-amber-400/90" />
-                                            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400/90" />
-                                        </div>
-                                        <span className="ml-2 font-semibold text-slate-800">
-                                            {SCREENSHOT_TABS.find((t) => t.id === activeTab)?.title}
-                                        </span>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <span className="hidden sm:inline-block text-[11px] text-slate-400">
-                                            Live Telemetry View
-                                        </span>
-                                        <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                                    </div>
-                                </div>
-
-                                {/* Active Screenshot Image */}
-                                <div className="rounded-xl overflow-hidden border border-slate-200/70 bg-slate-100">
-                                    <img
-                                        src={SCREENSHOT_TABS.find((t) => t.id === activeTab)?.image}
-                                        alt={SCREENSHOT_TABS.find((t) => t.id === activeTab)?.title}
-                                        className="w-full h-auto object-cover max-h-[620px]"
-                                    />
-                                </div>
-
-                                {/* Screenshot Description Caption */}
-                                <div className="px-3 pt-3 pb-1 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-slate-500">
-                                    <p className="font-normal text-slate-600">
-                                        {SCREENSHOT_TABS.find((t) => t.id === activeTab)?.desc}
-                                    </p>
-                                    <span className="shrink-0 text-[11px] font-mono text-slate-400">
-                                        Captured from active ATS console
-                                    </span>
+                                                {/* Full Dashboard Screenshot View: Uncropped & Crisp */}
+                                                <div className="w-full aspect-[16/8] rounded-xl overflow-hidden bg-slate-900/5 border border-slate-100/90 flex items-center justify-center">
+                                                    <img
+                                                        src={item.image}
+                                                        alt={item.alt}
+                                                        className="w-full h-full object-contain block select-none"
+                                                    />
+                                                </div>
+                                            </div>
+                                        )
+                                    })}
                                 </div>
                             </div>
                         </div>
@@ -660,7 +566,7 @@ export default function Landing() {
                     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
                         <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white border border-[#D1E2EA] text-[#33758F] text-xs font-semibold mb-6 shadow-2xs">
                             <Radio className="w-3.5 h-3.5 animate-pulse" />
-                            <span>Ready For Commercial Fleet Deployment</span>
+                            <span>Commercial Fleet Telemetry Platform</span>
                         </div>
 
                         <h2 className="text-3xl sm:text-4xl md:text-5xl font-extrabold tracking-tight font-display text-slate-900">
@@ -671,23 +577,25 @@ export default function Landing() {
                         </p>
 
                         <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
-                            {isAuthenticated ? (
-                                <Link
-                                    to="/dashboard"
-                                    className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-8 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
-                                >
-                                    <span>Launch Dashboard</span>
-                                    <ArrowRight className="w-4 h-4" />
-                                </Link>
-                            ) : (
-                                <Link
-                                    to="/login"
-                                    className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-8 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
-                                >
-                                    <span>Sign In to Console</span>
-                                    <ArrowRight className="w-4 h-4" />
-                                </Link>
-                            )}
+                            <Magnetic intensity={0.2} range={80}>
+                                {isAuthenticated ? (
+                                    <Link
+                                        to="/dashboard"
+                                        className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-8 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
+                                    >
+                                        <span>Launch Dashboard</span>
+                                        <ArrowRight className="w-4 h-4" />
+                                    </Link>
+                                ) : (
+                                    <Link
+                                        to="/login"
+                                        className="inline-flex items-center gap-2 rounded-full bg-[#33758F] hover:bg-[#285E73] px-8 py-3.5 text-sm font-semibold text-white shadow-sm hover:shadow transition-all active:scale-98"
+                                    >
+                                        <span>Sign In</span>
+                                        <ArrowRight className="w-4 h-4" />
+                                    </Link>
+                                )}
+                            </Magnetic>
                         </div>
                     </div>
                 </section>
@@ -708,9 +616,6 @@ export default function Landing() {
                     <div className="flex items-center flex-wrap justify-center gap-6 text-xs font-semibold text-slate-600">
                         <a href="#features" className="hover:text-slate-900 transition-colors">
                             Capabilities
-                        </a>
-                        <a href="#showcase" className="hover:text-slate-900 transition-colors">
-                            Console
                         </a>
                         <a href="#telemetry" className="hover:text-slate-900 transition-colors">
                             Idle Analytics
