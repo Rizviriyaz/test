@@ -57,11 +57,7 @@ test("hardcoded verification badges and measured-consumption wording are gone", 
 })
 
 test("vehicle trend and attention cards keep unknown values unknown", () => {
-    const veh = read("../../pages/FuelVehicles.jsx")
-    assert.doesNotMatch(veh, /distance_km \|\| 0/)
-    for (const rel of ["../../pages/FuelPerformance.jsx", "../../pages/VehicleRanking.jsx"]) {
-        assert.match(read(rel), /fuel_efficiency_l_per_100km !== null/, rel)
-    }
+    assert.match(read("../../pages/FuelPerformance.jsx"), /fuel_efficiency_l_per_100km !== null/)
     const waste = read("./FuelWasteIntelligence.jsx")
     assert.match(waste, /!isExcludedIdentifierItem\(item\)/)
     const perf = read("../../pages/FuelPerformance.jsx")
@@ -70,11 +66,9 @@ test("vehicle trend and attention cards keep unknown values unknown", () => {
 })
 
 test("global filters never overwrite the local vehicle/search parameter", () => {
-    for (const rel of ["../../pages/FuelPerformance.jsx", "../../pages/FuelVehicles.jsx", "../../pages/VehicleRanking.jsx"]) {
-        const src = read(rel)
-        // a local vehicle_identifier followed later in the same object by ...queryParams would be overwritten
-        assert.doesNotMatch(src, /vehicle_identifier:[^\n]*\n(?:[^\n}]*\n)*?\s*\.\.\.queryParams,/, rel)
-    }
+    const src = read("../../pages/FuelPerformance.jsx")
+    // a local vehicle_identifier followed later in the same object by ...queryParams would be overwritten
+    assert.doesNotMatch(src, /vehicle_identifier:[^\n]*\n(?:[^\n}]*\n)*?\s*\.\.\.queryParams,/)
 })
 
 test("missing price, cost and fuel type render as unknown, never as blank or an invented value", () => {
@@ -87,15 +81,11 @@ test("missing price, cost and fuel type render as unknown, never as blank or an 
     assert.equal(fuelTypeLabel(null), "Unspecified")
     assert.equal(fuelTypeLabel("  "), "Unspecified")
     assert.equal(fuelTypeLabel("Diesel"), "Diesel")
-    for (const rel of ["../../pages/FuelVehicles.jsx", "./VehicleFuelDetailModal.jsx"]) {
-        const src = read(rel)
-        assert.doesNotMatch(src, /fuel_type \|\| "/, rel)
-        assert.doesNotMatch(src, /unit_price\?\.toFixed|total_cost\?\.toFixed/, rel)
-        assert.doesNotMatch(src, /t\.(unit_price|total_cost) \?/, `${rel}: a recorded 0 must not be hidden`)
-    }
-    for (const rel of ["../../pages/FuelPerformance.jsx", "../../pages/VehicleRanking.jsx"]) {
-        assert.doesNotMatch(read(rel), /fuel_cost_per_km\?\.toFixed/, rel)
-    }
+    const modal = read("./VehicleFuelDetailModal.jsx")
+    assert.doesNotMatch(modal, /fuel_type \|\| "/)
+    assert.doesNotMatch(modal, /unit_price\?\.toFixed|total_cost\?\.toFixed/)
+    assert.doesNotMatch(modal, /t\.(unit_price|total_cost) \?/, "a recorded 0 must not be hidden")
+    assert.doesNotMatch(read("../../pages/FuelPerformance.jsx"), /fuel_cost_per_km\?\.toFixed/)
 })
 
 test("refund adjustments are labelled distinctly from purchases", () => {
@@ -114,24 +104,15 @@ test("axis ticks below 1000 are not collapsed to 0k", () => {
 })
 
 test("failed or stale requests never leave the previous data on screen", () => {
-    const veh = read("../../pages/FuelVehicles.jsx")
-    assert.match(veh, /setTransactions\(\[\]\)/, "detail lists cleared when a new vehicle loads")
-    assert.match(veh, /setDetailError\(/)
-    assert.match(veh, /byId\(prev\?\.vehicle_identifier\)/, "selection re-resolved from the new period's list")
     const perf = read("../../pages/FuelPerformance.jsx")
     for (const ref of ["efficiencyRequestIdRef", "rankingsRequestIdRef", "attentionRequestIdRef", "wasteRequestIdRef"]) {
         assert.match(perf, new RegExp(`requestId !== ${ref}\\.current`), ref)
     }
     assert.match(perf, /setEfficiency\(null\)/)
     assert.match(perf, /setRankingsError\(/)
-    for (const rel of ["../../pages/FuelPerformance.jsx", "../../pages/VehicleRanking.jsx"]) {
-        assert.match(read(rel), /if \(pageFilters !== queryParams\) \{\s*setPageFilters\(queryParams\)\s*setPage\(1\)/, `${rel}: page resets on new filters`)
-    }
-    assert.match(read("../../pages/FuelOverview.jsx"), /setEfficiency\(null\)/)
+    assert.match(perf, /if \(pageFilters !== queryParams\) \{\s*setPageFilters\(queryParams\)\s*setPage\(1\)/, "page resets on new filters")
     assert.match(read("./VehicleFuelDetailModal.jsx"), /return \(\) => \{ active = false \}/)
-    for (const rel of ["../../pages/FuelImport.jsx", "../../pages/FuelPerformance.jsx"]) {
-        assert.match(read(rel), /setHistoryError\(/, `${rel}: history outage is not "no imports"`)
-    }
+    assert.match(perf, /setHistoryError\(/, 'history outage is not "no imports"')
     assert.match(read("../../api/fleetApi.js"), /executeFuelImport[\s\S]*?clearClientCache\("\/api\/fuel\/"\)/)
 })
 

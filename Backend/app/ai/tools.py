@@ -7,6 +7,7 @@ No new Wialon calls are introduced beyond what the existing services do.
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from app.wialon import login, get_vehicle_history
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data
@@ -132,6 +133,24 @@ def tool_get_vehicle_status(vehicle_id) -> dict:
     }
 
 
+# Fleet-wide idle scans load each unit's history serially: one Wialon request at a time on the shared session
+# (no extra api_concurrent pressure), and message loads never take the wialon_reports report lock, so the scan
+# cannot block report-based endpoints. Every unit is eligible; the time budget bounds the total run and whatever
+# was not reached is reported explicitly.
+IDLE_SCAN_TIME_BUDGET_SECONDS = 45
+
+
+def _no_messages_in_window(vehicle: dict, window_from: int) -> bool:
+    """True when the unit's last message (core/search_items flag 1024) proves it has no messages in the window."""
+    if "lmsg" not in vehicle:
+        return False  # last-message data not available: the unit must be scanned
+    lmsg = vehicle.get("lmsg")
+    if lmsg is None:
+        return True  # unit has never reported
+    t = lmsg.get("t") if isinstance(lmsg, dict) else None
+    return isinstance(t, (int, float)) and t < window_from
+
+
 def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle_id: int = None) -> dict:
     """Return idle events across the fleet or for a specific vehicle."""
     sid = login()
@@ -144,13 +163,24 @@ def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle
 
     all_events = []
     min_seconds = min_duration_minutes * 60
+    failed_units = []
+    scanned = 0
+    # One shared window for every unit, so results are comparable across the fleet.
+    window_to = int(time.time())
+    window_from = window_to - hours * 3600
+    deadline = time.monotonic() + IDLE_SCAN_TIME_BUDGET_SECONDS
+    # Units with no messages in the window cannot have idle periods: account for them without a Wialon call.
+    to_scan = [v for v in target if not _no_messages_in_window(v, window_from)]
 
-    for v in target:
+    for v in to_scan:
+        if time.monotonic() >= deadline:
+            break
+        scanned += 1
         vid = v.get("id")
         vname = v.get("nm", f"Vehicle {vid}")
         sens = v.get("sens") or {}
         try:
-            raw = get_vehicle_history(sid, vid, hours=hours)
+            raw = get_vehicle_history(sid, vid, from_time=window_from, to_time=window_to)
             telemetry = normalize_wialon_messages(raw, configured_sensors=sens)
             activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
             for p in activity.get("idle_periods", []):
@@ -167,18 +197,38 @@ def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle
                         "latitude": loc.get("latitude"),
                         "longitude": loc.get("longitude"),
                     })
-        except Exception:
-            continue
+        except Exception as e:
+            logging.getLogger(__name__).warning("Idle history load failed for unit %s: %s", vid, e)
+            failed_units.append({"vehicle_id": vid, "vehicle_name": vname})
 
     # Sort longest first
     all_events.sort(key=lambda x: x["duration_seconds"], reverse=True)
 
-    return {
+    not_scanned = to_scan[scanned:]
+    result = {
         "hours_window": hours,
         "min_duration_minutes": min_duration_minutes,
         "event_count": len(all_events),
         "events": all_events[:50],  # cap response size
+        "vehicles_requested": len(target),
+        "vehicles_scanned": scanned - len(failed_units),
+        "vehicles_without_messages_in_window": len(target) - len(to_scan),
+        "failed_vehicle_count": len(failed_units),
+        "failed_vehicles": failed_units[:20],
+        "not_scanned_vehicle_count": len(not_scanned),
+        "not_scanned_vehicles": [
+            {"vehicle_id": v.get("id"), "vehicle_name": v.get("nm", f"Vehicle {v.get('id')}")} for v in not_scanned[:20]
+        ],
+        "complete": not failed_units and not not_scanned,
     }
+    if vehicle_id and not target:
+        result["vehicle_found"] = False
+    if not result["complete"]:
+        result["note"] = (
+            "Partial results: idle data is missing for the failed and not-scanned vehicles (time budget reached or load errors). "
+            "Say so in the answer; use get_fleet_utilization for fleet-wide idle totals or pass vehicle_id for one vehicle."
+        )
+    return result
 
 
 def tool_get_vehicle_trips(vehicle_id: int, hours: int = 24) -> dict:
@@ -320,7 +370,7 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "hours": {"type": "integer", "description": "Time window in hours. Default 24.", "default": 24}
+                    "hours": {"type": "integer", "description": "Time window in hours (1-168). Default 24.", "default": 24}
                 },
                 "required": [],
             },
@@ -334,7 +384,7 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "hours": {"type": "integer", "description": "Look-back window in hours. Default 168 (7 days).", "default": 168}
+                    "hours": {"type": "integer", "description": "Look-back window in hours (1-168). Default 168 (7 days).", "default": 168}
                 },
                 "required": [],
             },
@@ -374,11 +424,11 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_idle_events",
-            "description": "Get idle events across the fleet or for a specific vehicle within a time window.",
+            "description": "Get idle events across the fleet or for a specific vehicle within a time window. Fleet-wide scans cover every vehicle within a 45-second budget; the result reports failed and not-scanned vehicles.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "hours": {"type": "integer", "description": "Look-back window in hours. Default 24.", "default": 24},
+                    "hours": {"type": "integer", "description": "Look-back window in hours (1-168). Default 24.", "default": 24},
                     "min_duration_minutes": {"type": "integer", "description": "Minimum idle duration in minutes to include. Default 0.", "default": 0},
                     "vehicle_id": {"type": "integer", "description": "Specific vehicle ID. Omit for fleet-wide results."},
                 },
@@ -395,7 +445,7 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "vehicle_id": {"type": "integer", "description": "The numeric vehicle ID."},
-                    "hours": {"type": "integer", "description": "Look-back window in hours. Default 24.", "default": 24},
+                    "hours": {"type": "integer", "description": "Look-back window in hours (1-168). Default 24.", "default": 24},
                 },
                 "required": ["vehicle_id"],
             },
@@ -404,8 +454,53 @@ TOOL_DEFINITIONS = [
 ]
 
 
+# Model-selected look-back windows are validated and clamped before any Wialon/analytics call.
+MAX_TOOL_HOURS = 168
+MAX_IDLE_MIN_DURATION_MINUTES = 1440
+
+
+class ToolInputError(ValueError):
+    """An invalid tool argument. Only these messages are shown to the model so it can correct its call;
+    any other exception (including a ValueError from deep inside an upstream call) stays generic."""
+
+
+def _int_arg(args: dict, key: str, default=None):
+    """Read an optional whole-number tool argument (None/"" -> default), rejecting non-numeric values."""
+    value = args.get(key)
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        raise ToolInputError(f"{key} must be a whole number, got {value!r}")
+    try:
+        return int(float(value)) if isinstance(value, (int, float)) else int(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ToolInputError(f"{key} must be a whole number, got {value!r}") from None
+
+
+def _bounded_int(args: dict, key: str, default: int, low: int, high: int, clamped: list) -> int:
+    """Read an integer tool argument, rejecting non-numeric values and clamping it into [low, high]."""
+    value = args.get(key, default)
+    if value is None or value == "":
+        value = default
+    if isinstance(value, bool):
+        raise ToolInputError(f"{key} must be a whole number, got {value!r}")
+    try:
+        number = int(float(value)) if isinstance(value, (int, float)) else int(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        raise ToolInputError(f"{key} must be a whole number, got {value!r}") from None
+    bounded = min(max(number, low), high)
+    if bounded != number:
+        clamped.append(f"{key}={number} was clamped to {bounded} (allowed {low}-{high})")
+    return bounded
+
+
 def dispatch_tool(name: str, args: dict) -> str:
     """Execute a tool by name and return the result as a JSON string."""
+    clamped: list = []
+
+    def hours(default):
+        return _bounded_int(args, "hours", default, 1, MAX_TOOL_HOURS, clamped)
+
     try:
         if name == "get_fleet_summary":
             result = tool_get_fleet_summary()
@@ -416,25 +511,28 @@ def dispatch_tool(name: str, args: dict) -> str:
         elif name == "get_fleet_health":
             result = tool_get_fleet_health()
         elif name == "get_fleet_utilization":
-            result = tool_get_fleet_utilization(hours=int(args.get("hours", 24)))
+            result = tool_get_fleet_utilization(hours=hours(24))
         elif name == "get_fleet_safety":
-            result = tool_get_fleet_safety(hours=int(args.get("hours", 168)))
+            result = tool_get_fleet_safety(hours=hours(168))
         elif name == "get_fleet_alerts":
             result = tool_get_fleet_alerts()
         elif name == "get_group_analytics":
             result = tool_get_group_analytics()
         elif name == "get_vehicle_deep_analytics":
-            result = tool_get_vehicle_deep_analytics(args.get("vehicle_id"), hours=int(args.get("hours", 24)))
+            result = tool_get_vehicle_deep_analytics(args.get("vehicle_id"), hours=hours(24))
         elif name == "get_idle_events":
             result = tool_get_idle_events(
-                hours=int(args.get("hours", 24)),
-                min_duration_minutes=int(args.get("min_duration_minutes", 0)),
-                vehicle_id=int(args["vehicle_id"]) if args.get("vehicle_id") else None,
+                hours=hours(24),
+                min_duration_minutes=_bounded_int(args, "min_duration_minutes", 0, 0, MAX_IDLE_MIN_DURATION_MINUTES, clamped),
+                vehicle_id=_int_arg(args, "vehicle_id") or None,
             )
         elif name == "get_vehicle_trips":
+            vehicle_id = _int_arg(args, "vehicle_id")
+            if vehicle_id is None:
+                raise ToolInputError("vehicle_id is required")
             result = tool_get_vehicle_trips(
-                vehicle_id=int(args["vehicle_id"]),
-                hours=int(args.get("hours", 24)),
+                vehicle_id=vehicle_id,
+                hours=hours(24),
             )
         elif name == "get_fuel_summary":
             result = tool_get_fuel_summary(
@@ -450,7 +548,7 @@ def dispatch_tool(name: str, args: dict) -> str:
             result = tool_get_vehicle_fuel_ranking(
                 sort_by=args.get("sort_by", "litres"),
                 sort_order=args.get("sort_order", "desc"),
-                limit=int(args.get("limit", 5)),
+                limit=_int_arg(args, "limit", 5),
                 date_from=args.get("date_from"),
                 date_to=args.get("date_to"),
             )
@@ -462,7 +560,7 @@ def dispatch_tool(name: str, args: dict) -> str:
             )
         else:
             result = {"error": f"Unknown tool: {name}"}
-    except ValueError as e:
+    except ToolInputError as e:
         # Input validation messages (e.g. date format) help the model correct its call.
         result = {"error": str(e)}
     except Exception as e:
@@ -470,6 +568,9 @@ def dispatch_tool(name: str, args: dict) -> str:
         logging.getLogger(__name__).warning("AI tool %s failed: %s", name, e, exc_info=True)
         result = {"error": "The data source for this tool is currently unavailable."}
 
+    if clamped and isinstance(result, dict):
+        # Copy: analytics results can be cached dicts that must not be mutated.
+        result = {**result, "time_range_note": "; ".join(clamped)}
     return json.dumps(result)
 
 
@@ -487,7 +588,7 @@ def _check_date(value, name):
             raise ValueError
         return datetime.strptime(text, "%Y-%m-%d").strftime("%Y-%m-%d")
     except ValueError:
-        raise ValueError(f"{name} must be YYYY-MM-DD, got {value!r}") from None
+        raise ToolInputError(f"{name} must be YYYY-MM-DD, got {value!r}") from None
 
 
 def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: str = None):
@@ -496,7 +597,7 @@ def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: 
 
     date_from, date_to = _check_date(date_from, "date_from"), _check_date(date_to, "date_to")
     if date_from and date_to and date_from > date_to:
-        raise ValueError("date_from must be on or before date_to")
+        raise ToolInputError("date_from must be on or before date_to")
 
     filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier}
     return build_scope(filters, fetch_fuel_transactions_for_analytics, lambda: login(), lambda sid: get_all_vehicles(sid))
@@ -524,7 +625,8 @@ def _fuel_tool(fn):
             return fn(*args, **kwargs)
         except FuelDataFetchError as exc:
             return {"error": f"Fuel data unavailable; results withheld to avoid partial KPIs ({exc})."}
-        except ValueError as exc:
+        except ToolInputError as exc:
+            # Other ValueErrors propagate to dispatch_tool, which logs them and returns a generic error
             return {"error": str(exc)}
     wrapper.__name__ = fn.__name__
     wrapper.__doc__ = fn.__doc__

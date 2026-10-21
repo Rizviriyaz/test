@@ -44,10 +44,10 @@ Copy `Backend/.env.example` and `Frontend/.env.example`.
 
 ### Backend (`Backend/app/`)
 
-- `main.py`: the FastAPI app and most routes (`/api/vehicles*`, `/api/dashboard/*`, `/api/idle/fleet-analytics`, `/api/fleet/*`, `/api/ai/chat`, `/api/groups`, `/api/drivers`). Holds a module-level `_cache` dict with `cached(key, ttl)` / `set_cache()` TTL helpers. The fuel feature is mounted from `app/fuel/routes.py` under `/api/fuel`.
+- `main.py`: the FastAPI app and most routes (`/api/vehicles*`, `/api/dashboard/*`, `/api/idle/fleet-analytics`, `/api/fleet/*`, `/api/ai/chat`, `/api/groups`, `/api/drivers`). Holds `_cache`, a bounded thread-safe `TTLCache` (`app/utils/ttl_cache.py`, 128 entries, LRU) behind the `cached(key, ttl_seconds)` / `set_cache()` helpers: freshness is checked per call against the caller's `ttl_seconds`, and entries are evicted after 600 s. `fleet_analytics.py`, `auth.py` and `fuel/wialon_distance.py` keep their own `TTLCache` instances. The unit trips, unit idle and dashboard mileage routes do not cache report results flagged incomplete. The fuel feature is mounted from `app/fuel/routes.py` under `/api/fuel`.
 - `wialon.py`: the single gateway to Wialon (`wialon_request`, `login`). Manages a shared session id behind a lock, re-logs in on Wialon error 1 (invalid session), backs off on 1003 (concurrency limit), and raises `WialonAPIError`, which `main.py` maps to HTTP 502. Loads `Backend/.env`.
 - `vehicles.py`: fleet discovery (`get_all_vehicles`) via `core/search_items` and `unit/calc_last`, plus registration-plate extraction from Wialon profile fields.
-- `normalize.py` / `status.py`: turn raw Wialon messages and sensors into normalized fields. Sensors are resolved **by name**, never by ID. The sentinel `-2147483648` is filtered out. Status is MOVING / IDLING / STOPPED; trips and idle periods are segmented here.
+- `normalize.py` / `status.py`: turn raw Wialon messages and sensors into normalized fields. Sensors are resolved **by name**, never by ID. The invalid-value sentinel `INVALID_WIALON_VALUE = -348201.3876`, and any value `<= -100000`, is filtered out (`is_valid_sensor_value`). Status is MOVING / IDLING / STOPPED; trips and idle periods are segmented here.
 - `wialon_reports.py`: runs Wialon's native report engine (unit/group trips, engine and idle reports). The authoritative source for distance, engine hours and idle totals.
 - `fleet_analytics.py`: cached fleet-wide health, utilization, trips, safety, alerts and group rollups behind `/api/fleet/*`.
 - `fuel/`: fuel management backed by Supabase PostgREST (tables `fuel_imports` and `fuel_transactions` in `db.py`). Covers Excel import (`importer.py` / `mapper.py`, via openpyxl), analytics, anomalies and efficiency. Efficiency joins fuel transactions with Wialon distance (`wialon_distance.py`), matching vehicles by registration plate. Pydantic models live in `schemas.py`.
@@ -60,6 +60,7 @@ Copy `Backend/.env.example` and `Frontend/.env.example`.
 - The frontend `apiFetch` in `src/api/fleetApi.js` attaches and refreshes the Supabase token and throws if there is no session.
 - The "local fallback login" described in README/ARCHITECTURE therefore cannot call the API; Supabase must be configured for real use.
 - CORS defaults to localhost:5173 only when `ENVIRONMENT` is not `production`, and `*` is rejected.
+- `/docs`, `/redoc` and `/openapi.json` are served only when `ENVIRONMENT=development` is set explicitly; unset or any other value disables them.
 
 ### Frontend (`Frontend/src/`)
 

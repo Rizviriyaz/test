@@ -185,9 +185,18 @@ def test_upstream_error_text_not_sent_to_clients():
     with patch.object(tools, "tool_get_fleet_summary", side_effect=RuntimeError(raw)):
         out = json.loads(tools.dispatch_tool("get_fleet_summary", {}))
     assert "secret-unit" not in out["error"] and "unavailable" in out["error"], out
-    with patch.object(tools, "tool_get_fleet_summary", side_effect=ValueError("date_from must be YYYY-MM-DD")):
+    with patch.object(tools, "tool_get_fleet_summary", side_effect=tools.ToolInputError("date_from must be YYYY-MM-DD")):
         out = json.loads(tools.dispatch_tool("get_fleet_summary", {}))
     assert out["error"] == "date_from must be YYYY-MM-DD", "validation messages still reach the model"
+    # A plain ValueError raised deep inside an upstream call is not an input error: its text stays server-side
+    with patch.object(tools, "tool_get_fleet_summary", side_effect=ValueError(raw)):
+        out = json.loads(tools.dispatch_tool("get_fleet_summary", {}))
+    assert "secret-unit" not in out["error"] and "unavailable" in out["error"], out
+    # Real argument validation still produces a model-visible message
+    out = json.loads(tools.dispatch_tool("get_fuel_summary", {"date_from": "08/03/2026"}))
+    assert out["error"].startswith("date_from must be YYYY-MM-DD"), out
+    out = json.loads(tools.dispatch_tool("get_vehicle_trips", {"vehicle_id": "abc"}))
+    assert out["error"].startswith("vehicle_id must be a whole number"), out
     print("[PASS] Wialon 502 bodies and AI tool errors carry no raw upstream payloads; validation messages kept.")
 
 

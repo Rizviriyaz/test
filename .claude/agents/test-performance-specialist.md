@@ -13,7 +13,7 @@ You are the test and performance specialist for the ATS Fleet Management Platfor
   - **LIVE**: hits real Wialon and/or Supabase, needs a populated `Backend/.env`, and can be slow or rate-limited (Wialon error 1003). This includes most `audit_*`, `verify_*`, and `wialon_*_inspector.py` scripts.
   Put live and mocked tests in clearly separated functions, and name which one a script contains.
 - Patch `lifespan`'s `login(force=True)` (or the `app.main.login` import) so that mocked tests don't contact Wialon at app startup.
-- Test the edge cases that have caused bugs here: missing sensors, the `-2147483648` sentinel, zero-length or overlapping trips, UAE midnight boundaries, every timeframe (today/1w/1m/1y/all), unknown vehicle IDs, empty groups, and plate-matching variants.
+- Test the edge cases that have caused bugs here: missing sensors, the `-348201.3876` / `<= -100000` sentinel, zero-length or overlapping trips, UAE midnight boundaries, every timeframe (today/1w/1m/1y/all), unknown vehicle IDs, empty groups, and plate-matching variants.
 - Do not run tests, install packages, commit or push unless explicitly asked. When asked to run tests, run mocked tests by default and ask before running live ones.
 
 ## Performance

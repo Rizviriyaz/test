@@ -352,9 +352,36 @@ def run_live_production_data_test():
 
 
 if __name__ == "__main__":
-    run_unit_tests()
-    run_api_endpoint_tests()
-    run_live_production_data_test()
+    # Offline by default. run_live_production_data_test reads real Supabase data and pins a past snapshot
+    # of production totals, so it only runs when explicitly requested with --live.
+    import traceback
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from offline_guard import LiveCallBlocked, OfflineGuard
+
+    sections = [run_unit_tests, run_api_endpoint_tests]
+    if "--live" in sys.argv:
+        sections.append(run_live_production_data_test)
+    else:
+        print("[SKIP] run_live_production_data_test (live Supabase); pass --live to run it.")
+
+    failures = 0
+    for section in sections:
+        guard = None if section is run_live_production_data_test else OfflineGuard().start()
+        try:
+            section()
+            if guard:
+                guard.assert_no_live_calls()
+        except (Exception, LiveCallBlocked):  # one failing section must not hide the others' results
+            failures += 1
+            print(f"[FAIL] {section.__name__}")
+            traceback.print_exc()
+        finally:
+            if guard:
+                guard.stop()
+
     print("\n==================================================")
-    print("ALL PHASE 5 ANALYTICS TESTS PASSED WITH 100% SUCCESS!")
+    if failures:
+        print(f"{failures} of {len(sections)} analytics test section(s) FAILED")
+        sys.exit(1)
+    print(f"All {len(sections)} analytics test section(s) passed.")
     print("==================================================")

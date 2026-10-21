@@ -1,4 +1,3 @@
-import React from "react"
 
 /**
  * Standardized operational fleet status badge.

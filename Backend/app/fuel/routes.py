@@ -102,6 +102,18 @@ async def _read_upload(file: UploadFile) -> bytes:
     return file_bytes
 
 
+# Roles allowed to write fuel data (import and its preview). Read-only roles such as 'viewer' get 403.
+FUEL_IMPORT_ROLES = frozenset({"admin", "manager", "fleet_manager"})
+
+
+def _require_fuel_import_role(request: Request) -> None:
+    """Deny fuel import unless the authenticated profile (set by the auth middleware) has a write role."""
+    user = getattr(request.state, "user", None)
+    role = user.get("role") if isinstance(user, dict) else None
+    if role not in FUEL_IMPORT_ROLES:
+        raise HTTPException(status_code=403, detail="Your role does not permit importing fuel statements.")
+
+
 def _get_bearer_token(request: Request) -> Optional[str]:
     """Extract raw bearer token from the Authorization header."""
     auth_header = request.headers.get("authorization", "")
@@ -174,8 +186,9 @@ async def preview_fuel_import(
 ):
     """
     Preview and dynamically map fuel spreadsheet data before database commit.
-    Requires authenticated bearer token (enforced by main API middleware).
+    Requires authenticated bearer token (enforced by main API middleware) and an import role.
     """
+    _require_fuel_import_role(request)
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="An Excel file must be provided.")
 
@@ -217,8 +230,9 @@ async def import_fuel_statement(
 ):
     """
     Execute full fuel statement ingestion.
-    Requires authenticated bearer token (enforced by main API middleware).
+    Requires authenticated bearer token (enforced by main API middleware) and an import role.
     """
+    _require_fuel_import_role(request)
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="An Excel file must be provided.")
 

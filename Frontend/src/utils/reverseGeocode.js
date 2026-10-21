@@ -6,6 +6,17 @@ const STORAGE_KEY = "ats_geocode_cache_v1"
 const memoryCache = new Map()
 const pendingRequests = new Map()
 
+// Nominatim's usage policy allows at most one request per second, so uncached lookups share one paced queue.
+const MIN_REQUEST_INTERVAL_MS = 1100
+let nextRequestAt = 0
+
+function waitForRequestSlot() {
+    const now = Date.now()
+    const waitMs = Math.max(0, nextRequestAt - now)
+    nextRequestAt = Math.max(now, nextRequestAt) + MIN_REQUEST_INTERVAL_MS
+    return waitMs > 0 ? new Promise(resolve => setTimeout(resolve, waitMs)) : Promise.resolve()
+}
+
 // Initialize memory cache from localStorage
 try {
     const saved = localStorage.getItem(STORAGE_KEY)
@@ -103,6 +114,8 @@ export async function reverseGeocode(lat, lng) {
     const fallback = `${Number(lat).toFixed(4)}, ${Number(lng).toFixed(4)}`
 
     const fetchPromise = (async () => {
+        await waitForRequestSlot()
+
         // Attempt 1: OpenStreetMap Nominatim with 4s timeout
         try {
             const controller = new AbortController()

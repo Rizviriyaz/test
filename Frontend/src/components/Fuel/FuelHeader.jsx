@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react"
-import { Calendar, Filter, ChevronDown, Check, X, RotateCcw } from "lucide-react"
-import { useFuelFilters } from "../../context/FuelFilterContext"
+import { Calendar, ChevronDown, Check, X, RotateCcw } from "lucide-react"
+import { useFuelFilters } from "../../context/useFuelFilters"
 
 export default function FuelHeader({
     title = "ATS Fleet Fuel Performance",
@@ -21,7 +21,6 @@ export default function FuelHeader({
         setFuelType,
         vehiclesList,
         fuelTypesList,
-        loadingFilterOptions,
         resetFilters,
     } = useFuelFilters()
 

@@ -59,7 +59,7 @@ Transforms raw Wialon GPS tracker message streams into standardized operational 
 ## 6. Normalization Decisions
 
 1. **Sensor Resolution by Name**: Wialon does not guarantee fixed sensor IDs across hardware models. Sensors are resolved dynamically by matching `sensor_config.get("n", "").strip().lower() == target_name`.
-2. **Sentinel Filtering**: Wialon outputs `-2147483648` (`0x80000000`) for disconnected or uncalibrated sensors. The normalization layer filters these out (`is_valid_sensor_value()`).
+2. **Sentinel Filtering**: Wialon outputs large negative sentinels for disconnected or uncalibrated sensors. The normalization layer filters `INVALID_WIALON_VALUE = -348201.3876` and any value `<= -100000` (`is_valid_sensor_value()`).
 3. **Motion State Logic**:
    - `speed > 0` -> `MOVING`
    - `speed == 0` AND `ignition == 1` -> `IDLING`

@@ -24,7 +24,7 @@
 ## PHASE 2 — Data Normalization
 - [x] Motion state classification logic (`MOVING`, `IDLING`, `STOPPED`).
 - [x] Continuous idle duration computation in seconds and formatted strings.
-- [x] Filtering of Wialon sentinel invalid values (`-2147483648`).
+- [x] Filtering of Wialon sentinel invalid values (`-348201.3876` and anything `<= -100000`).
 - [x] Normalization of message streams into uniform telemetry points.
 - [x] Activity segmentation into trips and idle periods.
 

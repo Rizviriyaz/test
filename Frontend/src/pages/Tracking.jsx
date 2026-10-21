@@ -2,24 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
     Navigation,
-    RefreshCw,
     AlertCircle,
     Truck,
-    MapPin,
-    Gauge,
-    Power,
-    Clock3,
     User,
     ChevronRight,
     Map,
     List,
     X,
-    Radio,
-    SlidersHorizontal,
 } from "lucide-react"
 
 import { getVehicles } from "../api/fleetApi"
-import FleetMap, { isValidCoordinate } from "../components/FleetMap"
+import FleetMap from "../components/FleetMap"
+import { isValidCoordinate } from "../utils/coordinates"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import SearchInput from "../components/Common/SearchInput"
@@ -52,11 +46,13 @@ function Tracking() {
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState(null)
     const [lastSyncTime, setLastSyncTime] = useState(null)
-    const [drawerVehicle, setDrawerVehicle] = useState(null)
+    const [drawerVehicleSnapshot, setDrawerVehicle] = useState(null)
     const [mobileTab, setMobileTab] = useState("map") // "map" | "list" on small screens
 
-    // Synchronize query parameters
-    useEffect(() => {
+    // Synchronize query parameters (adjusted during render when the URL changes)
+    const [syncedSearchParams, setSyncedSearchParams] = useState(searchParams)
+    if (searchParams !== syncedSearchParams) {
+        setSyncedSearchParams(searchParams)
         const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
         if (param) {
             const numeric = Number(param)
@@ -66,7 +62,7 @@ function Tracking() {
         if (sParam && ["ALL", "MOVING", "IDLING", "STOPPED", "OFFLINE"].includes(sParam.toUpperCase())) {
             setStatusFilter(sParam.toUpperCase())
         }
-    }, [searchParams])
+    }
 
     /*
         Load fleet vehicles
@@ -93,6 +89,8 @@ function Tracking() {
 
         const fetchTelemetry = async () => {
             if (isFetching || !mounted) return
+            // Polling pauses while the tab is hidden and resumes from the visibilitychange listener.
+            if (document.hidden) return
             isFetching = true
             try {
                 const data = await getVehicles()
@@ -115,8 +113,15 @@ function Tracking() {
         }
 
         fetchTelemetry()
+        const onVisibilityChange = () => {
+            if (document.hidden || !mounted) return
+            if (timerId) clearTimeout(timerId)
+            fetchTelemetry()
+        }
+        document.addEventListener("visibilitychange", onVisibilityChange)
 
         return () => {
+            document.removeEventListener("visibilitychange", onVisibilityChange)
             mounted = false
             if (timerId) clearTimeout(timerId)
         }
@@ -136,16 +141,14 @@ function Tracking() {
         )
     }, [vehicles, selectedVehicleId])
 
-    // Update drawerVehicle if it is open and new telemetry arrives
-    useEffect(() => {
-        if (!drawerVehicle) return
+    // Show the latest telemetry for the open drawer vehicle (falls back to the last known snapshot)
+    const drawerVehicle = useMemo(() => {
+        if (!drawerVehicleSnapshot) return null
         const fresh = vehicles.find(
-            v => String(v.vehicle_id || v.id) === String(drawerVehicle.vehicle_id || drawerVehicle.id)
+            v => String(v.vehicle_id || v.id) === String(drawerVehicleSnapshot.vehicle_id || drawerVehicleSnapshot.id)
         )
-        if (fresh) {
-            setDrawerVehicle(fresh)
-        }
-    }, [vehicles, drawerVehicle])
+        return fresh || drawerVehicleSnapshot
+    }, [vehicles, drawerVehicleSnapshot])
 
     /*
         Filter vehicles

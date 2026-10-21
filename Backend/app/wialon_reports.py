@@ -16,23 +16,27 @@ Completeness contract (shared by fuel, idle analytics, dashboard and fleet analy
     unaffected. Cells that could not be read are additionally listed in `incomplete_fields`, so callers
     that must not treat "unreadable" as zero (fuel efficiency) can tell the difference.
   - Columns are located by header name when Wialon sends a header; if a name is not found the
-    historical column position is used and the fact is reported in `column_warnings`.
+    historical column position is used and the fact is reported in `column_warnings`. Every value read
+    from a guessed position (name not found, or no header at all) is listed in the additive
+    `unlocated_fields`, so callers can report it as unknown instead of trusting the guessed column.
 """
 
 import logging
+import re
 import threading
 from typing import Dict, List, Any, Optional, Tuple
-from app.wialon import WialonAPIError, wialon_request
+from app.wialon import WialonAPIError, wialon_request  # imported first: it loads Backend/.env
+from app.utils.config import get_env_int
 
-# Wialon Resource ID containing official templates in this account
-WIALON_RESOURCE_ID = 601814494
-TEMPLATE_ID_UNIT_TRIPS = 4
-TEMPLATE_ID_UNIT_ENGINE = 1
-TEMPLATE_ID_GROUP_TRIPS = 5
-TEMPLATE_ID_GROUP_ENGINE = 2
+# Wialon resource holding the report templates, the template IDs, and the 'All Unit' group.
+# The defaults are the ATS production account; override them per environment (e.g. a staging account).
+WIALON_RESOURCE_ID = get_env_int("WIALON_REPORT_RESOURCE_ID", 601814494)
+TEMPLATE_ID_UNIT_TRIPS = get_env_int("WIALON_TEMPLATE_UNIT_TRIPS", 4)
+TEMPLATE_ID_UNIT_ENGINE = get_env_int("WIALON_TEMPLATE_UNIT_ENGINE", 1)
+TEMPLATE_ID_GROUP_TRIPS = get_env_int("WIALON_TEMPLATE_GROUP_TRIPS", 5)
+TEMPLATE_ID_GROUP_ENGINE = get_env_int("WIALON_TEMPLATE_GROUP_ENGINE", 2)
 
-# Standard 'All Unit' group ID in ATS Wialon account
-GROUP_ID_ALL_UNITS = 601817480
+GROUP_ID_ALL_UNITS = get_env_int("WIALON_GROUP_ALL_UNITS", 601817480)
 
 # Rows requested per report/get_result_rows call, and sub-rows per report/get_result_subrows call
 REPORT_ROWS_CHUNK = 1000
@@ -91,19 +95,31 @@ def parse_float_safe(val: Any, default: float = 0.0) -> float:
         return default
 
 
+_DAY_PREFIX_RE = re.compile(r"^(\d+)\s*days?\b\s*(.*)$", re.IGNORECASE)
+
+
+def _split_day_prefix(s: str) -> Tuple[int, str]:
+    """Wialon prints durations of a day or more as '1 days 02:03:04'; return (days, remaining text)."""
+    m = _DAY_PREFIX_RE.match(s)
+    if not m:
+        return 0, s
+    return int(m.group(1)), m.group(2).strip() or "0"
+
+
 def parse_duration_to_seconds(dur_str: Any) -> int:
-    """Parse Wialon duration string (HH:MM:SS or MM:SS) to total seconds."""
+    """Parse Wialon duration string ('N days HH:MM:SS', HH:MM:SS or MM:SS) to total seconds."""
     if isinstance(dur_str, (int, float)):
         return int(dur_str)
     if isinstance(dur_str, dict):
         dur_str = dur_str.get("v") if dur_str.get("v") is not None else dur_str.get("t", "0")
     try:
-        parts = str(dur_str).strip().split(":")
+        days, s = _split_day_prefix(str(dur_str).strip())
+        parts = s.split(":")
         if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+            return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
         elif len(parts) == 2:
-            return int(parts[0]) * 60 + int(float(parts[1]))
-        return int(float(dur_str))
+            return days * 86400 + int(parts[0]) * 60 + int(float(parts[1]))
+        return days * 86400 + int(float(s))
     except (ValueError, TypeError):
         return 0
 
@@ -124,12 +140,13 @@ def parse_duration_strict(cell: Any) -> Optional[int]:
     if not s:
         return None
     try:
+        days, s = _split_day_prefix(s)
         parts = s.split(":")
         if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+            return days * 86400 + int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
         if len(parts) == 2:
-            return int(parts[0]) * 60 + int(float(parts[1]))
-        return int(float(s))
+            return days * 86400 + int(parts[0]) * 60 + int(float(parts[1]))
+        return days * 86400 + int(float(s))
     except (ValueError, TypeError):
         return None
 
@@ -144,18 +161,24 @@ def _normalize_header_name(name: Any) -> str:
     return " ".join(extract_cell_text(name).replace(".", " ").split()).lower()
 
 
-def _column_index(header: Any, names: Tuple[str, ...], default: int, warnings: List[str]) -> int:
+def _column_index(header: Any, names: Tuple[str, ...], default: int, warnings: List[str],
+                  unlocated: Optional[List[str]] = None) -> int:
     """
     Locate a report column by header name. Falls back to the historical position `default` when no
-    header is sent or the name is absent, recording why in `warnings` (never silently guesses).
+    header is sent or the name is absent, recording why in `warnings`. Whenever the position is a guess,
+    `names[0]` is also appended to `unlocated` (when given) so callers can treat the value as unknown.
     """
     if not isinstance(header, list) or not header:
+        if unlocated is not None:
+            unlocated.append(names[0])
         return default
     wanted = {_normalize_header_name(n) for n in names}
     for idx, col in enumerate(header):
         if _normalize_header_name(col) in wanted:
             return idx
     warnings.append(f"Column '{names[0]}' not found in report header; using position {default}")
+    if unlocated is not None:
+        unlocated.append(names[0])
     return default
 
 
@@ -258,13 +281,14 @@ def execute_wialon_unit_trips_report(
             tables = rr.get("tables", [])
             trips = []
             column_warnings: List[str] = []
+            unlocated: List[str] = []
             incomplete_fields = set()
             total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
                 header = tables[0].get("header")
-                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings)
+                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"trip report of vehicle {vehicle_id}")
                     for r in row_res:
@@ -325,6 +349,7 @@ def execute_wialon_unit_trips_report(
                 "rows_total": total_rows,
                 "incomplete_fields": sorted(incomplete_fields),
                 "column_warnings": column_warnings,
+                "unlocated_fields": ["distance_km"] if "Mileage" in unlocated else [],
             }
 
         except Exception as exc:
@@ -380,15 +405,16 @@ def execute_wialon_unit_engine_report(
             total_engine_sec = 0
             total_in_motion_sec: Optional[int] = 0
             column_warnings: List[str] = []
+            unlocated: List[str] = []
             incomplete_fields = set()
             total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
                 header = tables[0].get("header")
-                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings)
-                motion_idx = _column_index(header, ("In motion",), 7, column_warnings)
-                idling_idx = _column_index(header, ("Idling",), 8, column_warnings)
+                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings, unlocated)
+                motion_idx = _column_index(header, ("In motion",), 7, column_warnings, unlocated)
+                idling_idx = _column_index(header, ("Idling",), 8, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"engine report of vehicle {vehicle_id}")
                     for row_idx, r in enumerate(row_res):
@@ -454,6 +480,10 @@ def execute_wialon_unit_engine_report(
                 "rows_total": total_rows,
                 "incomplete_fields": sorted(incomplete_fields),
                 "column_warnings": column_warnings,
+                "unlocated_fields": sorted(
+                    {"Engine hours": "engine_hours", "In motion": "in_motion_seconds", "Idling": "idle_seconds"}[n]
+                    for n in unlocated
+                ),
             }
 
         except Exception as exc:
@@ -507,7 +537,8 @@ def execute_wialon_group_trips_report(
             if tables:
                 total_rows = tables[0].get("rows", 0)
                 column_warnings: List[str] = []
-                mileage_idx = _column_index(tables[0].get("header"), ("Mileage",), 5, column_warnings)
+                unlocated: List[str] = []
+                mileage_idx = _column_index(tables[0].get("header"), ("Mileage",), 5, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"group trips report of group {group_id}")
                     for r in row_res:
@@ -538,6 +569,8 @@ def execute_wialon_group_trips_report(
                                 summary["incomplete_fields"] = ["mileage_km"]
                             if column_warnings:
                                 summary["column_warnings"] = list(column_warnings)
+                            if "Mileage" in unlocated:
+                                summary["unlocated_fields"] = ["mileage_km"]
                             unit_summaries.append(summary)
 
             return unit_summaries
@@ -598,17 +631,18 @@ def execute_wialon_group_engine_idle_report(
             unit_summaries = []
             all_idle_events = []
             column_warnings: List[str] = []
+            unlocated: List[str] = []
             events_incomplete: List[str] = []
             total_rows = 0
 
             if tables:
                 total_rows = tables[0].get("rows", 0)
                 header = tables[0].get("header")
-                total_idx = _column_index(header, ("Total time",), 5, column_warnings)
-                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings)
-                motion_idx = _column_index(header, ("In motion",), 7, column_warnings)
-                idling_idx = _column_index(header, ("Idling",), 8, column_warnings)
-                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings)
+                total_idx = _column_index(header, ("Total time",), 5, column_warnings, unlocated)
+                engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings, unlocated)
+                motion_idx = _column_index(header, ("In motion",), 7, column_warnings, unlocated)
+                idling_idx = _column_index(header, ("Idling",), 8, column_warnings, unlocated)
+                mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"group engine report of group {group_id}")
                     for row_idx, r in enumerate(row_res):
@@ -716,7 +750,8 @@ def execute_wialon_group_engine_idle_report(
                                 "idling_str": idling_str,
                                 "total_idle_seconds": idling_sec,
                                 "idle_minutes": round(idling_sec / 60.0, 2),
-                                "idle_events": len(unit_events) if unit_events else (1 if idling_sec > 0 else 0),
+                                # Count only discrete events actually read; unknown (None) when they were not requested or incomplete
+                                "idle_events": len(unit_events) if include_events and "idle_events" not in row_incomplete else None,
                                 "longest_idle_seconds": longest_idle,
                                 "mileage_str": mileage_str,
                                 "mileage_km": round(mileage_km, 2) if mileage_km is not None else None,
@@ -730,6 +765,12 @@ def execute_wialon_group_engine_idle_report(
                 "rows_total": total_rows,
                 "column_warnings": column_warnings,
                 "events_incomplete": events_incomplete,
+                # Row fields read from a guessed column position (see the module docstring)
+                "unlocated_fields": sorted(
+                    {"Total time": "total_time_seconds", "Engine hours": "engine_hours_seconds",
+                     "In motion": "in_motion_seconds", "Idling": "total_idle_seconds", "Mileage": "mileage_km"}[n]
+                    for n in unlocated
+                ),
             }
 
         except Exception as exc:

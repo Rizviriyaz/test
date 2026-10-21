@@ -1,4 +1,4 @@
-import { Gauge, CheckCircle2, AlertCircle, HelpCircle, Route, Info } from "lucide-react"
+import { Gauge, Route, Info } from "lucide-react"
 
 export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     if (loading) {
@@ -27,7 +27,6 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     const costPerKm = efficiencyData?.fuel_cost_per_km
     const totalDist = efficiencyData?.total_distance_km
     const trackedVehicles = efficiencyData?.matched_vehicle_count || 0
-    const totalVehicles = efficiencyData?.vehicle_count || 0
     const vehiclesWithDist = efficiencyData?.vehicles_with_distance || 0
     const vehiclesWithoutDist = efficiencyData?.vehicles_without_distance || 0
     const unmatchedVehicles = efficiencyData?.unmatched_vehicle_count || 0

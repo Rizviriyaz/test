@@ -77,3 +77,21 @@ export function getUAETodayBounds() {
     const to_time = Math.floor(Date.now() / 1000)
     return { from_time, to_time }
 }
+
+/**
+ * Formats a duration in seconds to a human-readable live string (e.g. "13m 24s", "1h 04m 12s", "45s").
+ */
+export function formatElapsedDuration(totalSeconds) {
+    const s = Math.max(0, Math.floor(Number(totalSeconds || 0)))
+    const hours = Math.floor(s / 3600)
+    const minutes = Math.floor((s % 3600) / 60)
+    const seconds = s % 60
+
+    if (hours > 0) {
+        return `${hours}h ${minutes.toString().padStart(2, "0")}m ${seconds.toString().padStart(2, "0")}s`
+    }
+    if (minutes > 0) {
+        return `${minutes}m ${seconds.toString().padStart(2, "0")}s`
+    }
+    return `${seconds}s`
+}

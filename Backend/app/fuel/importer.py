@@ -5,6 +5,7 @@ import io
 import logging
 import math
 import re
+import threading
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -50,6 +51,10 @@ MAX_IMPORT_WARNINGS = 50
 MAX_DETAIL_ROWS = 20
 # .xlsx is a zip: a few MB upload can expand to GBs in openpyxl (read_only=False). Checked before loading.
 MAX_UNCOMPRESSED_BYTES = get_env_int("FUEL_IMPORT_MAX_UNCOMPRESSED_BYTES", 200 * 1024 * 1024)
+# Serializes the duplicate check and insert of concurrent imports in this process (without FUEL_SCHEMA_V2
+# there is no database uniqueness). It does not cover several worker processes.
+_IMPORT_LOCK = threading.Lock()
+IMPORT_LOCK_WAIT_SECONDS = get_env_int("FUEL_IMPORT_LOCK_WAIT_SECONDS", 300)
 WORKBOOK_TOO_LARGE_MESSAGE = "The workbook is too large to import. Split the statement into smaller files."
 # Library error text (zip paths, parser internals) is logged server-side, never returned to the client.
 UNREADABLE_WORKBOOK_MESSAGE = "Unable to read Excel file. It may be corrupt, encrypted or not a valid .xlsx workbook."
@@ -514,6 +519,22 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
 
 
 def execute_fuel_import(
+    file_bytes: bytes,
+    file_name: str,
+    confirmed_mapping: Dict[str, str],
+    imported_by: str,
+    bearer_token: Optional[str] = None,
+) -> FuelImportResultResponse:
+    """Run one import at a time, so a concurrent import of the same rows sees the first one's inserts."""
+    if not _IMPORT_LOCK.acquire(timeout=IMPORT_LOCK_WAIT_SECONDS):
+        raise FuelImportError("Another fuel import is still running; nothing was imported. Please retry.", status_code=409)
+    try:
+        return _execute_fuel_import_locked(file_bytes, file_name, confirmed_mapping, imported_by, bearer_token)
+    finally:
+        _IMPORT_LOCK.release()
+
+
+def _execute_fuel_import_locked(
     file_bytes: bytes,
     file_name: str,
     confirmed_mapping: Dict[str, str],

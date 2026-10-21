@@ -13,7 +13,7 @@ You are the backend specialist for the ATS Fleet Management Platform (FastAPI + 
 
 ## Data-accuracy checklist
 - Distance, engine hours and idle totals: prefer Wialon native reports (`wialon_reports.py`) over values derived from raw messages. Check for double counting when message-derived and report-derived values are combined.
-- Sensors are resolved by name, never by ID. Filter the `-2147483648` sentinel before doing any arithmetic.
+- Sensors are resolved by name, never by ID. Filter the `-348201.3876` / `<= -100000` sentinel before doing any arithmetic.
 - Status logic: speed > 0 → MOVING; speed 0 with ignition on → IDLING; otherwise STOPPED. Check the connectivity thresholds in `utils/status_config.py`.
 - Timestamps: compute in UTC epoch seconds and convert to the UAE timezone only for display (`utils/datetime_helpers.py`). Watch for off-by-one day boundaries in the today/1w/1m/1y windows.
 - `messages/load_interval` can be truncated by `loadCount`. Check whether long windows are silently cut off.

@@ -1,7 +1,6 @@
-import { useState, useEffect, useMemo, useRef } from "react"
+import { useState, useEffect, useMemo, useRef, useCallback } from "react"
 import { createPortal } from "react-dom"
 import {
-    Fuel,
     UploadCloud,
     Award,
     ShieldAlert,
@@ -12,21 +11,15 @@ import {
     Layers,
     FileSpreadsheet,
     CheckCircle2,
-    XCircle,
-    Check,
     X,
     Loader2,
     History,
     RefreshCw,
     Sliders,
-    Flame,
-    Clock,
-    Route,
-    Info,
     ArrowUpRight,
 } from "lucide-react"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
-import { useFuelFilters } from "../context/FuelFilterContext"
+import { useFuelFilters } from "../context/useFuelFilters"
 import {
     getFleetEfficiency,
     getVehicleEfficiencyList,
@@ -92,7 +85,7 @@ export default function FuelPerformance() {
     const [statusFilter, setStatusFilter] = useState("")
     const [searchQuery, setSearchQuery] = useState("")
     const [page, setPage] = useState(1)
-    const [pageSize, setPageSize] = useState(20)
+    const [pageSize] = useState(20)
     const [vehiclesData, setVehiclesData] = useState({ data: [], total: 0, page: 1 })
     const [loadingRankings, setLoadingRankings] = useState(true)
     const [rankingsError, setRankingsError] = useState(null)
@@ -119,7 +112,7 @@ export default function FuelPerformance() {
     const fileInputRef = useRef(null)
 
     // 1. Fetch Fleet Efficiency Metrics
-    const loadEfficiencyData = async () => {
+    const loadEfficiencyData = useCallback(async () => {
         const requestId = ++efficiencyRequestIdRef.current
         try {
             setLoadingEfficiency(true)
@@ -138,10 +131,10 @@ export default function FuelPerformance() {
         } finally {
             if (requestId === efficiencyRequestIdRef.current) setLoadingEfficiency(false)
         }
-    }
+    }, [queryParams, idleRateQuery])
 
     // 2. Fetch Fuel Waste & Anomaly Intelligence
-    const loadWasteData = async () => {
+    const loadWasteData = useCallback(async () => {
         const requestId = ++wasteRequestIdRef.current
         try {
             setLoadingWaste(true)
@@ -164,10 +157,10 @@ export default function FuelPerformance() {
                 setLoadingWaste(false)
             }
         }
-    }
+    }, [queryParams, idleRateQuery, idleThreshold])
 
     // 3. Fetch Vehicle Rankings
-    const loadRankingsData = async () => {
+    const loadRankingsData = useCallback(async () => {
         const requestId = ++rankingsRequestIdRef.current
         try {
             setLoadingRankings(true)
@@ -192,10 +185,10 @@ export default function FuelPerformance() {
         } finally {
             if (requestId === rankingsRequestIdRef.current) setLoadingRankings(false)
         }
-    }
+    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
 
     // 4. Fetch Vehicles Needing Attention Outliers
-    const loadAttentionData = async () => {
+    const loadAttentionData = useCallback(async () => {
         const requestId = ++attentionRequestIdRef.current
         try {
             const res = await getVehicleEfficiencyList({
@@ -216,14 +209,15 @@ export default function FuelPerformance() {
             setAttentionVehicles([])
             console.warn("Attention load error:", err)
         }
-    }
+    }, [queryParams, idleRateQuery])
 
     // Efficiency/attention URLs do not include the threshold, so a threshold change is served from the client cache
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
         loadEfficiencyData()
         loadWasteData()
         loadAttentionData()
-    }, [queryParams, idleRateQuery, idleThreshold])
+    }, [loadEfficiencyData, loadWasteData, loadAttentionData, idleThreshold])
 
     // A new global period/filter starts from the first page (the old page may not exist any more).
     // Adjusted during render, so the rankings effect below never requests the stale page.
@@ -234,8 +228,9 @@ export default function FuelPerformance() {
     }
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
         loadRankingsData()
-    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
+    }, [loadRankingsData])
 
     // Load Import History when modal is opened
     const loadImportHistory = async () => {
@@ -903,6 +898,14 @@ export default function FuelPerformance() {
                                         </div>
                                     )}
 
+                                    {/* Preview / Import Error */}
+                                    {(previewError || importError) && (
+                                        <div role="alert" className="my-4 flex items-center gap-3 rounded-xl border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700">
+                                            <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" />
+                                            <span>{previewError || importError}</span>
+                                        </div>
+                                    )}
+
                                     {/* Upload Area */}
                                     {!previewData && !previewLoading && (
                                         <div
@@ -969,6 +972,12 @@ export default function FuelPerformance() {
                                                 </div>
                                             </div>
 
+                                            {previewData.missing_required_fields?.length > 0 && (
+                                                <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                                                    Required columns not recognised: {previewData.missing_required_fields.join(", ")}. Rename these headers in the statement and upload it again.
+                                                </p>
+                                            )}
+
                                             <div className="flex items-center justify-end gap-2 pt-2">
                                                 <button
                                                     type="button"
@@ -980,9 +989,9 @@ export default function FuelPerformance() {
                                                 </button>
                                                 <button
                                                     type="button"
-                                                    disabled={importing}
+                                                    disabled={importing || previewData.missing_required_fields?.length > 0}
                                                     onClick={handleConfirmImport}
-                                                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#33758F] px-4 py-2 text-xs font-bold text-white hover:bg-[#285d73] shadow-xs"
+                                                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#33758F] px-4 py-2 text-xs font-bold text-white hover:bg-[#285d73] shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
                                                 >
                                                     {importing ? (
                                                         <>

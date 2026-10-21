@@ -1,3 +1,7 @@
+import logging
+import time
+
+from app.performance_diagnostics import request_trace_id
 from app.utils.datetime_helpers import now_timestamp, to_iso_uae
 from app.utils.status_config import CONN_DELAYED_SECONDS
 
@@ -18,6 +22,10 @@ from app.status import (
 from app.normalize import is_valid_sensor_value, resolve_unit_sensors
 
 idle_start_times = {}
+
+# History windows (hours) searched for the start of a vehicle's current idle period when it is first seen idling
+# (e.g. after a restart). A wider window is loaded only when the idle run fills the previous one entirely.
+IDLE_SEED_LOOKBACK_HOURS = (2, 24)
 
 def extract_registration_plate(unit):
     """
@@ -162,6 +170,9 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
     fleet = []
     current_time = now_timestamp()
+    # PERF evidence for the first request after a restart: idle-start seeding reads history per vehicle
+    seed_vehicles = seed_history_reads = 0
+    seed_seconds = 0.0
 
     for vehicle in vehicles:
         vehicle_id = vehicle.get("id")
@@ -304,19 +315,32 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
             if vehicle_id not in idle_start_times:
 
-                messages = get_vehicle_history(
-                    sid,
-                    vehicle_id,
-                    hours=2
-                )
-
-                idle_duration_from_history = (
-                    calculate_idle_duration(
-                        messages,
-                        current_time,
-                        configured_sensors
+                seed_vehicles += 1
+                seed_started = time.perf_counter()
+                idle_duration_from_history = 0
+                for lookback_hours in IDLE_SEED_LOOKBACK_HOURS:
+                    seed_history_reads += 1
+                    messages = get_vehicle_history(
+                        sid,
+                        vehicle_id,
+                        from_time=current_time - lookback_hours * 3600,
+                        to_time=current_time
                     )
-                )
+
+                    idle_duration_from_history = (
+                        calculate_idle_duration(
+                            messages,
+                            current_time,
+                            configured_sensors
+                        )
+                    )
+
+                    # The idle run began after the window's first message, so its real start was found.
+                    # Otherwise it fills the whole window and is re-read over the next, wider one.
+                    # Only data messages count, matching calculate_idle_duration.
+                    first_ts = min((m["t"] for m in messages if m.get("tp") == "ud" and m.get("t")), default=None)
+                    if first_ts is None or current_time - idle_duration_from_history > first_ts:
+                        break
 
                 idle_start_times[
                     vehicle_id
@@ -324,6 +348,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
                     current_time
                     - idle_duration_from_history
                 )
+                seed_seconds += time.perf_counter() - seed_started
 
             idle_start = idle_start_times.get(
                 vehicle_id
@@ -479,4 +504,9 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
         fleet.append(vehicle_record)
 
+    if seed_vehicles:
+        logging.info(
+            "PERF idle_seed request_id=%s vehicles=%d history_reads=%d duration_ms=%.1f",
+            request_trace_id.get(), seed_vehicles, seed_history_reads, seed_seconds * 1000,
+        )
     return fleet

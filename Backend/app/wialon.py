@@ -101,6 +101,11 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
     return res_json
 
 
+def current_sid():
+    """The gateway's current session id (None before the first login). Never contacts Wialon."""
+    return SID
+
+
 def login(force=False):
     global SID
 
@@ -120,7 +125,7 @@ def login(force=False):
 
         if "error" in login_data:
             SID = None
-            raise Exception(
+            raise WialonAPIError(
                 f"Wialon login failed: {login_data}"
             )
 

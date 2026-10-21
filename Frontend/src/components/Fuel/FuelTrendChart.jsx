@@ -15,7 +15,7 @@ import {
 } from "recharts"
 import { TrendingUp, Calendar, Loader2, AlertTriangle } from "lucide-react"
 import { getEfficiencyTrend } from "../../api/fleetApi"
-import { useFuelFilters } from "../../context/FuelFilterContext"
+import { useFuelFilters } from "../../context/useFuelFilters"
 import { compactTick, formatMeasurement, formatTrendPoint, trendNotice } from "./telemetryFormat"
 import { TREND_STATUS_LABELS } from "./fuelLabels"
 

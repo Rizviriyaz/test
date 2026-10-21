@@ -7,13 +7,10 @@ import {
     Zap,
     Scale,
     Search,
-    ChevronRight,
     ArrowUpRight,
     ShieldAlert,
-    HelpCircle,
     Info,
     CheckCircle2,
-    RefreshCw,
     Sliders,
     Layers,
 } from "lucide-react"
@@ -61,7 +58,7 @@ export default function FuelWasteIntelligence({
     const [selectedTab, setSelectedTab] = useState("all")
     const [searchQuery, setSearchQuery] = useState("")
 
-    const anomalies = wasteData?.anomalies || []
+    const anomalies = useMemo(() => wasteData?.anomalies || [], [wasteData])
 
     const filteredAnomalies = useMemo(() => {
         return anomalies.filter((a) => {

@@ -129,27 +129,34 @@ export default function FleetAlerts() {
     const [sevFilter, setSevFilter] = useState(initialSev)
     const [lastUpdated, setLastUpdated] = useState(null)
 
-    const load = useCallback(async (mountedRef = { current: true }) => {
-        setLoading(true)
-        setError(null)
-        try {
-            const res = await getFleetAlertsAnalytics()
-            if (mountedRef.current) {
-                setData(res)
-                setLastUpdated(new Date())
-            }
-        } catch (e) {
-            if (mountedRef.current) setError(e.message)
-        } finally {
-            if (mountedRef.current) setLoading(false)
-        }
-    }, [])
+    // Bumped by refresh(); the effect refetches and ignores responses from a superseded request
+    const [reloadKey, setReloadKey] = useState(0)
 
     useEffect(() => {
-        const mountedRef = { current: true }
-        load(mountedRef)
-        return () => { mountedRef.current = false }
-    }, [load])
+        let active = true
+        async function load() {
+            try {
+                // A manual refresh bypasses the 30 s client cache
+                const res = await getFleetAlertsAnalytics({ skipCache: reloadKey > 0 })
+                if (active) {
+                    setData(res)
+                    setLastUpdated(new Date())
+                }
+            } catch (e) {
+                if (active) setError(e.message)
+            } finally {
+                if (active) setLoading(false)
+            }
+        }
+        load()
+        return () => { active = false }
+    }, [reloadKey])
+
+    const refresh = useCallback(() => {
+        setLoading(true)
+        setError(null)
+        setReloadKey((k) => k + 1)
+    }, [])
 
     // Update query param when filter changes
     const handleFilterChange = (key) => {
@@ -199,7 +206,7 @@ export default function FleetAlerts() {
                             title="Fleet Telemetry Alerts"
                             subtitle="Critical battery · Offline units · Sensor thresholds · Operational telemetry warnings"
                             icon={Bell}
-                            onRefresh={() => load({ current: true })}
+                            onRefresh={refresh}
                             loading={loading}
                             lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
                         />
@@ -292,7 +299,7 @@ export default function FleetAlerts() {
                                 <p className="text-sm font-semibold text-red-700">{error}</p>
                                 <button
                                     type="button"
-                                    onClick={() => load({ current: true })}
+                                    onClick={refresh}
                                     className="mt-3 text-xs font-bold text-[#33758F] hover:underline cursor-pointer"
                                 >
                                     Retry Loading

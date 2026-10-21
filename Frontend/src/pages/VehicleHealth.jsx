@@ -67,24 +67,31 @@ export default function VehicleHealth() {
     const [search, setSearch] = useState("")
     const [filter, setFilter] = useState("all") // all | healthy | warning | critical
 
-    const load = useCallback(async (mountedRef = { current: true }) => {
-        setLoading(true)
-        setError(null)
-        try {
-            const res = await getFleetHealthAnalytics()
-            if (mountedRef.current) setData(res)
-        } catch (e) {
-            if (mountedRef.current) setError(e.message)
-        } finally {
-            if (mountedRef.current) setLoading(false)
-        }
-    }, [])
+    // Bumped by refresh(); the effect refetches and ignores responses from a superseded request
+    const [reloadKey, setReloadKey] = useState(0)
 
     useEffect(() => {
-        const mountedRef = { current: true }
-        load(mountedRef)
-        return () => { mountedRef.current = false }
-    }, [load])
+        let active = true
+        async function load() {
+            try {
+                // A manual refresh bypasses the 30 s client cache
+                const res = await getFleetHealthAnalytics({ skipCache: reloadKey > 0 })
+                if (active) setData(res)
+            } catch (e) {
+                if (active) setError(e.message)
+            } finally {
+                if (active) setLoading(false)
+            }
+        }
+        load()
+        return () => { active = false }
+    }, [reloadKey])
+
+    const refresh = useCallback(() => {
+        setLoading(true)
+        setError(null)
+        setReloadKey((k) => k + 1)
+    }, [])
 
     const vehicles = useMemo(() => {
         if (!data?.vehicles) return []
@@ -119,7 +126,7 @@ export default function VehicleHealth() {
                             <button
                                 id="health-refresh"
                                 type="button"
-                                onClick={() => load({ current: true })}
+                                onClick={refresh}
                                 disabled={loading}
                                 className="inline-flex items-center gap-1.5 rounded-lg bg-[#33758F] hover:bg-[#285d73] text-white px-3.5 py-1.5 text-xs font-bold shadow-xs transition-colors cursor-pointer disabled:opacity-50"
                             >
@@ -215,7 +222,7 @@ export default function VehicleHealth() {
                             <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3">
                                 <AlertCircle size={32} />
                                 <p className="text-sm font-medium">{error}</p>
-                                <button type="button" onClick={() => load({ current: true })} className="text-[#33758F] text-sm font-semibold hover:underline">Retry</button>
+                                <button type="button" onClick={refresh} className="text-[#33758F] text-sm font-semibold hover:underline">Retry</button>
                             </div>
                         ) : filtered.length === 0 ? (
                             <div className="flex flex-col items-center justify-center py-24 text-slate-400 gap-3 rounded-xl border border-slate-200 bg-white p-8">

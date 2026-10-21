@@ -80,7 +80,7 @@ export default function AnalyticsChart({
                 <div className="rounded-xl border border-slate-100 bg-white/95 p-3 shadow-lg backdrop-blur-sm">
                     <p className="text-xs font-semibold text-slate-700">{name}</p>
                     <p className="mt-1 text-sm font-bold text-slate-900">
-                        {val} <span className="text-xs font-normal text-slate-500">{unit}</span>
+                        {val == null ? "Unknown" : <>{val} <span className="text-xs font-normal text-slate-500">{unit}</span></>}
                     </p>
                 </div>
             )

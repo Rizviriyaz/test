@@ -1,4 +1,5 @@
 import { supabase } from "../lib/supabase"
+import { clearClientCache, deduplicatedFetch as dedupeRequest } from "./requestCache"
 
 export const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "")
 
@@ -58,61 +59,11 @@ async function apiFetch(url, options = {}) {
     return response
 }
 
-// Universal in-flight promise sharing and client-side memory cache
-const inFlightRequests = new Map()
-const clientCache = new Map()
+// In-flight request sharing and the client cache live in requestCache.js (testable offline)
+export { getFromClientCache, setClientCache, clearClientCache } from "./requestCache"
 
-export function getFromClientCache(key, ttlMs = 10000) {
-    const entry = clientCache.get(key)
-    if (entry && (Date.now() - entry.timestamp) < ttlMs) {
-        return entry.data
-    }
-    return null
-}
-
-export function setClientCache(key, data) {
-    clientCache.set(key, { data, timestamp: Date.now() })
-}
-
-export function clearClientCache(keyPrefix = "") {
-    if (!keyPrefix) {
-        clientCache.clear()
-        return
-    }
-    for (const key of clientCache.keys()) {
-        if (key.includes(keyPrefix)) {
-            clientCache.delete(key)
-        }
-    }
-}
-
-async function deduplicatedFetch(url, options = {}, ttlMs = 0) {
-    if (ttlMs > 0 && (!options.method || options.method === "GET") && !options.skipCache) {
-        const cachedData = getFromClientCache(url, ttlMs)
-        if (cachedData !== null) {
-            return cachedData
-        }
-    }
-
-    if (inFlightRequests.has(url)) {
-        return inFlightRequests.get(url)
-    }
-
-    const promise = (async () => {
-        try {
-            const response = await apiFetch(url, options)
-            const data = await response.json()
-            if (ttlMs > 0) {
-                setClientCache(url, data)
-            }
-            return data
-        } finally {
-            inFlightRequests.delete(url)
-        }
-    })()
-
-    inFlightRequests.set(url, promise)
-    return promise
+function deduplicatedFetch(url, options = {}, ttlMs = 0) {
+    return dedupeRequest(url, async () => (await apiFetch(url, options)).json(), options, ttlMs)
 }
 
 export async function getVehicles(options = {}) {

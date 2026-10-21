@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { supabase, isSupabaseConfigured } from "../lib/supabase"
 import { AuthContext } from "./auth-context"
+import { clearClientCache } from "../api/fleetApi"
 
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null)
@@ -65,13 +66,15 @@ export function AuthProvider({ children }) {
             const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
                 if (session?.user) {
                     setUser(session.user)
-                    setProfile({
+                    // Keep the profile already fetched for this user (token refresh etc.); fall back only for a new user
+                    setProfile((prev) => (prev?.id === session.user.id ? prev : {
                         id: session.user.id,
                         email: session.user.email,
                         full_name: session.user.user_metadata?.full_name || session.user.email?.split("@")[0] || "Fleet Manager",
                         role: "viewer",
-                    })
+                    }))
                 } else {
+                    clearClientCache()
                     setUser(null)
                     setProfile(null)
                 }
@@ -138,6 +141,8 @@ export function AuthProvider({ children }) {
         } catch (e) {
             console.warn("Supabase sign out warning:", e)
         } finally {
+            // Drop cached API responses so the next user never sees the previous session's data
+            clearClientCache()
             setUser(null)
             setProfile(null)
         }

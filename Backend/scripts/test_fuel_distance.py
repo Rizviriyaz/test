@@ -6,7 +6,10 @@ Validates:
 3. Parameter validations (invalid dates, inverted ranges, missing vehicle identifier).
 4. Unmatched vehicle handling (returns clean 404).
 5. Unit distance calculation and 'has_data' differentiation.
-6. Live diagnostic API endpoint GET /api/fuel/analytics/distance.
+6. GET /api/fuel/analytics/distance with Wialon mocked (offline).
+
+Offline by default: Wialon is mocked and outbound HTTP is blocked. test_09 calls live Wialon and runs only
+with ATS_LIVE_TESTS=1 (e.g. `set ATS_LIVE_TESTS=1 && python scripts/test_fuel_distance.py`).
 """
 import os
 import sys
@@ -33,6 +36,13 @@ from app.utils.datetime_helpers import parse_date_to_uae_bounds, UAE_TZ
 
 from unittest.mock import patch
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from offline_guard import OfflineGuard  # noqa: E402
+
+LIVE = os.getenv("ATS_LIVE_TESTS") == "1"
+MOCK_UNITS = [{"id": 1001, "nm": "17428"}, {"id": 1002, "nm": "30561"}]
+
+
 class TestFuelDistance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -42,10 +52,14 @@ class TestFuelDistance(unittest.TestCase):
             return_value={"id": "admin-uuid", "email": "admin@ats.ae", "role": "admin"},
         )
         cls.auth_patcher.start()
+        cls.guard = None if LIVE else OfflineGuard().start()
 
     @classmethod
     def tearDownClass(cls):
         cls.auth_patcher.stop()
+        if cls.guard:
+            cls.guard.stop()
+            cls.guard.assert_no_live_calls()
 
     def test_01_dynamic_vehicle_matching_generic(self):
         """Test dynamic matching against diverse vehicle registration formats without hardcoding."""
@@ -142,21 +156,42 @@ class TestFuelDistance(unittest.TestCase):
         self.assertIn("date_from must be on or before date_to", resp.json()["detail"])
 
     def test_07_api_unmatched_vehicle_returns_404(self):
-        """GET /api/fuel/analytics/distance returns 404 for vehicle without active Wialon GPS."""
-        resp = self.client.get(
-            "/api/fuel/analytics/distance",
-            params={
-                "vehicle_identifier": "NON-EXISTENT-PLATE-99999",
-                "date_from": "2026-08-03",
-                "date_to": "2026-08-31",
-            },
-            headers={"Authorization": "Bearer mock-dev-token"},
-        )
+        """GET /api/fuel/analytics/distance returns 404 for vehicle without active Wialon GPS (Wialon mocked)."""
+        with patch("app.fuel.routes.login", return_value="sid"), \
+                patch("app.fuel.routes.get_all_vehicles", return_value=MOCK_UNITS):
+            resp = self.client.get(
+                "/api/fuel/analytics/distance",
+                params={
+                    "vehicle_identifier": "NON-EXISTENT-PLATE-99999",
+                    "date_from": "2026-08-03",
+                    "date_to": "2026-08-31",
+                },
+                headers={"Authorization": "Bearer mock-dev-token"},
+            )
         self.assertEqual(resp.status_code, 404)
         self.assertIn("does not have an active matching Wialon GPS unit", resp.json()["detail"])
 
-    def test_08_api_live_distance_retrieval(self):
-        """GET /api/fuel/analytics/distance dynamically resolves an active vehicle and fetches Wialon distance."""
+    def test_08_api_distance_retrieval_mocked(self):
+        """GET /api/fuel/analytics/distance resolves the plate to a unit and returns its report distance (Wialon mocked)."""
+        dist = {"distance": 3210.5, "unit": "km", "source": "wialon_native_trips_report", "trip_count": 42, "has_data": True}
+        with patch("app.fuel.routes.login", return_value="sid"), \
+                patch("app.fuel.routes.get_all_vehicles", return_value=MOCK_UNITS), \
+                patch("app.fuel.routes.get_vehicle_distance", return_value=dist) as get_distance:
+            resp = self.client.get(
+                "/api/fuel/analytics/distance",
+                params={"vehicle_identifier": "CC-DXB-17428", "date_from": "2026-08-03", "date_to": "2026-08-31"},
+                headers={"Authorization": "Bearer mock-dev-token"},
+            )
+        self.assertEqual(resp.status_code, 200, resp.text)
+        data = resp.json()
+        get_distance.assert_called_once_with(1001, "2026-08-03", "2026-08-31", "sid")
+        self.assertEqual((data["wialon_unit_id"], data["wialon_unit_name"]), (1001, "17428"))
+        self.assertEqual((data["distance"], data["trip_count"], data["has_data"]), (3210.5, 42, True))
+        self.assertEqual(data["source"], "wialon_native_trips_report")
+
+    @unittest.skipUnless(LIVE, "live Wialon; set ATS_LIVE_TESTS=1 to run")
+    def test_09_api_live_distance_retrieval(self):
+        """LIVE: GET /api/fuel/analytics/distance resolves a real vehicle and fetches its Wialon distance."""
         resp = self.client.get(
             "/api/fuel/analytics/distance",
             params={

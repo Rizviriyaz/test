@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { AlertTriangle, ChevronDown, ChevronUp, Loader2, CheckCircle2 } from "lucide-react"
 import { getFuelExcluded } from "../../api/fleetApi"
-import { useFuelFilters } from "../../context/FuelFilterContext"
+import { useFuelFilters } from "../../context/useFuelFilters"
 import { EXCLUDED_REASON_LABELS, excludedSummary } from "./fuelLabels"
 
 function fmt(val, decimals = 1) {

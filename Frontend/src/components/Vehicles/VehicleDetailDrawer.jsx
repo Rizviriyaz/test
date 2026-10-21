@@ -14,10 +14,12 @@ import {
     User,
     ArrowUpRight,
 } from "lucide-react"
-import { getVehicleEfficiencyList, getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
+import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
-import LiveIdleTimer, { formatElapsedDuration } from "../Common/LiveIdleTimer"
+import LiveIdleTimer from "../Common/LiveIdleTimer"
+import { formatElapsedDuration } from "../../utils/datetime"
+import { sumKnown, tripDistanceOf } from "../../utils/knownTotals"
 
 import {
     MorphingDialog,
@@ -35,18 +37,18 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
     const [activeVehicle, setActiveVehicle] = useState(vehicle)
     const [isOpen, setIsOpen] = useState(Boolean(vehicle))
 
-    useEffect(() => {
+    // Adjust state during render when the vehicle prop changes
+    const [prevVehicle, setPrevVehicle] = useState(vehicle)
+    if (vehicle !== prevVehicle) {
+        setPrevVehicle(vehicle)
         if (vehicle) {
             setActiveVehicle(vehicle)
             setIsOpen(true)
         } else {
             setIsOpen(false)
         }
-    }, [vehicle])
+    }
 
-    // Internal state preserved for data-fetching and background matching
-    const [fuelData, setFuelData] = useState(null)
-    const [loadingFuel, setLoadingFuel] = useState(false)
     const [tripsData, setTripsData] = useState(null)
     const [loadingTrips, setLoadingTrips] = useState(false)
     const [vehicleIdleEvents, setVehicleIdleEvents] = useState(null)
@@ -55,36 +57,6 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
     useEffect(() => {
         if (!activeVehicle) return
         let active = true
-
-        // Preserve registration-based comparison and backend matching logic internally
-        async function fetchVehicleFuel() {
-            try {
-                setLoadingFuel(true)
-                const plate = activeVehicle.registration_plate || activeVehicle.plate || activeVehicle.plate_number || activeVehicle.vehicle_name || activeVehicle.name || ""
-                const vidNum = Number(activeVehicle.vehicle_id || activeVehicle.id)
-                const res = await getVehicleEfficiencyList({
-                    vehicle_identifier: plate,
-                    page: 1,
-                    page_size: 10,
-                })
-                if (!active) return
-                if (res?.data && res.data.length > 0) {
-                    const matchedRecord = res.data.find(item =>
-                        (item.wialon_unit_id && Number(item.wialon_unit_id) === vidNum) ||
-                        (item.registration_plate && plate && item.registration_plate.trim().toLowerCase() === plate.trim().toLowerCase()) ||
-                        (item.vehicle_identifier && plate && item.vehicle_identifier.trim().toLowerCase() === plate.trim().toLowerCase())
-                    )
-                    setFuelData(matchedRecord || null)
-                } else {
-                    setFuelData(null)
-                }
-            } catch (err) {
-                console.error("Failed to fetch vehicle fuel details:", err)
-                if (active) setFuelData(null)
-            } finally {
-                if (active) setLoadingFuel(false)
-            }
-        }
 
         async function fetchVehicleTripsData() {
             const vid = activeVehicle.vehicle_id || activeVehicle.id
@@ -124,7 +96,6 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
             }
         }
 
-        fetchVehicleFuel()
         fetchVehicleTripsData()
         fetchVehicleIdleEvents()
         return () => { active = false }
@@ -166,10 +137,13 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
 
     // Activity metrics
     const tripCount = tripsData?.trip_count ?? (tripsData?.trips ? tripsData.trips.length : (currentVehicle.trip_count ?? currentVehicle.trips_count ?? null))
-    const tripsDistance = tripsData?.trips && tripsData.trips.length > 0
-        ? tripsData.trips.reduce((sum, t) => sum + Number(t.distance_km || 0), 0)
+    // Trips whose distance cell was unreadable are left out of the sum and marked, never counted as 0 km
+    const tripsDistanceSum = tripsData?.trips && tripsData.trips.length > 0 ? sumKnown(tripsData.trips, tripDistanceOf) : null
+    const tripsDistance = tripsDistanceSum
+        ? (tripsDistanceSum.allUnknown ? null : tripsDistanceSum.total)
         : (tripsData?.summary?.total_distance_km ?? (tripsData ? 0 : null))
     const todayDistance = currentVehicle.today_mileage ?? tripsDistance
+    const distanceUnknownTrips = currentVehicle.today_mileage == null && tripsDistanceSum ? tripsDistanceSum.unknown : 0
 
     return (
         <MorphingDialog
@@ -322,6 +296,11 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                                     <span className="font-bold text-slate-900 text-sm">
                                         {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—")}
                                     </span>
+                                    {!loadingTrips && distanceUnknownTrips > 0 && (
+                                        <span className="block text-[10px] font-medium text-amber-700" title="Wialon could not read these trips' distance; they are left out of the total">
+                                            Partial: {distanceUnknownTrips} trip(s) unknown
+                                        </span>
+                                    )}
                                 </div>
                                 <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
                                     <span className="text-[10px] font-semibold text-slate-400 uppercase block">Trips Today</span>

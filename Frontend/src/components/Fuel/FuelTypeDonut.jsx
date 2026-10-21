@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from "react"
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip } from "recharts"
 import { PieChart as PieIcon, Loader2 } from "lucide-react"
 import { getFuelTypes } from "../../api/fleetApi"
-import { useFuelFilters } from "../../context/FuelFilterContext"
+import { useFuelFilters } from "../../context/useFuelFilters"
 
 const PALETTE = [
     "#33758F", // Deep ATS Brand Teal-Blue
@@ -12,6 +12,31 @@ const PALETTE = [
     "#8B5CF6", // Violet
     "#EC4899", // Rose
 ]
+
+function CustomTooltip({ active, payload }) {
+    if (!active || !payload || !payload.length) return null
+    const data = payload[0]?.payload
+    return (
+        <div className="rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur-xs text-xs space-y-1">
+            <div className="flex items-center gap-2 border-b border-slate-100 pb-1 mb-1">
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: data.color }} />
+                <span className="font-bold text-slate-800">{data.name}</span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-500">Volume:</span>
+                <span className="font-bold text-slate-800">{data.value.toLocaleString()} L</span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-500">Expenditure:</span>
+                <span className="font-bold text-emerald-600">AED {data.cost.toLocaleString()}</span>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+                <span className="text-slate-500">Fleet Share:</span>
+                <span className="font-bold text-[#33758F]">{data.percentage}%</span>
+            </div>
+        </div>
+    )
+}
 
 export default function FuelTypeDonut() {
     const { queryParams } = useFuelFilters()
@@ -63,31 +88,6 @@ export default function FuelTypeDonut() {
             }
         })
     }, [fuelTypes, totalLitres])
-
-    const CustomTooltip = ({ active, payload }) => {
-        if (!active || !payload || !payload.length) return null
-        const data = payload[0]?.payload
-        return (
-            <div className="rounded-xl border border-slate-200 bg-white/95 p-3 shadow-lg backdrop-blur-xs text-xs space-y-1">
-                <div className="flex items-center gap-2 border-b border-slate-100 pb-1 mb-1">
-                    <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: data.color }} />
-                    <span className="font-bold text-slate-800">{data.name}</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                    <span className="text-slate-500">Volume:</span>
-                    <span className="font-bold text-slate-800">{data.value.toLocaleString()} L</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                    <span className="text-slate-500">Expenditure:</span>
-                    <span className="font-bold text-emerald-600">AED {data.cost.toLocaleString()}</span>
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                    <span className="text-slate-500">Fleet Share:</span>
-                    <span className="font-bold text-[#33758F]">{data.percentage}%</span>
-                </div>
-            </div>
-        )
-    }
 
     return (
         <div className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">

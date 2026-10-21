@@ -48,7 +48,7 @@
 1. **Dynamic Fleet Sizing**: NEVER hardcode vehicle counts, vehicle IDs, or unit names. Always discover units dynamically via Wialon search items.
 2. **Dynamic Sensor Discovery**: NEVER hardcode sensor IDs. Dynamically match configured sensors by sensor name (`"Ignition"`, `"Battery"`, `"Driver ID"`).
 3. **Handle Missing / Null Data Gracefully**: Vehicles offline or lacking specific sensors must output clean default states (`null`, `0`, or `"Unknown"`).
-4. **Invalid Value Filtering**: Filter out Wialon sentinel invalid values (`-2147483648`, `0x80000000`) before mathematical aggregation.
+4. **Invalid Value Filtering**: Filter out Wialon sentinel invalid values (`INVALID_WIALON_VALUE = -348201.3876` and anything `<= -100000`, via `is_valid_sensor_value`) before mathematical aggregation.
 5. **Timezone Standardization**: Store and compute timestamps in **UTC** Unix epoch seconds internally. Format to local user timezone exclusively at the presentation layer.
 
 ---

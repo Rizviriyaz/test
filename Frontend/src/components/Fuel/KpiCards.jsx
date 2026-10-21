@@ -16,7 +16,6 @@ import {
     Database,
     Calculator,
     ArrowUpRight,
-    HelpCircle,
 } from "lucide-react"
 import ClassificationBadge from "./ClassificationBadge"
 import { excludedSummary } from "./fuelLabels"

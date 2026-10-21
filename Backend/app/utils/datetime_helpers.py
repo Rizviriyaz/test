@@ -153,9 +153,11 @@ def get_timeframe_timestamps(
     Rules:
     - 'today': 00:00:00 UAE today -> current UAE time.
     - 'yesterday': 00:00:00 UAE yesterday -> 23:59:59.999 UAE yesterday.
-    - 'week' / 'this_week' / '7d': 00:00:00 UAE start of current week (Monday) -> current UAE time.
-    - 'month' / 'this_month' / '30d': 00:00:00 UAE first day of month -> current UAE time.
-    - 'year' / 'this_year' / '1y': 00:00:00 UAE Jan 1st of current year -> current UAE time.
+    - 'week' / 'this_week': 00:00:00 UAE start of current week (Monday) -> current UAE time.
+    - 'month' / 'this_month': 00:00:00 UAE first day of month -> current UAE time.
+    - 'year' / 'this_year': 00:00:00 UAE Jan 1st of current year -> current UAE time.
+    - '7d' / 'last_1_week' / '1w', '30d' / 'last_1_month' / '1m', '365d' / 'last_1_year' / '1y':
+      rolling 7 / 30 / 365 days ending at the current time (never calendar-to-date).
     - '24h' / 'last_24_hours': current time - 24h -> current UAE time.
     - Specific from_date / to_date: exact UAE calendar start/end bounds.
     - A positive 'hours' value: rolling interval ending at the current time.
@@ -205,18 +207,27 @@ def get_timeframe_timestamps(
         end_yest = datetime.combine(yesterday_date, dtime(23, 59, 59, 999000), tzinfo=UAE_TZ)
         return int(start_yest.timestamp()), int(end_yest.timestamp())
 
-    elif tf in ["week", "this_week", "7d", "last_1_week", "1w"]:
+    elif tf in ["7d", "last_1_week", "1w"]:
+        return now_ts - 7 * 86400, now_ts
+
+    elif tf in ["30d", "last_1_month", "1m"]:
+        return now_ts - 30 * 86400, now_ts
+
+    elif tf in ["365d", "last_1_year", "1y"]:
+        return now_ts - 365 * 86400, now_ts
+
+    elif tf in ["week", "this_week"]:
         # Start of current calendar week (Monday 00:00 UAE)
         monday_date = uae_now.date() - timedelta(days=uae_now.weekday())
         start_week = datetime.combine(monday_date, dtime.min, tzinfo=UAE_TZ)
         return int(start_week.timestamp()), now_ts
 
-    elif tf in ["month", "this_month", "30d", "last_1_month", "1m"]:
+    elif tf in ["month", "this_month"]:
         first_day_month = uae_now.date().replace(day=1)
         start_month = datetime.combine(first_day_month, dtime.min, tzinfo=UAE_TZ)
         return int(start_month.timestamp()), now_ts
 
-    elif tf in ["year", "this_year", "1y", "last_1_year", "365d"]:
+    elif tf in ["year", "this_year"]:
         first_day_year = uae_now.date().replace(month=1, day=1)
         start_year = datetime.combine(first_day_year, dtime.min, tzinfo=UAE_TZ)
         return int(start_year.timestamp()), now_ts

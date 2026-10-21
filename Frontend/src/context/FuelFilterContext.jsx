@@ -1,8 +1,7 @@
-import { createContext, useContext, useState, useEffect, useMemo, useCallback } from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
 import { getFuelTypes, getFuelVehicles } from "../api/fleetApi"
 import { getUAETodayStr, getUAEDateStr } from "../utils/datetime"
-
-const FuelFilterContext = createContext(null)
+import { FuelFilterContext } from "./fuel-filter-context"
 
 export function FuelFilterProvider({ children }) {
     // Period selection: 'today', '7d', '30d', 'custom', 'all'
@@ -141,12 +140,4 @@ export function FuelFilterProvider({ children }) {
             {children}
         </FuelFilterContext.Provider>
     )
-}
-
-export function useFuelFilters() {
-    const ctx = useContext(FuelFilterContext)
-    if (!ctx) {
-        throw new Error("useFuelFilters must be used within a FuelFilterProvider")
-    }
-    return ctx
 }

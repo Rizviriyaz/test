@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test": "node --test src/components/Fuel/telemetryFormat.test.js src/components/Fuel/fuelLabels.test.js",
+    "test": "node --test src/components/Fuel/telemetryFormat.test.js src/components/Fuel/fuelLabels.test.js src/components/AI/chatHistory.test.js src/utils/knownTotals.test.js src/api/requestCache.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

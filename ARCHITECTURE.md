@@ -59,10 +59,9 @@ The frontend **never communicates directly with Wialon** and is completely decou
 
 - **Framework**: FastAPI (ASGI) running on Uvicorn.
 - **Concurrency**: `concurrent.futures.ThreadPoolExecutor` for parallelized vehicle history and telemetry retrieval.
-- **Caching**: Thread-safe in-memory cache (`_cache`) with granular TTLs:
-  - Fleet Health & Overview: 300s TTL
-  - Mileage Rankings by Timeframe: 300s TTL
-  - Trends Progression: 600s TTL
+- **Caching**: Per-process, bounded, thread-safe `TTLCache` instances (`app/utils/ttl_cache.py`): `_cache` in `main.py` (128 entries, LRU) used through `cached(key, ttl_seconds)` / `set_cache()`, plus separate caches in `fleet_analytics.py`, `auth.py` and `fuel/wialon_distance.py`.
+  - Freshness is checked per call against the route's `ttl_seconds` (5 s to 600 s, mostly 60 s); entries are evicted after 600 s.
+  - Cache keys include every parameter that changes the result; the unit trips, unit idle and dashboard mileage routes do not cache report results flagged incomplete (`incomplete_fields` / `column_warnings`).
 - **Lifecycle Management**: `@asynccontextmanager lifespan` ensuring eager Wialon login on application boot.
 
 ---
@@ -121,7 +120,7 @@ The platform supports dual-mode production authentication:
        |
        v (Raw JSON)
 [ Backend: app/normalize.py ]
-       | ---> Resolves valid sensor values (filters INVALID_WIALON_VALUE = -2147483648)
+       | ---> Resolves valid sensor values (filters INVALID_WIALON_VALUE = -348201.3876 and any value <= -100000)
        | ---> Segments trips & idle intervals (stop_tolerance_seconds = 60)
        v
 [ Backend: app/main.py REST Endpoints ]

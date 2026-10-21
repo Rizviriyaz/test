@@ -200,10 +200,13 @@ export default function IdleAnalytics() {
         return byVehicle.filter((v) => !filterGroupId || String(v.group_id) === String(filterGroupId))
     }, [byVehicle, filterGroupId])
 
-    // Reset page to 1 whenever any filter or sort changes
-    useEffect(() => {
+    // Reset page to 1 whenever any filter or sort changes (adjusted during render)
+    const pageResetKey = JSON.stringify([drillVehicleId, filterVehicleId, filterGroupId, filterMinIdle, searchText, sortBy, sortDir, rangeMode, selectedTimeframe, startDate, endDate])
+    const [lastPageResetKey, setLastPageResetKey] = useState(pageResetKey)
+    if (pageResetKey !== lastPageResetKey) {
+        setLastPageResetKey(pageResetKey)
         setPage(1)
-    }, [drillVehicleId, filterVehicleId, filterGroupId, filterMinIdle, searchText, sortBy, sortDir, rangeMode, selectedTimeframe, startDate, endDate])
+    }
 
     // Client-side filters applied to event list
     const filteredEvents = useMemo(() => {
@@ -279,7 +282,7 @@ export default function IdleAnalytics() {
             byVehicle.slice(0, 15).map((v) => ({
                 label: v.vehicle_name?.split(" ").slice(-1)[0] || v.vehicle_name,
                 fullLabel: v.vehicle_name,
-                value: Math.round(v.idle_minutes),
+                value: v.idle_minutes == null ? null : Math.round(v.idle_minutes),
                 events: v.idle_events,
                 status: v.status,
                 vehicle_id: v.vehicle_id,
@@ -291,7 +294,7 @@ export default function IdleAnalytics() {
         () =>
             byGroup.map((g) => ({
                 label: g.group_name,
-                value: Math.round(g.idle_minutes),
+                value: g.idle_minutes == null ? null : Math.round(g.idle_minutes),
                 events: g.idle_events,
                 group_id: g.group_id,
             })),
@@ -621,7 +624,7 @@ export default function IdleAnalytics() {
                                     iconBg="bg-purple-50"
                                     iconColor="text-purple-500"
                                     label="Idle Events"
-                                    value={kpis.idle_event_count ?? 0}
+                                    value={kpis.idle_event_count ?? "—"}
                                 />
                                 <KpiCard
                                     icon={Timer}
@@ -629,24 +632,27 @@ export default function IdleAnalytics() {
                                     iconColor="text-teal-500"
                                     label="Total Idle Time"
                                     value={formatDuration(kpis.total_idle_seconds)}
+                                    sub={kpis.total_idle_partial ? "Partial: excludes vehicles with unreadable or unattributable idle data" : undefined}
                                 />
                                 <KpiCard
                                     icon={TrendingUp}
                                     iconBg="bg-indigo-50"
                                     iconColor="text-indigo-500"
                                     label="Avg Idle Duration"
-                                    value={formatDuration(kpis.average_idle_seconds)}
+                                    value={kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
                                 />
                                 <KpiCard
                                     icon={AlertTriangle}
                                     iconBg="bg-red-50 text-red-600 border border-red-100"
                                     iconColor="text-red-500"
                                     label="Highest Idle"
-                                    value={formatDuration(kpis.longest_idle_seconds)}
+                                    value={kpis.longest_idle_seconds == null ? "—" : formatDuration(kpis.longest_idle_seconds)}
                                     sub={
                                         highestIdleEvent
                                             ? `${highestIdleEvent.vehicle_name} · ${formatDuration(highestIdleEvent.duration)} · Click to inspect`
-                                            : "No idling recorded in selected period"
+                                            : kpis.longest_idle_seconds == null
+                                                ? "Unavailable: idle events could not be read completely"
+                                                : "No idling recorded in selected period"
                                     }
                                     badge={highestIdleEvent ? "Inspect Event" : undefined}
                                     badgeCls="bg-red-100/70 text-red-800 border-red-200"
@@ -695,15 +701,15 @@ export default function IdleAnalytics() {
                                                     <div className="mt-4 grid grid-cols-3 gap-2">
                                                         <div>
                                                             <p className="text-[10px] text-slate-400">Total Idle</p>
-                                                            <p className="text-sm font-semibold text-slate-800">{formatDuration(g.total_idle_seconds)}</p>
+                                                            <p className="text-sm font-semibold text-slate-800">{g.total_idle_seconds == null ? "—" : formatDuration(g.total_idle_seconds)}</p>
                                                         </div>
                                                         <div>
                                                             <p className="text-[10px] text-slate-400">Events</p>
-                                                            <p className="text-sm font-semibold text-slate-800">{g.idle_events}</p>
+                                                            <p className="text-sm font-semibold text-slate-800">{g.idle_events ?? "—"}</p>
                                                         </div>
                                                         <div>
                                                             <p className="text-[10px] text-slate-400">Avg / Event</p>
-                                                            <p className="text-sm font-semibold text-slate-800">{g.average_idle_minutes}m</p>
+                                                            <p className="text-sm font-semibold text-slate-800">{g.average_idle_minutes == null ? "—" : `${g.average_idle_minutes}m`}</p>
                                                         </div>
                                                     </div>
                                                 </button>
@@ -743,11 +749,11 @@ export default function IdleAnalytics() {
                                                 <div className="flex items-center gap-6 text-right">
                                                     <div>
                                                         <p className="text-xs text-slate-400">Idle Time</p>
-                                                        <p className="text-sm font-semibold text-slate-800">{formatDuration(v.total_idle_seconds)}</p>
+                                                        <p className="text-sm font-semibold text-slate-800">{v.total_idle_seconds == null ? "—" : formatDuration(v.total_idle_seconds)}</p>
                                                     </div>
                                                     <div>
                                                         <p className="text-xs text-slate-400">Events</p>
-                                                        <p className="text-sm font-semibold text-slate-800">{v.idle_events}</p>
+                                                        <p className="text-sm font-semibold text-slate-800">{v.idle_events ?? "—"}</p>
                                                     </div>
                                                     <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium ${v.status === "MOVING" ? "bg-green-50 text-green-700" : v.status === "IDLING" ? "bg-orange-50 text-orange-700" : v.status === "OFFLINE" ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-600"}`}>
                                                         {v.status}

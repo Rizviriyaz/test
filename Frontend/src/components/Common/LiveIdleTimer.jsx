@@ -1,21 +1,20 @@
 import { useState, useEffect } from "react"
+import { formatElapsedDuration } from "../../utils/datetime"
 
-/**
- * Formats a duration in seconds to a human-readable live string (e.g. "13m 24s", "1h 04m 12s", "45s").
- */
-export function formatElapsedDuration(totalSeconds) {
-    const s = Math.max(0, Math.floor(Number(totalSeconds || 0)))
-    const hours = Math.floor(s / 3600)
-    const minutes = Math.floor((s % 3600) / 60)
-    const seconds = s % 60
+function calculateSeconds(startTime, baseDuration, nowMs) {
+    if (!startTime) {
+        return Number(baseDuration || 0)
+    }
+    const startSec = typeof startTime === "number"
+        ? (startTime > 1e11 ? Math.floor(startTime / 1000) : startTime)
+        : Math.floor(new Date(startTime).getTime() / 1000)
 
-    if (hours > 0) {
-        return `${hours}h ${minutes.toString().padStart(2, "0")}m ${seconds.toString().padStart(2, "0")}s`
+    if (isNaN(startSec) || startSec <= 0) {
+        return Number(baseDuration || 0)
     }
-    if (minutes > 0) {
-        return `${minutes}m ${seconds.toString().padStart(2, "0")}s`
-    }
-    return `${seconds}s`
+
+    const nowSec = Math.floor(nowMs / 1000)
+    return Math.max(0, nowSec - startSec)
 }
 
 /**
@@ -29,39 +28,22 @@ export default function LiveIdleTimer({
     status = "IDLING",
     className = "",
 }) {
-    const calculateSeconds = () => {
-        if (!startTime) {
-            return Number(baseDuration || 0)
-        }
-        const startSec = typeof startTime === "number"
-            ? (startTime > 1e11 ? Math.floor(startTime / 1000) : startTime)
-            : Math.floor(new Date(startTime).getTime() / 1000)
-
-        if (isNaN(startSec) || startSec <= 0) {
-            return Number(baseDuration || 0)
-        }
-
-        const nowSec = Math.floor(Date.now() / 1000)
-        return Math.max(0, nowSec - startSec)
-    }
-
-    const [elapsed, setElapsed] = useState(calculateSeconds)
+    const [nowMs, setNowMs] = useState(() => Date.now())
 
     useEffect(() => {
-        // Initial calculation on prop change
-        setElapsed(calculateSeconds())
-
         // Only tick automatically while the vehicle is currently idling
         if (status !== "IDLING") {
             return
         }
 
         const interval = setInterval(() => {
-            setElapsed(calculateSeconds())
+            setNowMs(Date.now())
         }, 1000)
 
         return () => clearInterval(interval)
-    }, [startTime, baseDuration, status])
+    }, [status])
+
+    const elapsed = calculateSeconds(startTime, baseDuration, nowMs)
 
     return (
         <span className={`font-mono font-semibold ${className}`}>

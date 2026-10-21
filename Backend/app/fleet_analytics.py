@@ -12,11 +12,13 @@ Provides high-performance, cached, and sanitized analytics across the fleet:
 """
 
 import math, os, logging, re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from app.utils.datetime_helpers import to_iso_uae, now_timestamp
-from app.performance_diagnostics import log_cache_state, log_data_window, map_with_request_context, request_trace_id
-from collections import defaultdict
+from app.performance_diagnostics import log_cache_state, log_data_window, map_with_request_context, new_trace_id, request_trace_id
+from collections import Counter, defaultdict
 from typing import Dict, List, Any, Optional
 
 from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups
@@ -30,9 +32,13 @@ from app.wialon_reports import (
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
 from app.utils.status_config import CONN_DELAYED_SECONDS
+from app.utils.ttl_cache import TTLCache
 
 # ── Simple in-memory cache with TTL ──────────────────────────────────────────
-_analytics_cache: Dict[str, Dict[str, Any]] = {}
+# Bounded LRU (keys include client-chosen hours and windows). Entries are evicted after the longest
+# ttl_seconds any caller passes to get_cached(); freshness is still checked per call.
+_ANALYTICS_CACHE_RETENTION_SECONDS = 600
+_analytics_cache = TTLCache(max_entries=128)
 
 def get_cached(key: str, ttl_seconds: int = 120) -> Optional[Any]:
     entry = _analytics_cache.get(key)
@@ -41,7 +47,7 @@ def get_cached(key: str, ttl_seconds: int = 120) -> Optional[Any]:
     return None
 
 def set_cached(key: str, data: Any):
-    _analytics_cache[key] = {"data": data, "time": time.time()}
+    _analytics_cache.set(key, {"data": data, "time": time.time()}, _ANALYTICS_CACHE_RETENTION_SECONDS)
 
 
 # ── Health Threshold Constants ───────────────────────────────────────────────
@@ -150,7 +156,7 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
                 battery_level_label = f"Optimal ({voltage:.1f}V)"
 
     # Internal backup battery
-    prms = (raw_unit or {}).get("lmsg", {}).get("p") or {}
+    prms = ((raw_unit or {}).get("lmsg") or {}).get("p") or {}
     if not prms and calc_data:
         prms = calc_data.get("prms") or {}
     pwr_int = prms.get("pwr_int")
@@ -174,7 +180,7 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 
     # Connectivity
     pos_data = (calc_data or {}).get("pos") or (raw_unit or {}).get("pos") or {}
-    last_msg_ts = (raw_unit or {}).get("lmsg", {}).get("t") or pos_data.get("t")
+    last_msg_ts = ((raw_unit or {}).get("lmsg") or {}).get("t") or pos_data.get("t")
     now_ts = int(time.time())
 
     conn_status = "STABLE"
@@ -251,8 +257,8 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 # 1. FLEET HEALTH SERVICE
 # =============================================================================
 
-def get_fleet_health_analytics() -> Dict[str, Any]:
-    cached = get_cached("fleet_health_analytics", ttl_seconds=180)
+def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
+    cached = get_cached("fleet_health_analytics", ttl_seconds=180) if use_cache else None
     log_cache_state("/api/fleet/health", cached is not None)
     if cached:
         return cached
@@ -341,12 +347,35 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
 
     if group_engine is not None and group_engine.get("vehicles"):
         engine_by_name = {uv["vehicle_name"]: uv for uv in group_engine.get("vehicles", [])}
+        ambiguous_names = _ambiguous_report_names(fleet, group_engine.get("vehicles", []))
+        report_incomplete = bool(group_engine.get("column_warnings") or group_engine.get("unlocated_fields")) or any(
+            uv.get("incomplete_fields") for uv in group_engine.get("vehicles", []))
         unit_results = []
         total_sec = hours * 3600
         for v_record in fleet:
             vname = v_record["vehicle_name"]
             vid = v_record["vehicle_id"]
             uv = engine_by_name.get(vname, {})
+            unreadable = set(uv.get("incomplete_fields") or []) | set(group_engine.get("unlocated_fields") or [])
+            # The group report emits a row (with explicit zeros) for every member even without activity,
+            # so a vehicle with no row was not covered by the report
+            missing_row = vname not in engine_by_name
+            if missing_row or vname in ambiguous_names or unreadable & {"in_motion_seconds", "total_idle_seconds", "engine_hours_seconds"}:
+                # Unattributable, missing or unreadable (or guessed-column) row: utilization is unknown, not 0
+                unit_results.append({
+                    "vehicle_id": vid,
+                    "vehicle_name": vname,
+                    "group": v_record.get("group", "General Fleet"),
+                    "status": v_record.get("status", "STOPPED"),
+                    "connection_status": v_record.get("connection_status", "STABLE"),
+                    "is_offline": v_record.get("is_offline", False),
+                    "driving_minutes": None, "idle_minutes": None, "stopped_minutes": None, "engine_on_minutes": None,
+                    "driving_seconds": None, "idle_seconds": None, "stopped_seconds": None, "engine_on_seconds": None,
+                    "utilization_percentage": None,
+                    "driving_to_idle_ratio": None,
+                    "trip_count": None
+                })
+                continue
             driving_sec = uv.get("in_motion_seconds", 0)
             idle_sec = uv.get("total_idle_seconds", 0)
             engine_on_sec = uv.get("engine_hours_seconds", 0) or (driving_sec + idle_sec)
@@ -371,9 +400,12 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                 "engine_on_seconds": engine_on_sec,
                 "utilization_percentage": util_pct,
                 "driving_to_idle_ratio": drive_idle_ratio,
-                "trip_count": 1 if driving_sec > 0 else 0
+                # The group engine report has no trip count; unknown, never inferred from driving time
+                "trip_count": None
             })
     else:
+        report_incomplete = False
+
         def _process_unit_utilization(v_record):
             vid = v_record["vehicle_id"]
             sens = next((u.get("sens") or {} for u in vehicles if u.get("id") == vid), {})
@@ -420,26 +452,43 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         with ThreadPoolExecutor(max_workers=8) as executor:
             unit_results = list(map_with_request_context(executor, _process_unit_utilization, fleet))
 
-    total_driving_sec = sum(u["driving_seconds"] for u in unit_results)
-    total_idle_sec    = sum(u["idle_seconds"] for u in unit_results)
-    total_engine_sec  = sum(u["engine_on_seconds"] for u in unit_results)
-    total_fleet_time  = len(unit_results) * hours * 3600
+    # Fleet totals cover vehicles with known values only; unknown ones are listed, never counted as 0
+    known_units = [u for u in unit_results if u["driving_seconds"] is not None]
+    unknown_vehicles = sorted(u["vehicle_name"] for u in unit_results if u["driving_seconds"] is None)
+    total_driving_sec = sum(u["driving_seconds"] for u in known_units)
+    total_idle_sec    = sum(u["idle_seconds"] for u in known_units)
+    total_engine_sec  = sum(u["engine_on_seconds"] for u in known_units)
+    total_fleet_time  = len(known_units) * hours * 3600
 
     fleet_util_pct = round((total_driving_sec / total_fleet_time) * 100, 1) if total_fleet_time > 0 else 0
     fleet_ratio    = round(total_driving_sec / max(1, total_idle_sec), 2)
+    # Every vehicle unknown: there is no known basis for any fleet total (None, not 0)
+    all_unknown = bool(unknown_vehicles) and not known_units
 
     result = {
         "hours": hours,
-        "fleet_utilization_pct": fleet_util_pct,
-        "total_driving_hours": round(total_driving_sec / 3600, 1),
-        "total_idle_hours": round(total_idle_sec / 3600, 1),
-        "total_engine_on_hours": round(total_engine_sec / 3600, 1),
-        "driving_to_idle_ratio": fleet_ratio,
-        "vehicles": sorted(unit_results, key=lambda x: x["utilization_percentage"], reverse=True)
+        "fleet_utilization_pct": None if all_unknown else fleet_util_pct,
+        "total_driving_hours": None if all_unknown else round(total_driving_sec / 3600, 1),
+        "total_idle_hours": None if all_unknown else round(total_idle_sec / 3600, 1),
+        "total_engine_on_hours": None if all_unknown else round(total_engine_sec / 3600, 1),
+        "driving_to_idle_ratio": None if all_unknown else fleet_ratio,
+        "partial": bool(unknown_vehicles),
+        "unknown_vehicles": unknown_vehicles,
+        # Unknown (None) utilization sorts after all known values
+        "vehicles": sorted(unit_results, key=lambda x: (x["utilization_percentage"] is not None, x["utilization_percentage"] or 0), reverse=True)
     }
 
-    set_cached(cache_key, result)
+    # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
+    if not report_incomplete:
+        set_cached(cache_key, result)
     return result
+
+
+def _ambiguous_report_names(fleet: List[Dict[str, Any]], report_rows: List[Dict[str, Any]]) -> set:
+    """Names that cannot be attributed to a single unit: shared by several fleet units or several report rows."""
+    fleet_counts = Counter(v.get("vehicle_name") for v in fleet)
+    row_counts = Counter(r.get("vehicle_name") for r in report_rows)
+    return {n for n in set(fleet_counts) | set(row_counts) if n and (fleet_counts.get(n, 0) > 1 or row_counts.get(n, 0) > 1)}
 
 
 # =============================================================================
@@ -505,15 +554,29 @@ def get_trips_mileage_analytics(
         logging.warning("Group trips report failed, falling back to unit analysis: %s", e)
         group_report = None
 
+    report_incomplete = False
     if group_report is not None:
         rep_by_name = {item["vehicle_name"]: item for item in group_report}
+        # Report rows carry only the unit name: a name shared by several units (or rows) cannot be attributed
+        ambiguous_names = _ambiguous_report_names(fleet, group_report)
+        report_incomplete = any(
+            item.get("incomplete_fields") or item.get("column_warnings") or item.get("unlocated_fields")
+            for item in group_report
+        )
         vehicle_trips = []
         for v_record in fleet:
             vname = v_record["vehicle_name"]
             vid = v_record["vehicle_id"]
             calc = calc_map.get(vid, {})
             curr_hw_mileage = (calc.get("mileage") or {}).get("value")
-            rep_item = rep_by_name.get(vname, {})
+            rep_item = {} if vname in ambiguous_names else rep_by_name.get(vname, {})
+            # An unreadable or guessed-column mileage cell, an unattributable row, or no row at all is unknown
+            # (None), never 0 km: the group report emits a row with "0.00 km" for every member without activity
+            mileage_unknown = (
+                vname in ambiguous_names
+                or vname not in rep_by_name
+                or "mileage_km" in ((rep_item.get("incomplete_fields") or []) + (rep_item.get("unlocated_fields") or []))
+            )
             raw_mileage = float(rep_item.get("mileage_km", 0.0)) if rep_item else 0.0
             avg_spd = _parse_speed_kmh(rep_item.get("avg_speed")) if rep_item else None
             max_spd = _parse_speed_kmh(rep_item.get("max_speed")) if rep_item else 0.0
@@ -522,8 +585,10 @@ def get_trips_mileage_analytics(
                 "vehicle_id": vid,
                 "vehicle_name": vname,
                 "group": v_record.get("group", "General Fleet"),
-                "trip_count": 1 if raw_mileage > 0 else 0,
-                "gps_mileage_km": round(raw_mileage, 2),
+                # The group trips report (template 5) has one summary row per unit and no trip count:
+                # unknown, never inferred from mileage. Real counts come from the unit trips report path.
+                "trip_count": None,
+                "gps_mileage_km": None if mileage_unknown else round(raw_mileage, 2),
                 "hardware_mileage_km": None,
                 "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
                 "max_speed_kmh": round(max_spd or 0.0, 1),
@@ -547,7 +612,11 @@ def get_trips_mileage_analytics(
                     native_rep = None
                 if native_rep and "trips" in native_rep:
                     w_trips = native_rep["trips"]
-                    gps_dist = round(sum(t.get("distance_km", 0.0) for t in w_trips), 2)
+                    # Unknown when any trip distance is unreadable or the Mileage column was not identified
+                    dist_unknown = "distance_km" in (
+                        (native_rep.get("unlocated_fields") or []) + (native_rep.get("incomplete_fields") or [])
+                    )
+                    gps_dist = None if dist_unknown else round(sum(t.get("distance_km", 0.0) for t in w_trips), 2)
                     max_spd = 0.0
                     for t in w_trips:
                         ms_str = str(t.get("max_speed", "")).replace("km/h", "").strip()
@@ -655,8 +724,13 @@ def get_trips_mileage_analytics(
         with ThreadPoolExecutor(max_workers=3) as executor:
             vehicle_trips = list(map_with_request_context(executor, _process_trips, fleet))
 
-    total_trips = sum(v["trip_count"] for v in vehicle_trips)
-    total_gps_dist = round(sum(v["gps_mileage_km"] for v in vehicle_trips), 2)
+    # Trip metrics need every vehicle's real trip list; one unknown count makes the fleet totals unknown.
+    trips_known = all(v["trip_count"] is not None for v in vehicle_trips)
+    total_trips = sum(v["trip_count"] for v in vehicle_trips) if trips_known else None
+    # Unknown (None) distances are left out of the total and listed, never counted as 0 km
+    known_dists = [v["gps_mileage_km"] for v in vehicle_trips if v["gps_mileage_km"] is not None]
+    distance_unknown_vehicles = sorted(v["vehicle_name"] for v in vehicle_trips if v["gps_mileage_km"] is None)
+    total_gps_dist = round(sum(known_dists), 2)
     available_hw_distances = [v["hardware_mileage_km"] for v in vehicle_trips if v.get("hardware_mileage_km") is not None]
     total_hw_dist = round(sum(available_hw_distances), 2) if available_hw_distances else None
 
@@ -666,10 +740,12 @@ def get_trips_mileage_analytics(
         except (ValueError, TypeError):
             return 0.0
 
-    all_single_trips = [t for v in vehicle_trips for t in v.get("trips", [])]
-    avg_trip_dist = round(total_gps_dist / total_trips, 2) if total_trips > 0 else 0
-    avg_trip_dur  = round(sum(_to_float(t.get("duration_minutes")) for t in all_single_trips) / len(all_single_trips), 1) if all_single_trips else 0
-    longest_trip_dist = max((t["distance_km"] for t in all_single_trips), default=(max((v["gps_mileage_km"] for v in vehicle_trips), default=0)))
+    all_single_trips = [t for v in vehicle_trips for t in v.get("trips", [])] if trips_known else []
+    # No trips (or unknown trips) means no average or longest trip: None, never 0 or a vehicle's daily mileage
+    # A distance unknown for any vehicle makes the fleet average and longest trip unknown, not a partial figure
+    avg_trip_dist = round(total_gps_dist / total_trips, 2) if total_trips and not distance_unknown_vehicles else None
+    avg_trip_dur  = round(sum(_to_float(t.get("duration_minutes")) for t in all_single_trips) / len(all_single_trips), 1) if all_single_trips else None
+    longest_trip_dist = None if distance_unknown_vehicles else max((t["distance_km"] for t in all_single_trips), default=None)
     fleet_max_spd = max((v["max_speed_kmh"] for v in vehicle_trips), default=0)
 
     # Mileage by group
@@ -678,8 +754,10 @@ def get_trips_mileage_analytics(
         g = vt["group"]
         if g not in by_group:
             by_group[g] = {"group": g, "trips": 0, "distance_km": 0.0, "vehicle_count": 0}
-        by_group[g]["trips"] += vt["trip_count"]
-        by_group[g]["distance_km"] = round(by_group[g]["distance_km"] + vt["gps_mileage_km"], 2)
+        if by_group[g]["trips"] is not None:
+            by_group[g]["trips"] = None if vt["trip_count"] is None else by_group[g]["trips"] + vt["trip_count"]
+        if by_group[g]["distance_km"] is not None:
+            by_group[g]["distance_km"] = None if vt["gps_mileage_km"] is None else round(by_group[g]["distance_km"] + vt["gps_mileage_km"], 2)
         by_group[g]["vehicle_count"] += 1
 
     result = {
@@ -689,6 +767,8 @@ def get_trips_mileage_analytics(
         "summary": {
             "total_trips": total_trips,
             "total_distance_km": total_gps_dist,
+            "total_distance_partial": bool(distance_unknown_vehicles),
+            "distance_unknown_vehicles": distance_unknown_vehicles,
             "total_hardware_distance_km": total_hw_dist,
             "average_trip_distance_km": avg_trip_dist,
             "average_trip_duration_minutes": avg_trip_dur,
@@ -696,10 +776,13 @@ def get_trips_mileage_analytics(
             "fleet_max_speed_kmh": fleet_max_spd,
         },
         "by_group": list(by_group.values()),
-        "vehicles": sorted(vehicle_trips, key=lambda x: x["gps_mileage_km"], reverse=True)
+        # Unknown (None) distances sort after all known ones
+        "vehicles": sorted(vehicle_trips, key=lambda x: (x["gps_mileage_km"] is not None, x["gps_mileage_km"] or 0), reverse=True)
     }
 
-    set_cached(cache_key, result)
+    # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
+    if not report_incomplete:
+        set_cached(cache_key, result)
     return result
 
 
@@ -707,11 +790,11 @@ def get_trips_mileage_analytics(
 # 4. SAFETY ANALYTICS SERVICE
 # =============================================================================
 
-def get_safety_analytics(hours: int = 168) -> Dict[str, Any]:
+def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, Any]:
     window_to = int(time.time())
     log_data_window("/api/fleet/safety", window_to - hours * 3600, window_to)
     cache_key = f"safety_analytics_{hours}"
-    cached = get_cached(cache_key, ttl_seconds=180)
+    cached = get_cached(cache_key, ttl_seconds=180) if use_cache else None
     log_cache_state("/api/fleet/safety", cached is not None)
     if cached:
         return cached
@@ -730,7 +813,8 @@ def get_safety_analytics(hours: int = 168) -> Dict[str, Any]:
 
         sens_cfg = next((u.get("sens") or {} for u in vehicles if u.get("id") == vid), {})
         accel_sid = next((str(k) for k, sc in sens_cfg.items() if sc and "accel" in str(sc.get("n", "")).lower() and ("event" in str(sc.get("n", "")).lower() or sc.get("p") == "io_253")), None)
-        brake_sid = next((str(k) for k, sc in sens_cfg.items() if sc and ("brake" in str(sc.get("n", "")).lower() or "braking" in str(sc.get("n", "")).lower())), None)
+        # Brake needs an event qualifier like accel/corner: a plain brake-pedal input is not harsh braking
+        brake_sid = next((str(k) for k, sc in sens_cfg.items() if sc and ("brake" in str(sc.get("n", "")).lower() or "braking" in str(sc.get("n", "")).lower()) and ("event" in str(sc.get("n", "")).lower() or "harsh" in str(sc.get("n", "")).lower())), None)
         corner_sid = next((str(k) for k, sc in sens_cfg.items() if sc and "corner" in str(sc.get("n", "")).lower() and ("event" in str(sc.get("n", "")).lower() or sc.get("p") == "io_253")), None)
         gforce_sid = next((str(k) for k, sc in sens_cfg.items() if sc and ("g-force" in str(sc.get("n", "")).lower() or "green value" in str(sc.get("n", "")).lower() or sc.get("p") == "io_254")), None)
 
@@ -847,13 +931,97 @@ def get_safety_analytics(hours: int = 168) -> Dict[str, Any]:
 # 5. FLEET ALERTS SERVICE
 # =============================================================================
 
-def get_fleet_alerts_analytics() -> Dict[str, Any]:
-    cached = get_cached("fleet_alerts_analytics", ttl_seconds=180)
-    if cached:
-        return cached
+# A fresh entry is served for _ALERTS_TTL_SECONDS (unchanged). Once it is _ALERTS_REFRESH_AHEAD_SECONDS
+# old, a cache hit starts one background rebuild so polling clients get a new entry before the old one
+# expires instead of a cold scan. Foreground and background builds share _alerts_build_lock, so at most
+# one alerts scan (health + 3-worker safety fan-out) runs at a time. A failed rebuild caches nothing:
+# the last good entry stays until its own 180 s freshness runs out.
+_ALERTS_CACHE_KEY = "fleet_alerts_analytics"
+_ALERTS_TTL_SECONDS = 180
+_ALERTS_REFRESH_AHEAD_SECONDS = 120
+_ALERTS_REFRESH_RETRY_SECONDS = 30
+_alerts_build_lock = threading.Lock()
+_alerts_refresh_failed_at = 0.0
+_alerts_build_seq = 0  # foreground builds finished, success or failure
+_alerts_last_error: Optional[BaseException] = None
 
-    health = get_fleet_health_analytics()
-    safety = get_safety_analytics(hours=24)
+
+def get_fleet_alerts_analytics() -> Dict[str, Any]:
+    entry = _analytics_cache.get(_ALERTS_CACHE_KEY)
+    age = time.time() - entry["time"] if entry else None
+    fresh = age is not None and age < _ALERTS_TTL_SECONDS
+    log_cache_state("/api/fleet/alerts", fresh)
+    if fresh:
+        if age >= _ALERTS_REFRESH_AHEAD_SECONDS:
+            _start_alerts_background_refresh()
+        return entry["data"]
+
+    # Cold: wait for any build already running (foreground or background) rather than starting another
+    global _alerts_build_seq, _alerts_last_error
+    seen_seq = _alerts_build_seq
+    with _alerts_build_lock:
+        cached = get_cached(_ALERTS_CACHE_KEY, ttl_seconds=_ALERTS_TTL_SECONDS)
+        if cached:
+            return cached
+        # Callers queued behind a foreground build that failed share its error instead of repeating the scan
+        if _alerts_last_error is not None and _alerts_build_seq != seen_seq:
+            raise _alerts_last_error
+        try:
+            result = _build_fleet_alerts(use_cache=True)
+        except BaseException as exc:
+            _alerts_last_error = exc
+            raise
+        else:
+            _alerts_last_error = None
+        finally:
+            _alerts_build_seq += 1
+        return result
+
+
+def _start_alerts_background_refresh() -> bool:
+    """Start one background rebuild unless a build is running or the last refresh failed recently."""
+    if time.monotonic() - _alerts_refresh_failed_at < _ALERTS_REFRESH_RETRY_SECONDS:
+        return False
+    if not _alerts_build_lock.acquire(blocking=False):
+        return False
+    try:
+        threading.Thread(target=_run_alerts_background_refresh, name="fleet-alerts-refresh", daemon=True).start()
+    except BaseException:
+        _alerts_build_lock.release()
+        raise
+    return True
+
+
+def _run_alerts_background_refresh() -> None:
+    """Runs with _alerts_build_lock held; releases it when done."""
+    global _alerts_refresh_failed_at
+    request_trace_id.set(f"bg-{new_trace_id()}")
+    started = time.perf_counter()
+    try:
+        # Bypass the health/safety caches so the new entry's timestamp reflects data read now
+        _build_fleet_alerts(use_cache=False)
+        _alerts_refresh_failed_at = 0.0
+        logging.info("PERF alerts background refresh request_id=%s state=ok duration_ms=%.1f",
+                     request_trace_id.get(), (time.perf_counter() - started) * 1000)
+    except Exception:
+        _alerts_refresh_failed_at = time.monotonic()
+        logging.exception("PERF alerts background refresh request_id=%s state=failed duration_ms=%.1f; "
+                          "keeping the last cached alerts", request_trace_id.get(), (time.perf_counter() - started) * 1000)
+    finally:
+        _alerts_build_lock.release()
+
+
+def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
+    # Without the cache bypass the call signatures stay exactly as before
+    part_kwargs = {} if use_cache else {"use_cache": False}
+
+    # Health makes only sequential Wialon calls, so overlapping it with the safety scan adds one
+    # concurrent request at most; the safety fan-out stays at 3 workers (5+ hits LIMIT api_concurrent)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        health_future = executor.submit(copy_context().run, get_fleet_health_analytics, **part_kwargs)
+        safety_future = executor.submit(copy_context().run, get_safety_analytics, 24, **part_kwargs)
+        health = health_future.result()
+        safety = safety_future.result()
 
     alerts = []
     alert_counter = 1
@@ -996,7 +1164,7 @@ def get_fleet_alerts_analytics() -> Dict[str, Any]:
         "alerts": alerts
     }
 
-    set_cached("fleet_alerts_analytics", result)
+    set_cached(_ALERTS_CACHE_KEY, result)
     return result
 
 
@@ -1037,8 +1205,11 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         stopped = sum(1 for v in g_vehicles if v.get("status") == "STOPPED")
         offline = sum(1 for v in g_vehicles if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
-        total_distance = sum(trips_by_veh.get(v["vehicle_id"], {}).get("gps_mileage_km", 0.0) for v in g_vehicles)
-        total_trips = sum(trips_by_veh.get(v["vehicle_id"], {}).get("trip_count", 0) for v in g_vehicles)
+        distances = [trips_by_veh.get(v["vehicle_id"], {}).get("gps_mileage_km") for v in g_vehicles]
+        # One unknown vehicle distance makes the group distance unknown (None), never a silent 0
+        total_distance = None if any(d is None for d in distances) else sum(distances)
+        trip_counts = [trips_by_veh.get(v["vehicle_id"], {}).get("trip_count") for v in g_vehicles]
+        total_trips = None if any(c is None for c in trip_counts) else sum(trip_counts)
         total_safety = safety_by_grp.get(gname, 0)
 
         groups_summary.append({
@@ -1049,7 +1220,7 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
             "idling": idling,
             "stopped": stopped,
             "offline": offline,
-            "distance_24h_km": round(total_distance, 1),
+            "distance_24h_km": round(total_distance, 1) if total_distance is not None else None,
             "trips_24h": total_trips,
             "safety_events_24h": total_safety,
             "vehicles": [
@@ -1073,7 +1244,9 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         "groups": sorted(groups_summary, key=lambda x: x["total_vehicles"], reverse=True)
     }
 
-    set_cached("fleet_groups_analytics", result)
+    # Built on a partial trips report: not cached, so the unknown distances are re-read on the next request
+    if not trips_data.get("summary", {}).get("total_distance_partial"):
+        set_cached("fleet_groups_analytics", result)
     return result
 
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react"
+import { useEffect, useMemo, useState, useRef } from "react"
 import { Link } from "react-router-dom"
 import {
     Activity,
@@ -41,6 +41,7 @@ import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import KpiCard from "../components/Common/KpiCard"
 import LiveIdleTimer from "../components/Common/LiveIdleTimer"
+import { compareKnownDesc, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
 
 // Curated enterprise palette starting with ATS brand blue
 const CHART_COLORS = [
@@ -100,22 +101,6 @@ function Dashboard() {
     const [selectedVehicleId, setSelectedVehicleId] = useState(null)
 
     // ─── 1. Load Live Vehicles Telemetry (Periodic Refresh) ─────────────────
-    const loadVehicles = useCallback(async (mountedRef = { current: true }) => {
-        try {
-            const data = await getVehicles()
-            if (!mountedRef.current) return
-            setVehicles(data.vehicles || [])
-            setLastUpdated(new Date())
-            setError(null)
-        } catch (err) {
-            if (!mountedRef.current) return
-            console.error("Failed to load vehicle data:", err)
-            setError("Failed to load vehicle data")
-        } finally {
-            if (mountedRef.current) setLoading(false)
-        }
-    }, [])
-
     useEffect(() => {
         let mounted = true
         let timerId = null
@@ -123,6 +108,8 @@ function Dashboard() {
 
         const fetchVehiclesPeriodic = async () => {
             if (isFetching || !mounted) return
+            // Polling pauses while the tab is hidden and resumes from the visibilitychange listener.
+            if (document.hidden) return
             isFetching = true
             try {
                 const data = await getVehicles()
@@ -146,8 +133,15 @@ function Dashboard() {
         }
 
         fetchVehiclesPeriodic()
+        const onVisibilityChange = () => {
+            if (document.hidden || !mounted) return
+            if (timerId) clearTimeout(timerId)
+            fetchVehiclesPeriodic()
+        }
+        document.addEventListener("visibilitychange", onVisibilityChange)
 
         return () => {
+            document.removeEventListener("visibilitychange", onVisibilityChange)
             mounted = false
             if (timerId) clearTimeout(timerId)
         }
@@ -155,7 +149,9 @@ function Dashboard() {
 
     // ─── 2. Load Alerts, Today Trips, Idle Analytics & Today Mileage ────────
     const mileageTimeframeRef = useRef(mileageTimeframe)
-    mileageTimeframeRef.current = mileageTimeframe
+    useEffect(() => {
+        mileageTimeframeRef.current = mileageTimeframe
+    }, [mileageTimeframe])
 
     useEffect(() => {
         let active = true
@@ -164,25 +160,26 @@ function Dashboard() {
 
         async function fetchAuxiliaryData() {
             if (isFetching || !active) return
+            // Polling pauses while the tab is hidden and resumes from the visibilitychange listener.
+            if (document.hidden) return
             isFetching = true
             const seq = ++auxSeqRef.current
             try {
-                const [alertsRes, tripsRes, idleRes, todayMileageRes] = await Promise.allSettled([
-                    getFleetAlertsAnalytics(),
-                    getFleetTripsAnalytics({ timeframe: "today" }),
-                    getFleetIdleAnalytics({ timeframe: "today", include_events: false }),
-                    getDashboardMileage("today"),
+                // Each result is applied as soon as it arrives, so a slow cold alerts scan
+                // does not hold back the trips, idle and mileage cards; polling still waits for all four.
+                const isCurrent = () => active && seq === auxSeqRef.current
+                await Promise.allSettled([
+                    getFleetAlertsAnalytics().then(res => { if (isCurrent()) setAlertsData(res) }),
+                    getFleetTripsAnalytics({ timeframe: "today" }).then(res => { if (isCurrent()) setTripsData(res) }),
+                    getFleetIdleAnalytics({ timeframe: "today", include_events: false }).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
+                    getDashboardMileage("today").then(res => {
+                        if (!isCurrent()) return
+                        setTodayMileageData(res)
+                        if (mileageTimeframeRef.current === "today") {
+                            setMileageData(res)
+                        }
+                    }),
                 ])
-                if (!active || seq !== auxSeqRef.current) return
-                if (alertsRes.status === "fulfilled") setAlertsData(alertsRes.value)
-                if (tripsRes.status === "fulfilled") setTripsData(tripsRes.value)
-                if (idleRes.status === "fulfilled") setIdleAnalyticsData(idleRes.value)
-                if (todayMileageRes.status === "fulfilled") {
-                    setTodayMileageData(todayMileageRes.value)
-                    if (mileageTimeframeRef.current === "today") {
-                        setMileageData(todayMileageRes.value)
-                    }
-                }
             } catch (err) {
                 console.error("Failed to fetch dashboard auxiliary data:", err)
             } finally {
@@ -193,7 +190,14 @@ function Dashboard() {
             }
         }
         fetchAuxiliaryData()
+        const onVisibilityChange = () => {
+            if (document.hidden || !active) return
+            if (timerId) clearTimeout(timerId)
+            fetchAuxiliaryData()
+        }
+        document.addEventListener("visibilitychange", onVisibilityChange)
         return () => {
+            document.removeEventListener("visibilitychange", onVisibilityChange)
             active = false
             if (timerId) clearTimeout(timerId)
         }
@@ -249,8 +253,6 @@ function Dashboard() {
                 finalStatus = "MOVING"
             } else if (rawStatus === "IDLING") {
                 finalStatus = "IDLING"
-            } else {
-                finalStatus = "STOPPED"
             }
             return {
                 ...vehicle,
@@ -299,7 +301,8 @@ function Dashboard() {
         const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
         if (sourceMileage) {
             sourceMileage.forEach(u => {
-                if (Number(u.mileage || 0) > 0) {
+                // Unknown (null) mileage is not evidence of activity
+                if (isKnownNumber(u.mileage) && u.mileage > 0) {
                     const vidStr = String(u.vehicle_id)
                     if (filteredVehicleIdSet.has(vidStr)) {
                         activeIds.add(u.vehicle_id)
@@ -343,69 +346,83 @@ function Dashboard() {
     // ─── 8. Today's Fleet Activity Metrics (Scaped to Today and filtered by Global Group) ───────
     const todayFleetActivity = useMemo(() => {
         // Distance strictly for today
+        // Unknown (null) unit mileage is left out of the total and marked, never counted as 0 km
         let distanceKm = 0
+        let distanceUnknownUnits = 0
+        let distanceAllUnknown = false
         const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
         if (sourceMileage) {
             const filteredUnits = selectedGroup === "ALL"
                 ? sourceMileage
                 : sourceMileage.filter(u => filteredVehicleIdSet.has(String(u.vehicle_id)))
-            distanceKm = filteredUnits.reduce((sum, u) => sum + Number(u.mileage || 0), 0)
+            const mileage = sumKnown(filteredUnits, u => u.mileage)
+            distanceKm = mileage.total
+            distanceUnknownUnits = mileage.unknown
+            distanceAllUnknown = mileage.allUnknown
         } else if (tripsData?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
                 ? tripsData.vehicles
                 : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
-            distanceKm = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.gps_mileage_km || 0), 0)
+            const mileage = sumKnown(filteredTripVehs, tv => tv.gps_mileage_km)
+            distanceKm = mileage.total
+            distanceUnknownUnits = mileage.unknown
+            distanceAllUnknown = mileage.allUnknown
         }
 
-        // Trips count
-        let trips = 0
+        // Trips count: only real Wialon trip counts. Unknown (null) for any vehicle -> "—", never an active-vehicle count
+        let trips = null
         if (tripsData?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
                 ? tripsData.vehicles
                 : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
-            trips = filteredTripVehs.reduce((sum, tv) => sum + Number(tv.trip_count || 0), 0)
-        } else {
-            trips = activeTodayCount
+            const tripCountsKnown = filteredTripVehs.every(tv => typeof tv.trip_count === "number")
+            trips = tripCountsKnown ? filteredTripVehs.reduce((sum, tv) => sum + tv.trip_count, 0) : null
         }
 
-        // Driving time (distinguish measured vs estimated)
+        // Driving time from Wialon trip durations, or Wialon distance ÷ Wialon average speed.
+        // A vehicle with neither is unknown and left out (never estimated from an assumed speed).
         let drivingMinutes = 0
-        let hasMeasuredDriving = false
-        let isEstimatedDriving = false
+        let drivingKnown = false
+        let drivingUnknownVehicles = 0
 
         if (tripsData?.vehicles) {
             tripsData.vehicles.forEach(tv => {
                 if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(tv.vehicle_id))) {
                     if (Array.isArray(tv.trips) && tv.trips.length > 0) {
-                        tv.trips.forEach(t => {
-                            drivingMinutes += Number(t.duration_minutes || 0)
-                        })
-                        hasMeasuredDriving = true
-                    } else if (tv.gps_mileage_km && tv.avg_speed_kmh && Number(tv.avg_speed_kmh) > 0) {
+                        const tripMinutes = sumKnown(tv.trips, t => t.duration_minutes)
+                        drivingMinutes += tripMinutes.total
+                        if (tripMinutes.partial) drivingUnknownVehicles += 1
+                        if (tripMinutes.known > 0) drivingKnown = true
+                    } else if (tv.gps_mileage_km === 0) {
+                        // No distance recorded: no driving time
+                        drivingKnown = true
+                    } else if (isKnownNumber(tv.gps_mileage_km) && isKnownNumber(tv.avg_speed_kmh) && Number(tv.avg_speed_kmh) > 0) {
                         drivingMinutes += Math.round((Number(tv.gps_mileage_km) / Number(tv.avg_speed_kmh)) * 60)
-                        hasMeasuredDriving = true
+                        drivingKnown = true
+                    } else {
+                        drivingUnknownVehicles += 1
                     }
                 }
             })
         }
-        if (!hasMeasuredDriving && distanceKm > 0) {
-            drivingMinutes = Math.round((distanceKm / 45) * 60)
-            isEstimatedDriving = true
-        }
 
         // Idle time from verified historical idle data for today (correct field names)
+        // Unknown (null) vehicle idle is left out of the total and marked, never counted as 0
         let idleMinutes = 0
+        let idleUnknownVehicles = 0
+        let idleAllUnknown = false
         if (idleAnalyticsData?.by_vehicle) {
             const matchingVehicles = selectedGroup === "ALL"
                 ? idleAnalyticsData.by_vehicle
                 : idleAnalyticsData.by_vehicle.filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
-            const totalIdleSecs = matchingVehicles.reduce(
-                (sum, v) => sum + Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0)),
-                0
-            )
-            idleMinutes = Math.round(totalIdleSecs / 60)
+            const idle = sumKnown(matchingVehicles, idleSecondsOf)
+            idleMinutes = Math.round(idle.total / 60)
+            idleUnknownVehicles = idle.unknown
+            idleAllUnknown = idle.allUnknown
         } else if (idleAnalyticsData?.summary?.total_idle_seconds !== undefined && selectedGroup === "ALL") {
-            idleMinutes = Math.round(Number(idleAnalyticsData.summary.total_idle_seconds || 0) / 60)
+            const summaryIdle = idleAnalyticsData.summary.total_idle_seconds
+            idleAllUnknown = !isKnownNumber(summaryIdle)
+            idleMinutes = idleAllUnknown ? 0 : Math.round(Number(summaryIdle) / 60)
         }
 
         const formatHoursMins = (totalMins) => {
@@ -416,18 +433,16 @@ function Dashboard() {
             return `${h}h ${m}m`
         }
 
-        const drivingDisplay = isEstimatedDriving
-            ? `~${formatHoursMins(drivingMinutes)} (est.)`
-            : formatHoursMins(drivingMinutes)
-
         return {
-            distance: `${Math.round(distanceKm).toLocaleString()} km`,
-            trips: trips > 0 ? trips.toLocaleString() : "—",
-            driving: drivingDisplay,
-            idle: formatHoursMins(idleMinutes),
-            isEstimatedDriving,
+            distance: distanceAllUnknown ? "—" : `${Math.round(distanceKm).toLocaleString()} km`,
+            distanceUnknownUnits,
+            trips: trips === null ? "—" : trips.toLocaleString(),
+            driving: drivingKnown ? formatHoursMins(drivingMinutes) : "—",
+            drivingUnknownVehicles,
+            idle: idleAllUnknown ? "—" : formatHoursMins(idleMinutes),
+            idleUnknownVehicles,
         }
-    }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet, activeTodayCount])
+    }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
 
     // ─── 9. Idle Vehicles Requiring Attention (Active continuous idle >= 5 mins / 300s) ──────
     const attentionVehicles = useMemo(() => {
@@ -478,14 +493,15 @@ function Dashboard() {
                 return g === sel || (Array.isArray(u.groups) && u.groups.some(x => (x || "").trim().toLowerCase() === sel))
             })
         }
-        units.sort((a, b) => Number(b.mileage || 0) - Number(a.mileage || 0))
+        // Unknown (null) mileage sorts last and has no bar, instead of showing as 0 km
+        units.sort((a, b) => compareKnownDesc(a.mileage, b.mileage))
         if (mileageLimit !== "ALL") {
             units = units.slice(0, Number(mileageLimit))
         }
         return units.map(u => ({
             vehicle_id: u.vehicle_id,
             vehicle: u.vehicle_name || `Vehicle #${u.vehicle_id}`,
-            mileage: Math.round(Number(u.mileage || 0)),
+            mileage: isKnownNumber(u.mileage) ? Math.round(Number(u.mileage)) : null,
             group: u.group || "General Fleet",
         }))
     }, [mileageUnitsSource, selectedGroup, mileageLimit])
@@ -547,23 +563,26 @@ function Dashboard() {
             const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
             return groupsToProcess.map(grpName => {
                 const groupKey = grpName.trim().toLowerCase()
-                let totalIdleSecs = 0
+                // Known idle is summed; vehicles with unknown idle are counted and flagged, never added as 0
+                let idle = { total: 0, unknown: 0, allUnknown: false }
                 if (idleAnalyticsData?.by_vehicle) {
                     // Single-counting rule: each vehicle is strictly categorized under its primary group in by_vehicle
                     const grpVehs = idleAnalyticsData.by_vehicle.filter(v =>
                         (v.group_name || "").trim().toLowerCase() === groupKey
                     )
-                    totalIdleSecs = grpVehs.reduce((sum, v) => sum + Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0)), 0)
+                    idle = sumKnown(grpVehs, idleSecondsOf)
                 } else if (idleAnalyticsData?.by_group) {
                     const grp = idleAnalyticsData.by_group.find(g => (g.group_name || "").trim().toLowerCase() === groupKey)
                     if (grp) {
-                        totalIdleSecs = Number(grp.total_idle_seconds ?? (grp.total_idle_hours ? grp.total_idle_hours * 3600 : 0))
+                        idle = sumKnown([grp], g => (Object.prototype.hasOwnProperty.call(g, "total_idle_seconds")
+                            ? g.total_idle_seconds
+                            : (isKnownNumber(g.total_idle_hours) ? g.total_idle_hours * 3600 : null)))
                     }
                 }
-                const idleMins = Math.round(totalIdleSecs / 60)
                 return {
                     name: grpName,
-                    value: idleMins,
+                    value: idle.allUnknown ? null : Math.round(idle.total / 60),
+                    unknownCount: idle.unknown,
                 }
             })
         } else {
@@ -571,20 +590,28 @@ function Dashboard() {
                 return idleAnalyticsData.by_vehicle
                     .filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
                     .map(v => {
-                        const secs = Number(v.total_idle_seconds ?? v.idle_seconds ?? (v.idle_hours ? v.idle_hours * 3600 : 0))
+                        const secs = idleSecondsOf(v)
+                        const known = isKnownNumber(secs)
                         return {
                             name: v.vehicle_name,
-                            value: Math.round(secs / 60),
-                            status: secs > 0 ? "IDLED TODAY" : "NO IDLE",
+                            value: known ? Math.round(Number(secs) / 60) : null,
+                            status: !known ? "UNKNOWN" : Number(secs) > 0 ? "IDLED TODAY" : "NO IDLE",
+                            unknownCount: known ? 0 : 1,
                             vehicle_id: v.vehicle_id,
                         }
                     })
-                    .sort((a, b) => b.value - a.value)
+                    .sort((a, b) => compareKnownDesc(a.value, b.value))
                     .slice(0, 10)
             }
             return []
         }
     }, [selectedGroup, availableGroups, idleAnalyticsData, filteredVehicleIdSet])
+
+    const formatIdleTooltip = (val, _name, item) => {
+        const unknownCount = item?.payload?.unknownCount || 0
+        if (!isKnownNumber(val)) return ["Unknown", "Idle Duration"]
+        return [unknownCount > 0 ? `${val} min (partial: ${unknownCount} vehicle(s) unknown)` : `${val} min`, "Idle Duration"]
+    }
 
     // ─── Selected Vehicle Object for Drawer ─────────────────────────────────
     const selectedVehicle = useMemo(() => {
@@ -850,7 +877,13 @@ function Dashboard() {
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-slate-900">
                                                         {todayFleetActivity.distance}
                                                     </p>
-                                                    <span className="text-[10px] font-medium text-slate-400">Total covered</span>
+                                                    {todayFleetActivity.distanceUnknownUnits > 0 ? (
+                                                        <span className="text-[10px] font-medium text-amber-700" title="Wialon could not read these units' mileage; they are left out of the total">
+                                                            Partial: {todayFleetActivity.distanceUnknownUnits} unit(s) unknown
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[10px] font-medium text-slate-400">Total covered</span>
+                                                    )}
                                                 </div>
 
                                                 <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
@@ -862,20 +895,17 @@ function Dashboard() {
                                                 </div>
 
                                                 <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
-                                                    <div className="flex items-center justify-center gap-1">
-                                                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Driving</span>
-                                                        {todayFleetActivity.isEstimatedDriving && (
-                                                            <span className="text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded px-1" title="Estimated duration based on distance & ~45 km/h">
-                                                                Est.
-                                                            </span>
-                                                        )}
-                                                    </div>
+                                                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Driving</span>
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-emerald-700">
                                                         {todayFleetActivity.driving}
                                                     </p>
-                                                    <span className="text-[10px] font-medium text-slate-400">
-                                                        {todayFleetActivity.isEstimatedDriving ? "Estimated motion" : "Active motion"}
-                                                    </span>
+                                                    {todayFleetActivity.drivingUnknownVehicles > 0 ? (
+                                                        <span className="text-[10px] font-medium text-amber-700" title="Wialon reported no usable distance, speed or trip duration for these vehicles; they are left out of the total">
+                                                            Partial: {todayFleetActivity.drivingUnknownVehicles} vehicle(s) unknown
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[10px] font-medium text-slate-400">Active motion</span>
+                                                    )}
                                                 </div>
 
                                                 <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-2xs">
@@ -883,7 +913,13 @@ function Dashboard() {
                                                     <p className="mt-0.5 text-lg sm:text-xl font-black text-amber-600">
                                                         {todayFleetActivity.idle}
                                                     </p>
-                                                    <span className="text-[10px] font-medium text-slate-400">Engine running</span>
+                                                    {todayFleetActivity.idleUnknownVehicles > 0 ? (
+                                                        <span className="text-[10px] font-medium text-amber-700" title="These vehicles' idle time could not be attributed; they are left out of the total">
+                                                            Partial: {todayFleetActivity.idleUnknownVehicles} vehicle(s) unknown
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-[10px] font-medium text-slate-400">Engine running</span>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>
@@ -1054,7 +1090,7 @@ function Dashboard() {
                                                                 tick={{ fontSize: 11, fill: "#0f172a", fontWeight: 700 }}
                                                             />
                                                             <Tooltip
-                                                                formatter={(val) => [`${Number(val).toLocaleString()} km`, "Mileage"]}
+                                                                formatter={(val) => [isKnownNumber(val) ? `${Number(val).toLocaleString()} km` : "Unknown (unreadable)", "Mileage"]}
                                                                 contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }}
                                                             />
                                                             <Bar
@@ -1270,7 +1306,7 @@ function Dashboard() {
                                                     <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#F1F5F9" />
                                                     <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
                                                     <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={100} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
-                                                    <Tooltip formatter={(val) => [`${val} min`, "Idle Duration"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                    <Tooltip formatter={formatIdleTooltip} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
                                                     <Bar dataKey="value" fill="#f97316" radius={[0, 4, 4, 0]} />
                                                 </BarChart>
                                             </ResponsiveContainer>
@@ -1280,7 +1316,7 @@ function Dashboard() {
                                                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
                                                     <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#0f172a", fontWeight: 700 }} />
                                                     <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: "#64748b" }} />
-                                                    <Tooltip formatter={(val) => [`${val} min`, "Idle Duration"]} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
+                                                    <Tooltip formatter={formatIdleTooltip} contentStyle={{ borderRadius: "8px", border: "1px solid #E2E8F0", fontSize: "12px" }} />
                                                     <Bar dataKey="value" fill="#f97316" radius={[4, 4, 0, 0]} />
                                                 </BarChart>
                                             </ResponsiveContainer>

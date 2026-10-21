@@ -2,9 +2,10 @@
 
 from collections import defaultdict
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from app.fuel.scope import tx_local_date, unit_key
+from app.fuel.scope import _q2, tx_local_date, unit_key
 from app.fuel.schemas import (
     FuelSummaryResponse,
     FuelTrendItem,
@@ -40,20 +41,21 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
         )
 
     # Totals are net: refund adjustments (negative litres) reduce them. The average price uses purchases only.
-    total_litres = 0.0
-    total_cost = 0.0
+    # Sums use Decimal (like scope.excluded_scope) so the KPI and excluded totals reconcile to the cent.
+    total_litres = Decimal(0)
+    total_cost = Decimal(0)
     purchase_count = 0
-    purchase_litres = 0.0
-    purchase_cost = 0.0
+    purchase_litres = Decimal(0)
+    purchase_cost = Decimal(0)
     refund_count = 0
-    refund_litres = 0.0
-    refund_cost = 0.0
+    refund_litres = Decimal(0)
+    refund_cost = Decimal(0)
     vehicles = set()
-    ft_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"litres": 0.0, "cost": 0.0, "count": 0})
+    ft_map: Dict[str, Dict[str, Any]] = defaultdict(lambda: {"litres": Decimal(0), "cost": Decimal(0), "count": 0})
 
     for t in transactions:
-        litres = float(t.get("litres") or 0)
-        cost = float(t.get("total_cost") or 0)
+        litres = Decimal(str(t.get("litres") or 0))
+        cost = Decimal(str(t.get("total_cost") or 0))
         v_ident = t.get("vehicle_identifier")
         ft = str(t.get("fuel_type") or "UNKNOWN").strip().upper()
 
@@ -76,16 +78,16 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
         ft_map[ft]["cost"] += cost
         ft_map[ft]["count"] += 1
 
-    total_litres_rounded = round(total_litres, 2)
-    total_cost_rounded = round(total_cost, 2)
-    purchase_litres_rounded = round(purchase_litres, 2)
-    purchase_cost_rounded = round(purchase_cost, 2)
+    total_litres_rounded = _q2(total_litres)
+    total_cost_rounded = _q2(total_cost)
+    purchase_litres_rounded = _q2(purchase_litres)
+    purchase_cost_rounded = _q2(purchase_cost)
     avg_price = round(purchase_cost_rounded / purchase_litres_rounded, 2) if purchase_litres_rounded > 0 else 0.0
 
     breakdown: List[FuelTypeBreakdownItem] = []
     for ft_name, data in ft_map.items():
-        l_round = round(data["litres"], 2)
-        c_round = round(data["cost"], 2)
+        l_round = _q2(data["litres"])
+        c_round = _q2(data["cost"])
         breakdown.append(
             FuelTypeBreakdownItem(
                 fuel_type=ft_name,
@@ -110,8 +112,8 @@ def calculate_fuel_summary(transactions: List[Dict[str, Any]]) -> FuelSummaryRes
         gross_purchased_litres=purchase_litres_rounded,
         gross_purchased_cost=purchase_cost_rounded,
         refund_count=refund_count,
-        refund_litres=round(refund_litres, 2),
-        refund_cost=round(refund_cost, 2),
+        refund_litres=_q2(refund_litres),
+        refund_cost=_q2(refund_cost),
     )
 
 

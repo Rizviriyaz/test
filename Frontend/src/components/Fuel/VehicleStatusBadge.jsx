@@ -1,4 +1,4 @@
-import { CheckCircle2, AlertCircle, HelpCircle, MinusCircle } from "lucide-react"
+import { CheckCircle2, AlertCircle, MinusCircle } from "lucide-react"
 
 /**
  * Standardized Vehicle Status Badge matching backend semantics exactly:

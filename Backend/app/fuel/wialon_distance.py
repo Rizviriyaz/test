@@ -17,7 +17,7 @@ from app.utils.config import get_env_int
 from app.utils.datetime_helpers import get_uae_now, now_timestamp, parse_date_to_uae_bounds
 from app.utils.ttl_cache import TTLCache
 from app.vehicles import extract_registration_plate, get_all_vehicles
-from app.wialon import WialonAPIError, login
+from app.wialon import WialonAPIError, current_sid, login
 from app.wialon_reports import (
     GROUP_ID_ALL_UNITS,
     _report_lock,
@@ -388,12 +388,14 @@ def get_units_trips_for_range(
     Trips per Wialon unit id over [date_from, date_to] (UAE days), fetched once per unit and cached, so day,
     week and month groupings reuse the same reports. Reports run serially under the shared report lock.
     A unit whose report fails is returned as status 'failed' - callers must not count it as 0 km.
+    Each unit uses the gateway's current session, so a session refreshed mid-batch (Wialon error 1 or a forced
+    re-login) is picked up by the remaining units instead of each of their calls first failing on the stale one.
     """
     out: Dict[int, Dict[str, Any]] = {}
     for uid in sorted({int(u) for u in unit_ids}):
         out[uid] = _UNIT_TRIPS_CACHE.get_or_compute(
             (uid, date_from, date_to),
-            lambda uid=uid: _fetch_unit_trips(uid, date_from, date_to, sid),
+            lambda uid=uid: _fetch_unit_trips(uid, date_from, date_to, current_sid() or sid),
             lambda r: _ttl_for_unit_trips(date_to, r),
         )
     return out

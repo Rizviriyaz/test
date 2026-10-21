@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 import { useAuth } from "../../context/useAuth"
 import { sendAiChatMessage } from "../../api/fleetApi"
+import { buildChatHistory } from "./chatHistory"
 
 const QUICK_PROMPTS = [
     "How is the fleet doing?",
@@ -179,12 +180,7 @@ export default function AiAssistantWidget() {
         setIsLoading(true)
 
         try {
-            const apiMessages = updatedMessages.map((m) => ({
-                role: m.role,
-                content: m.content,
-            }))
-
-            const data = await sendAiChatMessage(apiMessages)
+            const data = await sendAiChatMessage(buildChatHistory(updatedMessages))
             if (data && data.reply) {
                 setMessages((prev) => [
                     ...prev,

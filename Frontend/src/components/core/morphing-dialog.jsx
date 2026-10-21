@@ -14,7 +14,7 @@ import { X as XIcon } from "lucide-react"
 
 const MorphingDialogContext = React.createContext(null)
 
-export function useMorphingDialog() {
+function useMorphingDialog() {
     const context = useContext(MorphingDialogContext)
     if (!context) {
         throw new Error(
@@ -24,7 +24,7 @@ export function useMorphingDialog() {
     return context
 }
 
-export function useClickOutside(ref, handler) {
+function useClickOutside(ref, handler) {
     useEffect(() => {
         const handleClickOutside = (event) => {
             if (!ref || !ref.current || ref.current.contains(event.target)) {
@@ -41,6 +41,12 @@ export function useClickOutside(ref, handler) {
             document.removeEventListener("touchstart", handleClickOutside)
         }
     }, [ref, handler])
+}
+
+// Assign a DOM node to a callback or object ref (used from ref callbacks, i.e. at commit time)
+function assignRef(ref, node) {
+    if (typeof ref === "function") ref(node)
+    else if (ref) ref.current = node
 }
 
 const defaultTransition = {
@@ -69,7 +75,10 @@ export function MorphingDialog({
     const triggerRef = useRef(null)
 
     const shouldReduceMotion = typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    const effectiveTransition = shouldReduceMotion ? { duration: 0.05 } : transition
+    const effectiveTransition = useMemo(
+        () => (shouldReduceMotion ? { duration: 0.05 } : transition),
+        [shouldReduceMotion, transition]
+    )
 
     const setIsOpen = useCallback(
         (value) => {
@@ -143,9 +152,8 @@ export function MorphingDialogTrigger({
     return (
         <motion.div
             ref={(node) => {
-                if (context?.triggerRef) context.triggerRef.current = node
-                if (typeof externalRef === "function") externalRef(node)
-                else if (externalRef) externalRef.current = node
+                assignRef(context?.triggerRef, node)
+                assignRef(externalRef, node)
             }}
             layoutId={uniqueId ? `dialog-${uniqueId}` : undefined}
             className={cn("relative cursor-pointer select-none", className)}
@@ -164,21 +172,15 @@ export function MorphingDialogTrigger({
     )
 }
 
-export function MorphingDialogContainer({ children, className, style, onExitComplete }) {
+export function MorphingDialogContainer({ children, onExitComplete }) {
     const { isOpen, uniqueId, setIsOpen, onClose } = useMorphingDialog()
-    const [mounted, setMounted] = useState(false)
-
-    useEffect(() => {
-        setMounted(true)
-        return () => setMounted(false)
-    }, [])
 
     const handleExitComplete = useCallback(() => {
         onExitComplete?.()
         onClose?.()
     }, [onExitComplete, onClose])
 
-    if (!mounted || typeof document === "undefined") return null
+    if (typeof document === "undefined") return null
 
     return createPortal(
         <AnimatePresence initial={false} mode="sync" onExitComplete={handleExitComplete}>
