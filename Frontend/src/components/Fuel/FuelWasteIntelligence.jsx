@@ -81,7 +81,7 @@ export default function FuelWasteIntelligence({
         return (
             <div role="alert" className="mb-5 rounded-lg border border-slate-200 bg-white p-6 text-center">
                 <AlertCircle className="mx-auto mb-2 h-5 w-5 text-rose-600" />
-                <h3 className="text-[13px] font-semibold text-slate-900">Fuel waste report unavailable</h3>
+                <h3 className="type-section-title text-slate-900">Fuel waste report unavailable</h3>
                 <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">{error}</p>
             </div>
         )
@@ -149,7 +149,7 @@ export default function FuelWasteIntelligence({
     return (
         <section className="mb-5 overflow-hidden rounded-lg border border-slate-200 bg-white">
             <div className="flex flex-col justify-between gap-3 border-b border-slate-200 px-4 py-3 md:flex-row md:items-center">
-                <h2 className="text-[13px] font-semibold text-slate-900">
+                <h2 className="type-section-title text-slate-900">
                     Fuel waste & anomalies <span className="font-normal tabular-nums text-slate-500">· {totalAnomalies} findings</span>
                 </h2>
 

@@ -213,7 +213,7 @@ export default function AnalyticsChart({
         <div className="flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex items-start justify-between gap-2 pb-2">
                 <div className="min-w-0">
-                    <h3 className="truncate text-[13px] font-semibold text-slate-900">{title}</h3>
+                    <h3 className="type-section-title truncate text-slate-900">{title}</h3>
                     {subtitle && <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>}
                 </div>
 

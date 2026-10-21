@@ -45,7 +45,7 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     return (
         <div className="flex flex-col rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex items-baseline justify-between gap-2">
-                <h3 className="text-[13px] font-semibold text-slate-900">Fleet efficiency</h3>
+                <h3 className="type-section-title text-slate-900">Fleet efficiency</h3>
                 <span className="text-xs text-slate-500">Weighted L/100 km · distance coverage</span>
             </div>
 

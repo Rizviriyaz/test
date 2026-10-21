@@ -404,7 +404,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
             <section aria-labelledby="fuel-recorded-heading">
                 <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                    <h2 id="fuel-recorded-heading" className="text-[13px] font-semibold text-slate-900">
+                    <h2 id="fuel-recorded-heading" className="type-section-title text-slate-900">
                         Recorded <span className="font-normal text-slate-500">· fuel statement invoices, net of refunds</span>
                     </h2>
                     {avgPrice !== null && (
@@ -418,7 +418,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
             <section aria-labelledby="fuel-estimated-heading">
                 <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                    <h2 id="fuel-estimated-heading" className="text-[13px] font-semibold text-slate-900">
+                    <h2 id="fuel-estimated-heading" className="type-section-title text-slate-900">
                         Estimated <span className="font-normal text-slate-500">· stationary engine time at {idleRate.toFixed(1)} L/h</span>
                     </h2>
                     {has(idleHours) && (

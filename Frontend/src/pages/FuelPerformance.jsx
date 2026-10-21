@@ -453,7 +453,7 @@ export default function FuelPerformance() {
             {/* ─── 5. VEHICLES NEEDING ATTENTION (OUTLIERS) ────────────── */}
             {attentionVehicles.length > 0 && (
                 <section className="mb-5" aria-labelledby="fuel-attention-heading">
-                    <h2 id="fuel-attention-heading" className="mb-2 text-[13px] font-semibold text-slate-900">
+                    <h2 id="fuel-attention-heading" className="mb-2 type-section-title text-slate-900">
                         Needs attention <span className="font-normal text-slate-500">· highest L/100 km in period</span>
                     </h2>
                     <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4">
@@ -487,7 +487,7 @@ export default function FuelPerformance() {
             {/* ─── 6. VEHICLE PERFORMANCE RANKINGS ─────────────────────── */}
             <section className="mb-5 overflow-hidden rounded-lg border border-slate-200 bg-white">
                 <div className="flex flex-col gap-2.5 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                    <h2 className="text-[13px] font-semibold text-slate-900">Vehicle rankings</h2>
+                    <h2 className="type-section-title text-slate-900">Vehicle rankings</h2>
 
                     <div className="flex flex-wrap items-center gap-2">
                         <SearchInput

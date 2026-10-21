@@ -84,7 +84,7 @@ export default function FuelTypeDonut() {
     return (
         <div className="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex items-baseline justify-between gap-2">
-                <h3 className="text-[13px] font-semibold text-slate-900">Fuel products</h3>
+                <h3 className="type-section-title text-slate-900">Fuel products</h3>
                 <span className="text-xs text-slate-500">
                     {chartData.length} {chartData.length === 1 ? "type" : "types"}
                 </span>

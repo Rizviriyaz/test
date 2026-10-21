@@ -584,7 +584,7 @@ export default function IdleAnalytics() {
                         {byGroup.length > 0 && (
                             <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                                 <div className="flex items-baseline justify-between gap-2 border-b border-slate-200 px-4 py-3">
-                                    <h2 className="text-[13px] font-semibold text-slate-900">Customer groups</h2>
+                                    <h2 className="type-section-title text-slate-900">Customer groups</h2>
                                     <p className="text-xs text-slate-500">Select a group to list its vehicles</p>
                                 </div>
                                 <div className="max-h-[320px] overflow-auto">
@@ -748,7 +748,7 @@ export default function IdleAnalytics() {
                         {/* ── Idle events table ── */}
                         <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                             <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 px-4 py-3">
-                                <h2 className="text-[13px] font-semibold text-slate-900">Idle events</h2>
+                                <h2 className="type-section-title text-slate-900">Idle events</h2>
                                 <p className="text-xs tabular-nums text-slate-500">
                                     <span className="font-medium text-slate-800">{filteredEvents.length}</span> events
                                 </p>
@@ -895,7 +895,7 @@ export default function IdleAnalytics() {
                         {byLocation.length > 0 && (
                             <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                                 <div className="border-b border-slate-200 px-4 py-3">
-                                    <h2 className="text-[13px] font-semibold text-slate-900">Location hotspots</h2>
+                                    <h2 className="type-section-title text-slate-900">Location hotspots</h2>
                                 </div>
                                 <ol className="divide-y divide-slate-100">
                                     {byLocation.map((loc, idx) => (

@@ -7,7 +7,8 @@
  * Surface canvas (page) < white panels with a hairline border; no shadow on panels.
  * Radius  4px badges · 6px controls (rounded-md) · 8px panels (rounded-lg) · 12px dialogs (rounded-xl).
  * Shadow  pop (menus, tooltips, hover-expanded nav) and dialog only.
- * Type    Inter; 18px page title · 13px section title · 12–13px body · 11px table headers.
+ * Type    Inter; page title 18px → 20px (sm+) · 13px page subtitle · 14px section / card title
+ *         · 12px section subtitle · 12–13px body · 11px table headers. Use the type-* utilities below.
  */
 @theme {
   --color-brand: #33758F;
@@ -26,6 +27,38 @@
   --font-outfit: "Outfit", ui-sans-serif, system-ui, sans-serif;
   --font-jakarta: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-space: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* ── Heading typography (size, weight, leading, tracking only; color stays in markup) ── */
+@utility type-page-title {
+  font-family: var(--font-jakarta);
+  font-size: 1.25rem;
+  line-height: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  @media (width >= 40rem) {
+    font-size: 1.5rem;
+    line-height: 2rem;
+    letter-spacing: -0.03em;
+  }
+}
+
+@utility type-page-subtitle {
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
+  font-weight: 400;
+  letter-spacing: -0.005em;
+  @media (width >= 40rem) {
+    font-size: 0.875rem;
+    line-height: 1.375rem;
+  }
+}
+
+@utility type-section-title {
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 /* ── RetroGrid Animation ──────────────────────────────────────────────── */

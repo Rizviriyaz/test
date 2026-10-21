@@ -19,11 +19,11 @@ export default function PageHeader({ title, subtitle, onRefresh, loading = false
             <div className="flex min-w-0 items-center gap-3">
                 <MobileNavButton />
                 <div className="min-w-0">
-                    <h1 className="truncate text-lg font-semibold tracking-tight text-slate-900">
+                    <h1 className="type-page-title font-jakarta truncate text-slate-900">
                         {title}
                     </h1>
                     {subtitle && (
-                        <p className="truncate text-[13px] text-slate-500">
+                        <p className="type-page-subtitle mt-1 truncate text-slate-500">
                             {subtitle}
                         </p>
                     )}

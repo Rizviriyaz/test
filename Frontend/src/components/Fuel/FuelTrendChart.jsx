@@ -111,7 +111,7 @@ export default function FuelTrendChart() {
         <section className="mb-5 rounded-lg border border-slate-200 bg-white p-4">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div className="min-w-0">
-                    <h2 className="text-[13px] font-semibold text-slate-900">Fuel purchased & Wialon distance</h2>
+                    <h2 className="type-section-title text-slate-900">Fuel purchased & Wialon distance</h2>
                     <p className="mt-0.5 text-xs text-slate-500">
                         Fuel and distance are recorded; L/100 km is derived (purchased ÷ distance), not measured
                     </p>
