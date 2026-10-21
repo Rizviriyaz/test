@@ -189,7 +189,7 @@ export function MorphingDialogContainer({ children, onExitComplete }) {
                     {/* Backdrop sits above Leaflet controls (1000) and captures all background clicks */}
                     <motion.div
                         key={`backdrop-${uniqueId}`}
-                        className="fixed inset-0 z-[9998] h-full w-full bg-slate-900/40 backdrop-blur-xs pointer-events-auto"
+                        className="fixed inset-0 z-[9998] h-full w-full bg-slate-900/40 pointer-events-auto"
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         exit={{ opacity: 0 }}
@@ -257,7 +257,7 @@ export function MorphingDialogContent({
             exit={{ opacity: 0, scale: 0.96 }}
             transition={transition}
             className={cn(
-                "pointer-events-auto relative flex flex-col w-full max-w-[480px] max-h-[85vh] overflow-hidden rounded-2xl bg-white border border-slate-200 shadow-2xl",
+                "pointer-events-auto relative flex flex-col w-full max-w-[480px] max-h-[85vh] overflow-hidden rounded-xl bg-white border border-slate-200 shadow-dialog",
                 className
             )}
             style={style}
@@ -384,7 +384,7 @@ export function MorphingDialogClose({
             aria-label="Close dialog"
             key={`dialog-close-${uniqueId}`}
             className={cn(
-                "rounded-full p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer shrink-0",
+                "rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40",
                 className
             )}
             initial="initial"

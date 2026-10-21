@@ -1,47 +1,24 @@
-import { CheckCircle2, AlertCircle, MinusCircle } from "lucide-react"
-
 /**
- * Standardized Vehicle Status Badge matching backend semantics exactly:
+ * Telemetry match status for a fuel vehicle, matching backend semantics exactly:
  * - matched: GPS tracking active with telemetry
  * - not_tracked: No Wialon unit associated
  * - no_distance_data: Wialon unit resolved but 0 distance/trips recorded
  * - ambiguous: Multiple Wialon units matched
+ * Rendered as marker + label so state never depends on color alone.
  */
+const STATUS = {
+    matched: { label: "Tracked", dot: "bg-status-moving", text: "text-slate-600" },
+    no_distance_data: { label: "No mileage telemetry", dot: "bg-status-idling", text: "text-amber-800" },
+    ambiguous: { label: "Ambiguous unit", dot: "bg-status-offline", text: "text-rose-700" },
+    not_tracked: { label: "Untracked", dot: "bg-slate-300", text: "text-slate-500" },
+}
+
 export default function VehicleStatusBadge({ status, className = "" }) {
-    const raw = String(status || "").toLowerCase().trim()
-
-    switch (raw) {
-        case "matched":
-            return (
-                <span className={`inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700 border border-emerald-200/70 shadow-2xs ${className}`}>
-                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
-                    <span>Tracked</span>
-                </span>
-            )
-
-        case "no_distance_data":
-            return (
-                <span className={`inline-flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-700 border border-amber-200/70 shadow-2xs ${className}`}>
-                    <AlertCircle className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                    <span>No Mileage Telemetry</span>
-                </span>
-            )
-
-        case "ambiguous":
-            return (
-                <span className={`inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2.5 py-0.5 text-xs font-semibold text-rose-700 border border-rose-200/70 shadow-2xs ${className}`}>
-                    <AlertCircle className="h-3.5 w-3.5 text-rose-600 shrink-0" />
-                    <span>Ambiguous Unit</span>
-                </span>
-            )
-
-        case "not_tracked":
-        default:
-            return (
-                <span className={`inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-600 border border-slate-200 shadow-2xs ${className}`}>
-                    <MinusCircle className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                    <span>Untracked</span>
-                </span>
-            )
-    }
+    const cfg = STATUS[String(status || "").toLowerCase().trim()] || STATUS.not_tracked
+    return (
+        <span className={`inline-flex items-center gap-1.5 whitespace-nowrap text-[11px] font-medium ${cfg.text} ${className}`}>
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${cfg.dot}`} aria-hidden="true" />
+            {cfg.label}
+        </span>
+    )
 }

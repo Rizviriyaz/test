@@ -1,19 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import { Link } from "react-router-dom"
-import {
-    Truck,
-    MapPin,
-    Clock,
-    Activity,
-    Route,
-    Gauge,
-    Loader2,
-    Radio,
-    Battery,
-    Key,
-    User,
-    ArrowUpRight,
-} from "lucide-react"
+import { Loader2, ArrowUpRight } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
@@ -31,6 +18,27 @@ import {
 } from "@/components/core/morphing-dialog"
 
 import { ScrollArea } from "@/components/website/scroll-area"
+
+function Section({ title, children }) {
+    return (
+        <section className="px-5 py-3.5">
+            <h3 className="mb-1.5 text-xs font-semibold text-slate-900">{title}</h3>
+            <dl className="divide-y divide-slate-100">{children}</dl>
+        </section>
+    )
+}
+
+function Row({ label, children, hint }) {
+    return (
+        <div className="flex items-baseline justify-between gap-4 py-1.5 text-xs">
+            <dt className="shrink-0 text-slate-500">{label}</dt>
+            <dd className="min-w-0 text-right font-medium text-slate-900">
+                {children}
+                {hint && <span className="block text-[11px] font-normal text-amber-700">{hint}</span>}
+            </dd>
+        </div>
+    )
+}
 
 export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = null }) {
     // Keep activeVehicle cached so the exit animation runs smoothly even when vehicle prop transitions to null
@@ -145,6 +153,16 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
     const todayDistance = currentVehicle.today_mileage ?? tripsDistance
     const distanceUnknownTrips = currentVehicle.today_mileage == null && tripsDistanceSum ? tripsDistanceSum.unknown : 0
 
+    const spinner = <Loader2 className="inline h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Loading" />
+    const isIdling = statusStr === "IDLING"
+
+    const pageLinks = [
+        { label: "Live Tracking", to: unitId ? `/tracking?vehicleId=${encodeURIComponent(unitId)}` : "/tracking" },
+        { label: "Vehicle Health", to: "/vehicle-health" },
+        { label: "Trips & Activity", to: "/trips" },
+        { label: "Idle Reports", to: "/idle-analytics" },
+    ]
+
     return (
         <MorphingDialog
             open={isOpen}
@@ -159,289 +177,143 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
             <MorphingDialogContainer onExitComplete={handleExitComplete}>
                 <MorphingDialogContent
                     layoutId={morphId}
-                    className="relative flex flex-col w-full max-w-[480px] max-h-[85vh] rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden"
+                    className="relative flex max-h-[85vh] w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog"
                 >
-                    {/* ─── HEADER ─── */}
-                    <div className="flex items-center justify-between border-b border-slate-200/90 px-5 py-4 bg-white shrink-0">
-                        <div className="flex items-center gap-3 min-w-0">
-                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#33758F]/10 text-[#33758F]">
-                                <Truck className="h-5 w-5" />
-                            </div>
-                            <div className="min-w-0">
-                                <MorphingDialogTitle className="text-base font-bold text-slate-900 truncate">
-                                    {vehicleName}
-                                </MorphingDialogTitle>
-                                <MorphingDialogSubtitle className="flex items-center gap-2 mt-0.5">
-                                    <FleetStatusBadge status={statusStr} size="xs" />
-                                    <span className="text-[11px] font-semibold text-slate-500 truncate">
-                                        {vehicleGroup}
-                                    </span>
-                                </MorphingDialogSubtitle>
-                            </div>
+                    {/* Header */}
+                    <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                        <div className="min-w-0">
+                            <MorphingDialogTitle className="truncate text-base font-semibold text-slate-900">
+                                {vehicleName}
+                            </MorphingDialogTitle>
+                            <MorphingDialogSubtitle className="mt-1 flex items-center gap-2 text-xs">
+                                <FleetStatusBadge status={statusStr} size="xs" />
+                                <span className="text-slate-300" aria-hidden="true">·</span>
+                                <span className="truncate text-slate-500">{vehicleGroup}</span>
+                                <span className="text-slate-300" aria-hidden="true">·</span>
+                                <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
+                            </MorphingDialogSubtitle>
                         </div>
-
                         <MorphingDialogClose onClick={handleClose} />
                     </div>
 
-                    {/* ─── SCROLLABLE CONTENT BODY ─── */}
-                    <ScrollArea className="flex-1 overflow-y-auto px-5 py-4 space-y-3.5 bg-slate-50/40">
-                        {/* 1. VEHICLE IDENTITY & CURRENT STATUS */}
-                        <section className="rounded-xl border border-slate-200/90 bg-white p-3.5 space-y-2.5 shadow-2xs">
-                            <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                <Activity className="h-3.5 w-3.5 text-[#33758F]" />
-                                Vehicle Status
-                            </h3>
+                    <ScrollArea className="flex-1 divide-y divide-slate-200 overflow-y-auto">
+                        <Section title="Status">
+                            <Row label="Unit name"><span className="block truncate">{vehicleName}</span></Row>
+                            {hardwareType && <Row label="Hardware device">{hardwareType}</Row>}
+                            <Row label="Last update">
+                                <span className="tabular-nums">{formatUAETime(currentVehicle.last_update || currentVehicle.last_message_timestamp || currentVehicle.timestamp)}</span>
+                            </Row>
+                            {ignitionState !== null && (
+                                <Row label="Ignition">
+                                    <span className={ignitionState === "ON" ? "text-slate-900" : "text-slate-500"}>{ignitionState === "ON" ? "On" : "Off"}</span>
+                                </Row>
+                            )}
+                            {batteryVoltage !== null && (
+                                <Row label="Battery"><span className="tabular-nums">{Number(batteryVoltage).toFixed(2)} V</span></Row>
+                            )}
+                            {cleanDriverId !== null && <Row label="Assigned driver">{cleanDriverId}</Row>}
+                        </Section>
 
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Unit Name</span>
-                                    <span className="font-semibold text-slate-900 truncate block">{vehicleName}</span>
-                                </div>
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Current Speed</span>
-                                    <span className="text-sm font-black text-slate-900">
-                                        {speed} <span className="text-[10px] font-semibold text-slate-400">km/h</span>
-                                    </span>
-                                </div>
-                                {hardwareType && (
-                                    <div className="col-span-2 rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                        <span className="text-[10px] font-semibold text-slate-400 uppercase block">Hardware Device</span>
-                                        <span className="font-semibold text-slate-800">{hardwareType}</span>
-                                    </div>
-                                )}
-                                <div className="col-span-2 rounded-lg bg-slate-50/80 p-2.5 border border-slate-100 flex items-center justify-between">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase">Last Update</span>
-                                    <span className="font-semibold text-slate-800 text-[11px]">
-                                        {formatUAETime(currentVehicle.last_update || currentVehicle.last_message_timestamp || currentVehicle.timestamp)}
-                                    </span>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* 2. GPS TELEMETRY */}
-                        <section className="rounded-xl border border-slate-200/90 bg-white p-3.5 space-y-2.5 shadow-2xs">
-                            <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                <MapPin className="h-3.5 w-3.5 text-[#33758F]" />
-                                GPS Telemetry
-                            </h3>
-
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Coordinates</span>
-                                    <span className="font-mono font-bold text-slate-800 text-[11px]">
-                                        {lat !== null && lon !== null ? `${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}` : "No GPS fix"}
-                                    </span>
-                                </div>
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Satellites</span>
-                                    <span className="font-bold text-slate-800 flex items-center gap-1">
-                                        <Radio className="h-3 w-3 text-[#33758F]" />
-                                        {satellites !== null ? `${satellites} locked` : "GPS active"}
-                                    </span>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* 3. VEHICLE SENSORS */}
-                        {(batteryVoltage !== null || ignitionState !== null || cleanDriverId !== null) && (
-                            <section className="rounded-xl border border-slate-200/90 bg-white p-3.5 space-y-2.5 shadow-2xs">
-                                <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                    <Gauge className="h-3.5 w-3.5 text-[#33758F]" />
-                                    Vehicle Sensors
-                                </h3>
-
-                                <div className="grid grid-cols-2 gap-2 text-xs">
-                                    {batteryVoltage !== null && (
-                                        <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                            <span className="text-[10px] font-semibold text-slate-400 uppercase block flex items-center gap-1">
-                                                <Battery className="h-3 w-3 text-emerald-600" /> Battery
-                                            </span>
-                                            <span className="font-bold text-slate-900 text-sm">
-                                                {Number(batteryVoltage).toFixed(2)} <span className="text-[10px] font-normal text-slate-400">V</span>
-                                            </span>
-                                        </div>
-                                    )}
-                                    {ignitionState !== null && (
-                                        <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                            <span className="text-[10px] font-semibold text-slate-400 uppercase block flex items-center gap-1">
-                                                <Key className="h-3 w-3 text-amber-600" /> Ignition
-                                            </span>
-                                            <span className={`font-bold text-sm ${ignitionState === "ON" ? "text-emerald-600" : "text-slate-600"}`}>
-                                                {ignitionState}
-                                            </span>
-                                        </div>
-                                    )}
-                                    {cleanDriverId !== null && (
-                                        <div className="col-span-2 rounded-lg bg-slate-50/80 p-2.5 border border-slate-100 flex items-center justify-between">
-                                            <span className="text-[10px] font-semibold text-slate-400 uppercase flex items-center gap-1">
-                                                <User className="h-3 w-3 text-slate-400" /> Assigned Driver
-                                            </span>
-                                            <span className="font-semibold text-slate-800 text-xs">{cleanDriverId}</span>
-                                        </div>
-                                    )}
-                                </div>
-                            </section>
-                        )}
-
-                        {/* 4. TODAY'S ACTIVITY */}
-                        <section className="rounded-xl border border-slate-200/90 bg-white p-3.5 space-y-2.5 shadow-2xs">
-                            <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                <Route className="h-3.5 w-3.5 text-[#33758F]" />
-                                Today's Activity
-                            </h3>
-
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Distance Today</span>
-                                    <span className="font-bold text-slate-900 text-sm">
-                                        {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—")}
-                                    </span>
-                                    {!loadingTrips && distanceUnknownTrips > 0 && (
-                                        <span className="block text-[10px] font-medium text-amber-700" title="Wialon could not read these trips' distance; they are left out of the total">
-                                            Partial: {distanceUnknownTrips} trip(s) unknown
-                                        </span>
-                                    )}
-                                </div>
-                                <div className="rounded-lg bg-slate-50/80 p-2.5 border border-slate-100">
-                                    <span className="text-[10px] font-semibold text-slate-400 uppercase block">Trips Today</span>
-                                    <span className="font-bold text-slate-900 text-sm">
-                                        {loadingTrips ? <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" /> : (tripCount !== null ? tripCount : "—")}
-                                    </span>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* 5. IDLE STATUS & DIAGNOSTICS */}
-                        <section className="rounded-xl border border-slate-200/90 bg-white p-3.5 space-y-2.5 shadow-2xs">
-                            <div className="flex items-center justify-between">
-                                <h3 className="text-[11px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
-                                    <Clock className="h-3.5 w-3.5 text-amber-600" />
-                                    Idle Status & Diagnostics
-                                </h3>
-                                <span className="text-[10px] font-semibold text-slate-400">
-                                    UAE Timezone
+                        <Section title="GPS">
+                            <Row label="Coordinates">
+                                <span className="font-mono text-[11px]">
+                                    {lat !== null && lon !== null ? `${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}` : "No GPS fix"}
                                 </span>
-                            </div>
+                            </Row>
+                            <Row label="Satellites">
+                                <span className="tabular-nums">{satellites !== null ? `${satellites} locked` : "GPS active"}</span>
+                            </Row>
+                        </Section>
 
-                            <div className="grid grid-cols-2 gap-2 text-xs">
-                                <div className="rounded-lg bg-amber-50/60 p-2.5 border border-amber-200/70">
-                                    <span className="text-[10px] font-semibold text-amber-800 uppercase block">Idle Start Time</span>
-                                    <span className="font-bold text-amber-950 text-xs">
-                                        {statusStr === "IDLING" && currentVehicle.idle_start
-                                            ? `Idling since ${formatUAETime(currentVehicle.idle_start)}`
-                                            : (statusStr === "IDLING" ? "Start time unavailable" : "Not currently idling")}
-                                    </span>
-                                </div>
-                                <div className="rounded-lg bg-amber-50/60 p-2.5 border border-amber-200/70">
-                                    <span className="text-[10px] font-semibold text-amber-800 uppercase block">Elapsed Idle Duration</span>
-                                    <div className="font-bold text-amber-950 text-xs flex items-center gap-1.5">
-                                        {statusStr === "IDLING" ? (
-                                            <>
-                                                <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                                <LiveIdleTimer
-                                                    startTime={currentVehicle.idle_start}
-                                                    baseDuration={currentVehicle.idle_duration}
-                                                    status={statusStr}
-                                                />
-                                            </>
-                                        ) : (
-                                            <span>
-                                                {currentVehicle.idle_duration
-                                                    ? formatElapsedDuration(currentVehicle.idle_duration)
-                                                    : (currentVehicle.total_idle_seconds ? formatElapsedDuration(currentVehicle.total_idle_seconds) : "0s")}
-                                            </span>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
+                        <Section title="Today">
+                            <Row
+                                label="Distance"
+                                hint={!loadingTrips && distanceUnknownTrips > 0 ? `Partial: ${distanceUnknownTrips} trip(s) unknown` : null}
+                            >
+                                <span className="tabular-nums">
+                                    {loadingTrips ? spinner : (todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—")}
+                                </span>
+                            </Row>
+                            <Row label="Trips">
+                                <span className="tabular-nums">{loadingTrips ? spinner : (tripCount !== null ? tripCount : "—")}</span>
+                            </Row>
+                        </Section>
 
-                            {/* Event History for Selected Vehicle */}
-                            <div className="pt-2 border-t border-slate-100">
-                                <div className="flex items-center justify-between mb-2">
-                                    <span className="text-[11px] font-bold text-slate-700">
-                                        Idle Events ({vehicleIdleEvents ? vehicleIdleEvents.length : 0})
-                                    </span>
-                                    {loadingIdleEvents && (
-                                        <span className="flex items-center gap-1 text-[10px] text-slate-400">
-                                            <Loader2 className="h-3 w-3 animate-spin text-[#33758F]" /> Loading…
+                        <section className="px-5 py-3.5">
+                            <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                                <h3 className="text-xs font-semibold text-slate-900">Idling</h3>
+                                <span className="text-[11px] text-slate-400">UAE time</span>
+                            </div>
+                            <dl className="divide-y divide-slate-100">
+                                <Row label="Started">
+                                    {isIdling && currentVehicle.idle_start
+                                        ? <span className="tabular-nums">{formatUAETime(currentVehicle.idle_start)}</span>
+                                        : (isIdling ? "Start time unavailable" : <span className="font-normal text-slate-500">Not currently idling</span>)}
+                                </Row>
+                                <Row label={isIdling ? "Elapsed" : "Last idle duration"}>
+                                    {isIdling ? (
+                                        <span className="inline-flex items-center gap-1.5 text-amber-800">
+                                            <span className="h-1.5 w-1.5 rounded-full bg-status-idling" aria-hidden="true" />
+                                            <LiveIdleTimer
+                                                startTime={currentVehicle.idle_start}
+                                                baseDuration={currentVehicle.idle_duration}
+                                                status={statusStr}
+                                            />
+                                        </span>
+                                    ) : (
+                                        <span className="tabular-nums">
+                                            {currentVehicle.idle_duration
+                                                ? formatElapsedDuration(currentVehicle.idle_duration)
+                                                : (currentVehicle.total_idle_seconds ? formatElapsedDuration(currentVehicle.total_idle_seconds) : "0s")}
                                         </span>
                                     )}
+                                </Row>
+                            </dl>
+
+                            <div className="mt-3">
+                                <div className="mb-1 flex items-center justify-between">
+                                    <span className="text-[11px] font-medium text-slate-600">
+                                        Idle events today ({vehicleIdleEvents ? vehicleIdleEvents.length : 0})
+                                    </span>
+                                    {loadingIdleEvents && spinner}
                                 </div>
 
-                                {loadingIdleEvents ? (
-                                    <div className="py-3 text-center">
-                                        <Loader2 className="mx-auto h-4 w-4 animate-spin text-slate-400" />
-                                    </div>
-                                ) : !vehicleIdleEvents || vehicleIdleEvents.length === 0 ? (
-                                    <div className="rounded-lg bg-slate-50/80 p-2.5 text-center text-xs text-slate-500">
+                                {loadingIdleEvents ? null : !vehicleIdleEvents || vehicleIdleEvents.length === 0 ? (
+                                    <p className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500">
                                         No idle events recorded for this vehicle today.
-                                    </div>
+                                    </p>
                                 ) : (
-                                    <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                                        {vehicleIdleEvents.map((ev, idx) => {
-                                            const dur = Number(ev.duration || 0)
-                                            return (
-                                                <div
-                                                    key={ev.id || idx}
-                                                    className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/60 p-2 text-xs"
-                                                >
-                                                    <div className="min-w-0 pr-2">
-                                                        <p className="font-semibold text-slate-800 text-[11px]">
-                                                            {formatUAETime(ev.start_time)} → {ev.end_time ? formatUAETime(ev.end_time) : "Ongoing"}
-                                                        </p>
-                                                        {ev.address && (
-                                                            <p className="text-[10px] text-slate-400 truncate">
-                                                                {ev.address}
-                                                            </p>
-                                                        )}
-                                                    </div>
-                                                    <span className="font-mono font-bold text-amber-700 text-[10px] shrink-0 bg-amber-100/60 px-2 py-0.5 rounded">
-                                                        {formatElapsedDuration(dur)}
-                                                    </span>
+                                    <ul className="max-h-40 divide-y divide-slate-100 overflow-y-auto rounded-md border border-slate-200">
+                                        {vehicleIdleEvents.map((ev, idx) => (
+                                            <li key={ev.id || idx} className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+                                                <div className="min-w-0">
+                                                    <p className="tabular-nums text-slate-800">
+                                                        {formatUAETime(ev.start_time)} → {ev.end_time ? formatUAETime(ev.end_time) : "ongoing"}
+                                                    </p>
+                                                    {ev.address && <p className="truncate text-[11px] text-slate-500">{ev.address}</p>}
                                                 </div>
-                                            )
-                                        })}
-                                    </div>
+                                                <span className="shrink-0 font-semibold tabular-nums text-amber-800">
+                                                    {formatElapsedDuration(Number(ev.duration || 0))}
+                                                </span>
+                                            </li>
+                                        ))}
+                                    </ul>
                                 )}
                             </div>
                         </section>
 
-                        {/* 6. DEDICATED PAGE NAVIGATION ACTIONS */}
-                        <section className="space-y-2 pt-1 border-t border-slate-100">
-                            <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                Navigate to Detailed Pages
-                            </h3>
-                            <div className="grid grid-cols-2 gap-2">
+                        <nav aria-label="Open in" className="grid grid-cols-2 gap-px bg-slate-200">
+                            {pageLinks.map(link => (
                                 <Link
-                                    to={unitId ? `/tracking?vehicleId=${encodeURIComponent(unitId)}` : "/tracking"}
-                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 hover:border-[#33758F] hover:text-[#33758F] transition-colors shadow-2xs"
+                                    key={link.label}
+                                    to={link.to}
+                                    className="flex items-center justify-between bg-white px-5 py-2.5 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 hover:text-brand"
                                 >
-                                    <span>Live Tracking</span>
+                                    {link.label}
                                     <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
                                 </Link>
-                                <Link
-                                    to="/vehicle-health"
-                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 hover:border-[#33758F] hover:text-[#33758F] transition-colors shadow-2xs"
-                                >
-                                    <span>Vehicle Health</span>
-                                    <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
-                                </Link>
-                                <Link
-                                    to="/trips"
-                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 hover:border-[#33758F] hover:text-[#33758F] transition-colors shadow-2xs"
-                                >
-                                    <span>Trips & Activity</span>
-                                    <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
-                                </Link>
-                                <Link
-                                    to="/idle-analytics"
-                                    className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-800 hover:border-[#33758F] hover:text-[#33758F] transition-colors shadow-2xs"
-                                >
-                                    <span>Idle Reports</span>
-                                    <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
-                                </Link>
-                            </div>
-                        </section>
+                            ))}
+                        </nav>
                     </ScrollArea>
                 </MorphingDialogContent>
             </MorphingDialogContainer>

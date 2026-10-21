@@ -1,11 +1,10 @@
 /**
- * Standard content card with a title row (icon, title, optional subtitle and actions).
- * `flush` removes body padding and separates the header with a border (for tables and lists).
+ * Standard content panel with a title row (title, optional subtitle and actions).
+ * `flush` removes body padding and separates the header with a hairline (for tables and lists).
+ * `icon` / `iconClassName` are accepted for API compatibility but not rendered: titles carry meaning.
  */
 export default function SectionCard({
     title,
-    icon: Icon,
-    iconClassName = "text-[#33758F]",
     subtitle,
     actions,
     children,
@@ -16,14 +15,11 @@ export default function SectionCard({
     const hasHeader = Boolean(title || actions)
 
     return (
-        <section className={`rounded-xl border border-slate-200 bg-white shadow-xs ${flush ? "overflow-hidden" : "p-4 sm:p-5"} ${className}`}>
+        <section className={`min-w-0 rounded-lg border border-slate-200 bg-white ${flush ? "overflow-hidden" : "p-4"} ${className}`}>
             {hasHeader && (
-                <div className={`flex flex-wrap items-center justify-between gap-2 ${flush ? "border-b border-slate-200 px-4 py-3 sm:px-5" : "mb-4"}`}>
+                <div className={`flex flex-wrap items-start justify-between gap-x-3 gap-y-2 ${flush ? "border-b border-slate-200 px-4 py-3" : "mb-3"}`}>
                     <div className="min-w-0">
-                        <h2 className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-                            {Icon && <Icon className={`h-4 w-4 shrink-0 ${iconClassName}`} />}
-                            <span className="truncate">{title}</span>
-                        </h2>
+                        {title && <h2 className="truncate text-[13px] font-semibold text-slate-900">{title}</h2>}
                         {subtitle && <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>}
                     </div>
                     {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}

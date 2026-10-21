@@ -13,8 +13,7 @@ function getIdleMarkerIcon() {
         className: "",
         html: `
             <div style="position: relative; width: ${size}px; height: ${size}px; cursor: pointer;">
-                <div style="position: absolute; inset: -6px; border: 2px solid #F97316; border-radius: 9999px; opacity: 0.4; animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>
-                <div style="position: relative; width: ${size}px; height: ${size}px; background: #F97316; border: 3px solid white; border-radius: 9999px; box-sizing: border-box; box-shadow: 0 4px 10px rgba(249,115,22,0.4); display: flex; align-items: center; justify-content: center;">
+                <div style="position: relative; width: ${size}px; height: ${size}px; background: #D97706; border: 3px solid white; border-radius: 9999px; box-sizing: border-box; box-shadow: 0 1px 3px rgba(15,23,42,0.35); display: flex; align-items: center; justify-content: center;">
                     <div style="width: 6px; height: 6px; background: white; border-radius: 9999px;"></div>
                 </div>
             </div>
@@ -65,24 +64,21 @@ export default function IdleMapModal({ event, onClose }) {
 
     return createPortal(
         <div
-            className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs animate-in fade-in duration-200"
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 p-4 animate-in fade-in duration-200"
             onClick={onClose}
         >
             <div
-                className="relative flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+                className="relative flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog"
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="idle-modal-title"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Modal Header */}
-                <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4 bg-white">
+                <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4 bg-white">
                     <div className="flex items-center gap-3">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange-50 text-orange-600 border border-orange-100 shadow-2xs">
-                            <MapPin className="h-5 w-5" />
-                        </div>
                         <div>
-                            <h3 id="idle-modal-title" className="text-base font-bold text-slate-900 leading-tight">
+                            <h3 id="idle-modal-title" className="text-[15px] font-semibold text-slate-900 leading-tight">
                                 {event.vehicle_name || event.label || "Idle Event Details"}
                             </h3>
                             <p className="text-xs text-slate-500 mt-0.5">
@@ -119,11 +115,11 @@ export default function IdleMapModal({ event, onClose }) {
                             <Marker position={mapPosition} icon={getIdleMarkerIcon()}>
                                 <Popup>
                                     <div className="text-xs p-1">
-                                        <p className="font-bold text-slate-900">
+                                        <p className="font-semibold text-slate-900">
                                             {event.vehicle_name || event.label || "Idle Event"}
                                         </p>
                                         {event.duration && (
-                                            <p className="text-orange-600 font-semibold mt-0.5">
+                                            <p className="mt-0.5 font-semibold text-amber-800">
                                                 Duration: {formatDuration(event.duration)}
                                             </p>
                                         )}
@@ -154,12 +150,12 @@ export default function IdleMapModal({ event, onClose }) {
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                         {/* Vehicle Unit Name */}
                         {event.vehicle_name && (
-                            <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                            <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                     <Truck className="h-3.5 w-3.5 text-slate-500" />
                                     <span>Vehicle</span>
                                 </div>
-                                <p className="mt-1 text-sm font-bold text-slate-900 truncate">
+                                <p className="mt-1 text-sm font-semibold text-slate-900 truncate">
                                     {event.vehicle_name}
                                 </p>
                             </div>
@@ -167,44 +163,44 @@ export default function IdleMapModal({ event, onClose }) {
 
                         {/* Idle Duration */}
                         {event.duration !== undefined && (
-                            <div className="rounded-xl border border-orange-200/80 bg-orange-50/40 p-3 shadow-2xs">
-                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-orange-600 uppercase tracking-wider">
+                            <div className="rounded-md border border-slate-200 p-3">
+                                <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-500">
                                     <Clock3 className="h-3.5 w-3.5" />
                                     <span>Idle Duration</span>
                                 </div>
-                                <p className="mt-1 text-sm font-bold text-orange-950">
+                                <p className="mt-1 text-sm font-semibold tabular-nums text-amber-800">
                                     {formatDuration(event.duration || event.total_idle_seconds)}
                                 </p>
                             </div>
                         )}
 
                         {/* Event Date (UAE Time) */}
-                        <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                        <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                 <Calendar className="h-3.5 w-3.5 text-slate-500" />
                                 <span>Event Date</span>
                             </div>
-                            <p className="mt-1 text-sm font-bold text-slate-900">
+                            <p className="mt-1 text-sm font-semibold text-slate-900">
                                 {event.start_time ? formatUAEDate(event.start_time) : "—"}
                             </p>
                         </div>
 
                         {/* Customer Group */}
                         {event.group_name ? (
-                            <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                            <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                     <Users className="h-3.5 w-3.5 text-slate-500" />
                                     <span>Group</span>
                                 </div>
-                                <p className="mt-1 text-sm font-bold text-slate-900 truncate">
+                                <p className="mt-1 text-sm font-semibold text-slate-900 truncate">
                                     {event.group_name}
                                 </p>
                             </div>
                         ) : null}
 
                         {/* Start Time (UAE Time) */}
-                        <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                        <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                 <span>Start Time (UAE)</span>
                             </div>
                             <p className="mt-1 text-sm font-semibold text-slate-800">
@@ -213,8 +209,8 @@ export default function IdleMapModal({ event, onClose }) {
                         </div>
 
                         {/* End Time (UAE Time) */}
-                        <div className="rounded-xl border border-slate-200/80 bg-white p-3 shadow-2xs">
-                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                        <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                 <span>End Time (UAE)</span>
                             </div>
                             <p className="mt-1 text-sm font-semibold text-slate-800">
@@ -224,10 +220,10 @@ export default function IdleMapModal({ event, onClose }) {
                     </div>
 
                     {/* Address / Location Row */}
-                    <div className="rounded-xl border border-slate-200/80 bg-white p-3.5 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="rounded-lg border border-slate-200/80 bg-white p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                         <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                                <MapPin className="h-3.5 w-3.5 text-[#33758F]" />
+                            <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+                                <MapPin className="h-3.5 w-3.5 text-brand" />
                                 <span>Location / Address</span>
                             </div>
                             <p className="mt-1 text-xs font-medium text-slate-800 leading-snug break-words">
@@ -240,7 +236,7 @@ export default function IdleMapModal({ event, onClose }) {
                                 href={googleMapsUrl}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[#33758F] px-3.5 py-1.5 text-xs font-semibold text-white shadow-2xs transition hover:bg-[#285d73] shrink-0"
+                                className="inline-flex items-center justify-center gap-1.5 rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[#285d73] shrink-0"
                             >
                                 <span>Google Maps</span>
                                 <ArrowUpRight className="h-3.5 w-3.5" />

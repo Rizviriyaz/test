@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
-    Navigation,
     Truck,
     User,
     ChevronRight,
@@ -239,82 +238,66 @@ function Tracking() {
         }, { replace: true })
     }
 
+    const statusTabs = [
+        { key: "ALL", label: "All", count: counts.ALL, dot: null },
+        { key: "MOVING", label: "Moving", count: counts.MOVING, dot: "bg-status-moving" },
+        { key: "IDLING", label: "Idling", count: counts.IDLING, dot: "bg-status-idling" },
+        { key: "STOPPED", label: "Stopped", count: counts.STOPPED, dot: "bg-status-stopped" },
+        { key: "OFFLINE", label: "Offline", count: counts.OFFLINE, dot: "bg-status-offline" },
+    ]
+
+    const viewToggleBtn = (active) =>
+        `inline-flex h-full items-center gap-1.5 rounded px-2.5 font-medium transition-colors cursor-pointer ${
+            active ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]" : "text-slate-600 hover:text-slate-900"
+        }`
+
     return (
         <SidebarProvider>
-            <div className="flex h-dvh overflow-hidden bg-white font-sans text-slate-900 antialiased">
+            <div className="flex h-dvh overflow-hidden bg-canvas font-sans text-slate-900 antialiased">
                 <Sidebar />
 
-                <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-white">
-                    {/* Header Bar */}
+                <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
                     <div className="shrink-0 border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
                         <PageHeader
                             title="Live Tracking"
                             subtitle="Real-time vehicle location and status"
-                            icon={Navigation}
                             onRefresh={() => loadVehicles(true)}
                             loading={refreshing}
                             lastUpdated={lastSyncTime}
                             className="mb-0 pb-0 border-b-0"
                         >
-                            {/* Mobile View Toggle */}
-                            <div className="flex h-8 lg:hidden items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs">
-                                <button
-                                    type="button"
-                                    onClick={() => setMobileTab("map")}
-                                    aria-pressed={mobileTab === "map"}
-                                    className={`inline-flex h-full items-center gap-1.5 rounded-md px-3 font-semibold transition ${
-                                        mobileTab === "map"
-                                            ? "bg-[#33758F] text-white shadow-2xs"
-                                            : "text-slate-600 hover:text-slate-900"
-                                    }`}
-                                >
+                            {/* Mobile view toggle */}
+                            <div className="flex h-8 items-center rounded-md bg-slate-100 p-0.5 text-xs lg:hidden">
+                                <button type="button" onClick={() => setMobileTab("map")} aria-pressed={mobileTab === "map"} className={viewToggleBtn(mobileTab === "map")}>
                                     <Map className="h-3.5 w-3.5" />
-                                    <span>Map</span>
+                                    Map
                                 </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setMobileTab("list")}
-                                    aria-pressed={mobileTab === "list"}
-                                    className={`inline-flex h-full items-center gap-1.5 rounded-md px-3 font-semibold transition ${
-                                        mobileTab === "list"
-                                            ? "bg-[#33758F] text-white shadow-2xs"
-                                            : "text-slate-600 hover:text-slate-900"
-                                    }`}
-                                >
+                                <button type="button" onClick={() => setMobileTab("list")} aria-pressed={mobileTab === "list"} className={viewToggleBtn(mobileTab === "list")}>
                                     <List className="h-3.5 w-3.5" />
-                                    <span>List ({filteredVehicles.length})</span>
+                                    List ({filteredVehicles.length})
                                 </button>
                             </div>
                         </PageHeader>
                     </div>
 
-                    {/* Main Split-Screen Workspace */}
                     <main className="flex min-h-0 flex-1 overflow-hidden">
-                        {/* ─── LEFT / SIDE PANEL: SEARCH, FILTERS & VEHICLE LIST ──────────── */}
+                        {/* ─── VEHICLE LIST ─────────────────────────────────────────── */}
                         <aside
-                            className={`w-full lg:w-[400px] xl:w-[440px] shrink-0 border-r border-slate-200 bg-white flex flex-col h-full overflow-hidden ${
+                            className={`h-full w-full shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white lg:w-[380px] xl:w-[420px] ${
                                 mobileTab === "list" ? "flex" : "hidden lg:flex"
                             }`}
                         >
-                            {/* Controls: Search & Filter Tabs */}
-                            <div className="p-3.5 border-b border-slate-200/90 bg-white space-y-2.5 shrink-0">
+                            <div className="shrink-0 space-y-2.5 border-b border-slate-200 p-3">
                                 <SearchInput
                                     value={searchTerm}
                                     onChange={setSearchTerm}
                                     onClear={() => setSearchTerm("")}
-                                    placeholder="Search by name, ID, or fleet group…"
+                                    placeholder="Search plate, name, ID or group…"
                                     className="w-full"
                                 />
 
-                                {/* Filter Buttons */}
-                                <div className="flex flex-wrap gap-1.5">
-                                    {[
-                                        { key: "ALL", label: "All", count: counts.ALL, dot: null },
-                                        { key: "MOVING", label: "Moving", count: counts.MOVING, dot: "bg-emerald-500" },
-                                        { key: "IDLING", label: "Idling", count: counts.IDLING, dot: "bg-amber-500" },
-                                        { key: "STOPPED", label: "Stopped", count: counts.STOPPED, dot: "bg-slate-400" },
-                                        { key: "OFFLINE", label: "Offline", count: counts.OFFLINE, dot: "bg-rose-500" },
-                                    ].map(item => {
+                                <div role="group" aria-label="Filter by status" className="grid grid-cols-5 gap-0.5 rounded-md bg-slate-100 p-0.5">
+                                    {statusTabs.map(item => {
                                         const isActive = statusFilter === item.key
                                         return (
                                             <button
@@ -322,39 +305,30 @@ function Tracking() {
                                                 type="button"
                                                 onClick={() => handleFilterChange(item.key)}
                                                 aria-pressed={isActive}
-                                                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition cursor-pointer ${
-                                                    isActive
-                                                        ? "bg-[#33758F] text-white shadow-xs"
-                                                        : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:border-slate-300"
+                                                title={`${item.label}: ${item.count}`}
+                                                className={`flex min-w-0 flex-col items-center rounded px-1 py-1 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                                                    isActive ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]" : "text-slate-500 hover:text-slate-900"
                                                 }`}
                                             >
-                                                {item.dot && (
-                                                    <span className={`h-1.5 w-1.5 rounded-full ${item.dot}`} />
-                                                )}
-                                                <span>{item.label}</span>
-                                                <span
-                                                    className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${
-                                                        isActive
-                                                            ? "bg-white/20 text-white"
-                                                            : "bg-slate-100 text-slate-600"
-                                                    }`}
-                                                >
-                                                    {item.count}
+                                                <span className="flex items-center gap-1 text-[11px] font-medium">
+                                                    {item.dot && <span className={`h-1.5 w-1.5 rounded-full ${item.dot}`} aria-hidden="true" />}
+                                                    <span className="truncate">{item.label}</span>
                                                 </span>
+                                                <span className="text-[13px] font-semibold tabular-nums">{item.count}</span>
                                             </button>
                                         )
                                     })}
                                 </div>
 
-                                <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
-                                    <span>
-                                        Showing <strong className="text-slate-800">{filteredVehicles.length}</strong> of {vehicles.length} units
+                                <div className="flex items-center justify-between text-xs text-slate-500">
+                                    <span className="tabular-nums">
+                                        <span className="font-medium text-slate-800">{filteredVehicles.length}</span> of {vehicles.length} units
                                     </span>
                                     {selectedVehicle && (
                                         <button
                                             type="button"
                                             onClick={() => selectVehicle(null)}
-                                            className="text-[#33758F] hover:underline font-semibold cursor-pointer"
+                                            className="font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
                                         >
                                             Clear selection
                                         </button>
@@ -362,8 +336,7 @@ function Tracking() {
                                 </div>
                             </div>
 
-                            {/* Vehicles List Container */}
-                            <div className="flex-1 overflow-y-auto divide-y divide-slate-100 bg-white">
+                            <div className="flex-1 divide-y divide-slate-100 overflow-y-auto">
                                 {loading && (
                                     <LoadingState label="Loading vehicle telemetry…" className="m-3 border-none" />
                                 )}
@@ -384,7 +357,7 @@ function Tracking() {
                                                     setSearchTerm("")
                                                     handleFilterChange("ALL")
                                                 }}
-                                                className="text-xs font-semibold text-[#33758F] hover:underline cursor-pointer"
+                                                className="text-xs font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
                                             >
                                                 Clear filters
                                             </button>
@@ -416,81 +389,52 @@ function Tracking() {
                                                     selectVehicle(vehicle)
                                                 }
                                             }}
-                                            className={`px-3.5 py-3 transition cursor-pointer select-none border-l-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[#33758F]/40 ${
+                                            className={`relative cursor-pointer select-none px-4 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40 ${
                                                 isSelected
-                                                    ? "bg-[#F0F6F9] border-l-[#33758F]"
-                                                    : "bg-white hover:bg-slate-50 border-l-transparent"
+                                                    ? "bg-brand-light before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-brand"
+                                                    : "hover:bg-slate-50"
                                             }`}
                                         >
-                                            {/* Top Line: Unit ID, Name & Status Badge */}
-                                            <div className="flex items-center justify-between gap-2">
-                                                <div className="min-w-0 flex items-center gap-2">
-                                                    <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${
-                                                        isSelected ? "bg-[#33758F] text-white" : "bg-slate-100 text-slate-600"
-                                                    }`}>
-                                                        <Truck className="h-3.5 w-3.5" />
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                        <h3 className="text-xs font-bold text-slate-900 truncate font-mono">
-                                                            {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vid}`}
-                                                        </h3>
-                                                        <p className="text-[10px] text-slate-400 truncate">
-                                                            {vehicle.vehicle_name ? `${vehicle.vehicle_name} • ` : ""}{vehicle.group || "General Fleet"} • ID {vid}
-                                                        </p>
-                                                    </div>
-                                                </div>
-
-                                                <div className="flex items-center gap-1.5 shrink-0">
-                                                    <FleetStatusBadge status={statusKey} size="xs" />
-                                                </div>
+                                            <div className="flex items-baseline justify-between gap-3">
+                                                <h3 className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-900">
+                                                    {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vid}`}
+                                                </h3>
+                                                <FleetStatusBadge status={statusKey} size="xs" />
                                             </div>
+                                            <p className="mt-0.5 truncate text-xs text-slate-500">
+                                                {vehicle.vehicle_name ? `${vehicle.vehicle_name} · ` : ""}{vehicle.group || "General Fleet"} · ID {vid}
+                                            </p>
 
-                                            {/* Telemetry Row */}
-                                            <div className="mt-2.5 grid grid-cols-3 gap-1.5 rounded-lg bg-slate-50/70 p-2 border border-slate-100 text-[11px]">
-                                                {/* Speed */}
-                                                <div>
-                                                    <span className="text-[9px] font-semibold text-slate-400 uppercase block">Speed</span>
-                                                    <span className="font-bold text-slate-900">
-                                                        {speed} <span className="text-[9px] font-normal text-slate-500">km/h</span>
-                                                    </span>
-                                                </div>
-
-                                                {/* Ignition */}
-                                                <div>
-                                                    <span className="text-[9px] font-semibold text-slate-400 uppercase block">Ignition</span>
-                                                    <span className={`font-bold ${vehicle.ignition ? "text-emerald-600" : "text-slate-500"}`}>
-                                                        {vehicle.ignition ? "Active" : "Off"}
-                                                    </span>
-                                                </div>
-
-                                                {/* Idle or GPS */}
-                                                <div className="truncate">
+                                            <div className="mt-1.5 flex items-center justify-between gap-3 text-xs">
+                                                <dl className="flex min-w-0 items-center gap-x-3 text-slate-600">
+                                                    <div className="flex items-baseline gap-1">
+                                                        <dt className="sr-only">Speed</dt>
+                                                        <dd className="font-semibold tabular-nums text-slate-900">{speed}</dd>
+                                                        <span className="text-[11px] text-slate-500">km/h</span>
+                                                    </div>
+                                                    <div>
+                                                        <dt className="sr-only">Ignition</dt>
+                                                        <dd className={vehicle.ignition ? "text-slate-700" : "text-slate-400"}>
+                                                            Ign. {vehicle.ignition ? "on" : "off"}
+                                                        </dd>
+                                                    </div>
                                                     {statusKey === "IDLING" && vehicle.idle_duration_formatted ? (
-                                                        <>
-                                                            <span className="text-[9px] font-semibold text-amber-700 uppercase block">Idle Time</span>
-                                                            <span className="font-bold text-amber-800 truncate block">
-                                                                {vehicle.idle_duration_formatted}
-                                                            </span>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <span className="text-[9px] font-semibold text-slate-400 uppercase block">GPS Fix</span>
-                                                            <span className="font-mono text-[10px] text-slate-600 truncate block">
-                                                                {hasCoords ? "Locked" : "No Signal"}
-                                                            </span>
-                                                        </>
-                                                    )}
-                                                </div>
-                                            </div>
-
-                                            {/* Driver & Inspect Action Line */}
-                                            <div className="mt-2 flex items-center justify-between text-[11px] pt-1">
-                                                <div className="flex min-w-0 items-center gap-1 text-slate-500">
-                                                    <User className="h-3 w-3 text-slate-400 shrink-0" />
-                                                    <span className="truncate text-[10px]">
-                                                        {driverName ? String(driverName) : "Unassigned"}
-                                                    </span>
-                                                </div>
+                                                        <div>
+                                                            <dt className="sr-only">Idle time</dt>
+                                                            <dd className="font-medium tabular-nums text-amber-800">{vehicle.idle_duration_formatted}</dd>
+                                                        </div>
+                                                    ) : !hasCoords ? (
+                                                        <div>
+                                                            <dt className="sr-only">GPS</dt>
+                                                            <dd className="text-rose-700">No GPS fix</dd>
+                                                        </div>
+                                                    ) : null}
+                                                    <div className="flex min-w-0 items-center gap-1 text-slate-500">
+                                                        <dt className="sr-only">Driver</dt>
+                                                        <User className="h-3 w-3 shrink-0 text-slate-400" aria-hidden="true" />
+                                                        <dd className="truncate">{driverName ? String(driverName) : "Unassigned"}</dd>
+                                                    </div>
+                                                </dl>
 
                                                 <MorphingDialogTrigger
                                                     layoutId={`vehicle-${vehicle.vehicle_id || vehicle.id}`}
@@ -498,9 +442,9 @@ function Tracking() {
                                                         e.stopPropagation()
                                                         setDrawerVehicle(vehicle)
                                                     }}
-                                                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[#33758F] hover:text-[#285E73] hover:underline cursor-pointer transition-colors"
+                                                    className="inline-flex shrink-0 items-center gap-0.5 rounded font-medium text-brand hover:text-brand-hover hover:underline underline-offset-2 cursor-pointer"
                                                 >
-                                                    <span>Details</span>
+                                                    Details
                                                     <ChevronRight className="h-3.5 w-3.5" />
                                                 </MorphingDialogTrigger>
                                             </div>
@@ -510,9 +454,9 @@ function Tracking() {
                             </div>
                         </aside>
 
-                        {/* ─── RIGHT PANEL: INTERACTIVE FLEET MAP ───────────────────────── */}
+                        {/* ─── MAP ──────────────────────────────────────────────────── */}
                         <div
-                            className={`flex-1 relative h-full bg-slate-100/60 p-2.5 sm:p-3 lg:p-4 overflow-hidden ${
+                            className={`relative h-full flex-1 overflow-hidden ${
                                 mobileTab === "map" ? "flex" : "hidden lg:flex"
                             }`}
                         >
@@ -522,45 +466,33 @@ function Tracking() {
                                 selectedVehicle={selectedVehicle}
                                 onVehicleSelect={selectVehicle}
                                 onInspectVehicle={(v) => setDrawerVehicle(v)}
-                                className="border border-slate-200/90 shadow-xs"
+                                className=""
                             />
 
-                            {/* Floating Map Status Overlay (Bottom Left) */}
-                            <div className="absolute bottom-5 left-5 z-[400] flex items-center gap-2 rounded-lg border border-slate-200 bg-white/95 px-3 py-1.5 shadow-xs backdrop-blur-xs">
-                                <span className="relative flex h-2 w-2">
-                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                                    <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-                                </span>
-                                <span className="text-xs font-semibold text-slate-800 tabular-nums">
-                                    {mapVehicles.length} of {vehicles.length} on map
-                                </span>
+                            {/* Map coverage (bottom left) */}
+                            <div className="absolute bottom-3 left-3 z-[400] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs tabular-nums text-slate-700 shadow-pop">
+                                <span className="font-medium text-slate-900">{mapVehicles.length}</span> of {vehicles.length} on map
                                 {statusFilter !== "ALL" && (
-                                    <span className="text-[11px] text-slate-500 font-medium">
-                                        ({statusFilter.toLowerCase()})
-                                    </span>
+                                    <span className="text-slate-500"> · {statusFilter.toLowerCase()}</span>
                                 )}
                             </div>
 
-                            {/* Floating Selected Vehicle Overlay (Top Left) */}
+                            {/* Selected vehicle (top left) */}
                             {selectedVehicle && (
-                                <div className="absolute top-5 left-5 right-5 z-[400] rounded-xl border border-slate-200 bg-white/95 p-3.5 shadow-md backdrop-blur-xs sm:right-auto sm:w-80">
+                                <div className="absolute left-3 right-3 top-3 z-[400] rounded-lg border border-slate-200 bg-white p-3 shadow-pop sm:right-auto sm:w-80">
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="min-w-0">
-                                            <div className="flex items-center gap-1.5">
-                                                <Truck className="h-4 w-4 text-[#33758F] shrink-0" />
-                                                <h4 className="font-mono text-sm font-bold text-slate-900 truncate">
-                                                    {selectedVehicle.registration_plate || selectedVehicle.plate || selectedVehicle.vehicle_name || `Unit #${selectedVehicle.vehicle_id || selectedVehicle.id}`}
-                                                </h4>
-                                            </div>
-                                            <p className="text-[10px] text-slate-500 mt-0.5">
-                                                {selectedVehicle.vehicle_name ? `${selectedVehicle.vehicle_name} • ` : ""}{selectedVehicle.group || "General Fleet"} • ID {selectedVehicle.vehicle_id || selectedVehicle.id}
+                                            <h4 className="truncate font-mono text-[13px] font-semibold text-slate-900">
+                                                {selectedVehicle.registration_plate || selectedVehicle.plate || selectedVehicle.vehicle_name || `Unit #${selectedVehicle.vehicle_id || selectedVehicle.id}`}
+                                            </h4>
+                                            <p className="mt-0.5 truncate text-xs text-slate-500">
+                                                {selectedVehicle.vehicle_name ? `${selectedVehicle.vehicle_name} · ` : ""}{selectedVehicle.group || "General Fleet"} · ID {selectedVehicle.vehicle_id || selectedVehicle.id}
                                             </p>
                                         </div>
-
                                         <button
                                             type="button"
                                             onClick={() => selectVehicle(null)}
-                                            className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition cursor-pointer"
+                                            className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
                                             title="Clear selected unit"
                                             aria-label="Clear selected unit"
                                         >
@@ -568,17 +500,17 @@ function Tracking() {
                                         </button>
                                     </div>
 
-                                    <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2 text-xs">
+                                    <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-xs">
                                         <FleetStatusBadge status={selectedVehicle.status} size="xs" />
-                                        <span className="font-black text-slate-800">
-                                            {Math.round(Number(selectedVehicle.speed) || 0)} km/h
+                                        <span className="tabular-nums text-slate-600">
+                                            <span className="font-semibold text-slate-900">{Math.round(Number(selectedVehicle.speed) || 0)}</span> km/h
                                         </span>
                                         <MorphingDialogTrigger
                                             layoutId={`vehicle-${selectedVehicle.vehicle_id || selectedVehicle.id}`}
                                             onClick={() => setDrawerVehicle(selectedVehicle)}
-                                            className="rounded-lg bg-[#33758F] hover:bg-[#285E73] text-white px-2.5 py-1 text-[11px] font-bold transition-colors shadow-2xs cursor-pointer flex items-center justify-center"
+                                            className="flex items-center justify-center rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer"
                                         >
-                                            Full Details
+                                            Full details
                                         </MorphingDialogTrigger>
                                     </div>
                                 </div>
@@ -587,7 +519,6 @@ function Tracking() {
                     </main>
                 </div>
 
-                {/* ─── VEHICLE DETAIL SLIDE-OUT DRAWER ─────────────────────────────────── */}
                 <VehicleDetailDrawer
                     vehicle={drawerVehicle}
                     onClose={() => setDrawerVehicle(null)}

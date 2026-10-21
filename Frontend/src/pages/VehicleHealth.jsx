@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState, useMemo } from "react"
-import {
-    HeartPulse, Battery, MapPin, Wifi,
-    Clock3, Truck, ShieldCheck,
-} from "lucide-react"
+import { Truck } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
-import KpiCard from "../components/Common/KpiCard"
+import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
 import { EmptyState, ErrorState, LoadingState } from "../components/Common/StateViews"
@@ -15,35 +12,42 @@ import { getFleetHealthAnalytics } from "../api/fleetApi"
 
 const fmt = (n, d = 1) => (typeof n === "number" ? n.toFixed(d) : "—")
 
+const TONE = {
+    good: "bg-status-moving",
+    warn: "bg-status-idling",
+    bad: "bg-status-offline",
+    none: "bg-slate-300",
+}
+
 const batteryBadge = (status, voltage) => {
     const s = String(status || "").toUpperCase()
-    if (s === "HEALTHY") return { label: `${fmt(voltage, 1)}V · Healthy`, cls: "text-emerald-700 bg-emerald-50 border-emerald-200" }
-    if (s === "WARNING") return { label: `${fmt(voltage, 1)}V · Low`, cls: "text-amber-700 bg-amber-50 border-amber-200" }
-    if (s === "CRITICAL") return { label: `${fmt(voltage, 1)}V · Critical`, cls: "text-red-700 bg-red-50 border-red-200" }
-    return { label: voltage ? `${fmt(voltage, 1)}V` : "No Data", cls: "text-slate-500 bg-slate-100 border-slate-200" }
+    if (s === "HEALTHY") return { label: `${fmt(voltage, 1)} V`, note: "Healthy", tone: "good" }
+    if (s === "WARNING") return { label: `${fmt(voltage, 1)} V`, note: "Low", tone: "warn" }
+    if (s === "CRITICAL") return { label: `${fmt(voltage, 1)} V`, note: "Critical", tone: "bad" }
+    return { label: voltage ? `${fmt(voltage, 1)} V` : "No data", note: null, tone: "none" }
 }
 
 const gpsBadge = (status, sats) => {
     const s = String(status || "").toUpperCase()
-    if (s === "EXCELLENT") return { label: `${sats ?? "—"} sats (Exc)`, cls: "text-emerald-700 bg-emerald-50 border-emerald-200" }
-    if (s === "GOOD") return { label: `${sats ?? "—"} sats (Good)`, cls: "text-blue-700 bg-blue-50 border-blue-200" }
-    if (s === "WEAK") return { label: `${sats ?? "—"} sats (Weak)`, cls: "text-amber-700 bg-amber-50 border-amber-200" }
-    return { label: sats ? `${sats} sats` : "No GPS", cls: "text-slate-500 bg-slate-100 border-slate-200" }
+    if (s === "EXCELLENT") return { label: `${sats ?? "—"} sats`, note: "Excellent", tone: "good" }
+    if (s === "GOOD") return { label: `${sats ?? "—"} sats`, note: "Good", tone: "good" }
+    if (s === "WEAK") return { label: `${sats ?? "—"} sats`, note: "Weak", tone: "warn" }
+    return { label: sats ? `${sats} sats` : "No GPS", note: null, tone: "none" }
 }
 
 const connBadge = (status) => {
     const s = String(status || "").toUpperCase()
-    if (s === "STABLE") return { label: "Online", cls: "text-emerald-700 bg-emerald-50 border-emerald-200" }
-    if (s === "DELAYED") return { label: "Delayed", cls: "text-amber-700 bg-amber-50 border-amber-200" }
-    if (s === "OFFLINE") return { label: "Offline", cls: "text-red-700 bg-red-50 border-red-200" }
-    return { label: "Unknown", cls: "text-slate-500 bg-slate-100 border-slate-200" }
+    if (s === "STABLE") return { label: "Online", tone: "good" }
+    if (s === "DELAYED") return { label: "Delayed", tone: "warn" }
+    if (s === "OFFLINE") return { label: "Offline", tone: "bad" }
+    return { label: "Unknown", tone: "none" }
 }
 
-const scoreBadge = (score) => {
+const scoreTone = (score) => {
     const sc = Number(score ?? 0)
-    if (sc >= 85) return { cls: "text-emerald-700 bg-emerald-50 border-emerald-200", bar: "bg-emerald-500" }
-    if (sc >= 65) return { cls: "text-amber-700 bg-amber-50 border-amber-200", bar: "bg-amber-500" }
-    return { cls: "text-red-700 bg-red-50 border-red-200", bar: "bg-red-500" }
+    if (sc >= 85) return { bar: "bg-status-moving", text: "text-slate-900" }
+    if (sc >= 65) return { bar: "bg-status-idling", text: "text-amber-800" }
+    return { bar: "bg-status-offline", text: "text-rose-700" }
 }
 
 const fmtAgo = (s) => {
@@ -55,9 +59,22 @@ const fmtAgo = (s) => {
     return `${Math.floor(sec / 86400)}d ago`
 }
 
-function Badge({ label, cls }) {
-    return <span className={`inline-flex items-center whitespace-nowrap rounded-full border px-2 py-0.5 text-[11px] font-semibold ${cls}`}>{label}</span>
+function Signal({ label, note, tone }) {
+    return (
+        <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${TONE[tone]}`} aria-hidden="true" />
+            <span className={tone === "none" ? "text-slate-400" : "text-slate-800"}>{label}</span>
+            {note && <span className={tone === "bad" ? "text-rose-700" : tone === "warn" ? "text-amber-800" : "text-slate-500"}>{note}</span>}
+        </span>
+    )
 }
+
+const FILTERS = [
+    { id: "all", label: "All" },
+    { id: "healthy", label: "Healthy" },
+    { id: "warning", label: "Warning" },
+    { id: "critical", label: "Critical" },
+]
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
@@ -116,173 +133,155 @@ export default function VehicleHealth() {
             <PageHeader
                 title="Vehicle Health"
                 subtitle="Battery, GPS and telemetry connectivity"
-                icon={HeartPulse}
                 onRefresh={refresh}
                 loading={loading}
             />
 
-            <div className="space-y-5">
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+            <div className="space-y-4">
+                <KpiStrip label="Fleet health summary" className="grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+                    <KpiCard label="Fleet vehicles" loading={loading} value={data?.total_vehicles ?? "—"} />
                     <KpiCard
-                        icon={Truck}
-                        label="Fleet Vehicles"
-                        loading={loading}
-                        value={data?.total_vehicles ?? "—"}
-                        iconBg="bg-blue-50 text-blue-600 border border-blue-100"
-                    />
-                    <KpiCard
-                        icon={ShieldCheck}
-                        label="Healthy Units"
+                        label="Healthy units"
+                        dot="bg-status-moving"
                         loading={loading}
                         value={data?.healthy_vehicles ?? "—"}
-                        iconBg="bg-emerald-50 text-emerald-600 border border-emerald-100"
                     />
                     <KpiCard
-                        icon={HeartPulse}
-                        label="Avg Health Score"
+                        label="Avg health score"
                         loading={loading}
                         value={data?.average_health_score != null ? `${data.average_health_score}%` : "—"}
-                        iconBg="bg-teal-50 text-teal-600 border border-teal-100"
                     />
                     <KpiCard
-                        icon={Battery}
-                        label="Battery Issues"
+                        label="Battery issues"
+                        dot={data?.battery_warnings > 0 ? "bg-status-idling" : undefined}
                         loading={loading}
                         value={data?.battery_warnings ?? 0}
-                        iconBg={data?.battery_warnings > 0 ? "bg-amber-50 text-amber-600 border border-amber-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
-                        valueColor={data?.battery_warnings > 0 ? "text-amber-600" : "text-slate-900"}
+                        valueColor={data?.battery_warnings > 0 ? "text-amber-800" : "text-slate-900"}
                     />
                     <KpiCard
-                        icon={MapPin}
-                        label="GPS Warnings"
+                        label="GPS warnings"
+                        dot={data?.gps_warnings > 0 ? "bg-status-idling" : undefined}
                         loading={loading}
                         value={data?.gps_warnings ?? 0}
-                        iconBg={data?.gps_warnings > 0 ? "bg-purple-50 text-purple-600 border border-purple-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
-                        valueColor={data?.gps_warnings > 0 ? "text-purple-600" : "text-slate-900"}
+                        valueColor={data?.gps_warnings > 0 ? "text-amber-800" : "text-slate-900"}
                     />
                     <KpiCard
-                        icon={Wifi}
-                        label="Offline / Delayed"
+                        label="Offline / delayed"
+                        dot={data?.connectivity_warnings > 0 ? "bg-status-offline" : undefined}
                         loading={loading}
                         value={data?.connectivity_warnings ?? 0}
-                        iconBg={data?.connectivity_warnings > 0 ? "bg-rose-50 text-rose-600 border border-rose-100" : "bg-emerald-50 text-emerald-600 border border-emerald-100"}
-                        valueColor={data?.connectivity_warnings > 0 ? "text-rose-600" : "text-slate-900"}
+                        valueColor={data?.connectivity_warnings > 0 ? "text-rose-700" : "text-slate-900"}
                     />
-                </div>
+                </KpiStrip>
 
-                {/* Search + filter bar */}
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <SearchInput
-                        id="health-search"
-                        placeholder="Search plate, name, ID or group…"
-                        value={search}
-                        onChange={setSearch}
-                        className="w-full sm:max-w-sm"
-                    />
-                    <div className="flex items-center gap-1 overflow-x-auto rounded-lg border border-slate-200 bg-slate-50 p-0.5 sm:ml-auto">
-                        {["all", "healthy", "warning", "critical"].map(f => (
-                            <button
-                                key={f}
-                                id={`health-filter-${f}`}
-                                type="button"
-                                onClick={() => setFilter(f)}
-                                aria-pressed={filter === f}
-                                className={`shrink-0 rounded-md px-3 py-1 text-xs font-semibold capitalize transition-colors cursor-pointer ${
-                                    filter === f
-                                        ? "bg-[#33758F] text-white shadow-2xs"
-                                        : "text-slate-600 hover:text-slate-900"
-                                }`}
-                            >
-                                {f}
-                            </button>
-                        ))}
+                <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-2.5 sm:flex-row sm:items-center">
+                        <SearchInput
+                            id="health-search"
+                            placeholder="Search plate, name, ID or group…"
+                            value={search}
+                            onChange={setSearch}
+                            className="w-full sm:max-w-xs"
+                        />
+                        <div role="group" aria-label="Filter by health" className="flex items-center gap-0.5 self-start rounded-md bg-slate-100 p-0.5 sm:ml-auto sm:self-auto">
+                            {FILTERS.map(f => (
+                                <button
+                                    key={f.id}
+                                    id={`health-filter-${f.id}`}
+                                    type="button"
+                                    onClick={() => setFilter(f.id)}
+                                    aria-pressed={filter === f.id}
+                                    className={`shrink-0 rounded px-3 py-1 text-xs font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                                        filter === f.id
+                                            ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]"
+                                            : "text-slate-600 hover:text-slate-900"
+                                    }`}
+                                >
+                                    {f.label}
+                                </button>
+                            ))}
+                        </div>
                     </div>
-                </div>
 
-                {/* Vehicle health table */}
-                {loading ? (
-                    <LoadingState label="Loading vehicle health…" />
-                ) : error ? (
-                    <ErrorState message={error} onRetry={refresh} />
-                ) : filtered.length === 0 ? (
-                    <EmptyState
-                        icon={Truck}
-                        title={vehicles.length === 0 ? "No vehicles reported" : "No vehicles match your filters"}
-                        action={(search || filter !== "all") && (
-                            <button
-                                type="button"
-                                onClick={() => { setSearch(""); setFilter("all") }}
-                                className="text-xs font-semibold text-[#33758F] hover:underline cursor-pointer"
-                            >
-                                Clear filters
-                            </button>
-                        )}
-                    />
-                ) : (
-                    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs">
-                        <div className="overflow-x-auto">
-                            <table className="w-full min-w-[880px] text-sm">
-                                <thead>
-                                    <tr className="border-b border-slate-200 bg-slate-50/70 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-                                        <th className="px-4 py-2.5">Vehicle</th>
-                                        <th className="px-3 py-2.5">Status</th>
-                                        <th className="px-3 py-2.5">Health</th>
-                                        <th className="px-3 py-2.5">Battery</th>
-                                        <th className="px-3 py-2.5">GPS</th>
-                                        <th className="px-3 py-2.5">Connectivity</th>
-                                        <th className="px-3 py-2.5">Last Seen</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-slate-100">
-                                    {filtered.map(v => {
-                                        const bat = v.battery || {}
-                                        const gps = v.gps || {}
-                                        const conn = v.connectivity || {}
-                                        const batSt = batteryBadge(bat.status, bat.voltage)
-                                        const gpsSt = gpsBadge(gps.status, gps.satellites)
-                                        const connSt = connBadge(conn.status)
-                                        const scSt = scoreBadge(v.health_score)
+                    {loading ? (
+                        <LoadingState label="Loading vehicle health…" className="rounded-none border-0" />
+                    ) : error ? (
+                        <ErrorState message={error} onRetry={refresh} className="rounded-none border-0" />
+                    ) : filtered.length === 0 ? (
+                        <EmptyState
+                            icon={Truck}
+                            className="rounded-none border-0"
+                            title={vehicles.length === 0 ? "No vehicles reported" : "No vehicles match your filters"}
+                            action={(search || filter !== "all") && (
+                                <button
+                                    type="button"
+                                    onClick={() => { setSearch(""); setFilter("all") }}
+                                    className="text-xs font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
+                                >
+                                    Clear filters
+                                </button>
+                            )}
+                        />
+                    ) : (
+                        <>
+                            <div className="overflow-x-auto">
+                                <table className="w-full min-w-[880px] text-xs">
+                                    <thead>
+                                        <tr className="border-b border-slate-200 bg-slate-50 text-left text-[11px] text-slate-500">
+                                            <th scope="col" className="px-4 py-2 font-medium">Vehicle</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Status</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Health</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Battery</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">GPS</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Connectivity</th>
+                                            <th scope="col" className="px-4 py-2 text-right font-medium">Last seen</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100">
+                                        {filtered.map(v => {
+                                            const bat = v.battery || {}
+                                            const gps = v.gps || {}
+                                            const conn = v.connectivity || {}
+                                            const sc = scoreTone(v.health_score)
 
-                                        return (
-                                            <tr key={v.vehicle_id} className="transition-colors hover:bg-slate-50/70">
-                                                <td className="max-w-[220px] px-4 py-2.5">
-                                                    <p className="truncate font-mono text-xs font-bold text-slate-900">{v.registration_plate || v.plate || v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
-                                                    <p className="truncate text-[11px] text-slate-400">{v.vehicle_name ? `${v.vehicle_name} · ` : ""}{v.group || `ID ${v.vehicle_id}`}</p>
-                                                </td>
-                                                <td className="px-3 py-2.5">
-                                                    <FleetStatusBadge status={v.status} size="xs" />
-                                                </td>
-                                                <td className="px-3 py-2.5">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-100">
-                                                            <div
-                                                                className={`h-full rounded-full ${scSt.bar}`}
-                                                                style={{ width: `${Math.min(100, Math.max(0, v.health_score ?? 0))}%` }}
-                                                            />
+                                            return (
+                                                <tr key={v.vehicle_id} className="transition-colors hover:bg-slate-50">
+                                                    <td className="max-w-[240px] px-4 py-2">
+                                                        <p className="truncate font-mono text-[13px] font-semibold text-slate-900">{v.registration_plate || v.plate || v.vehicle_name || `Vehicle ${v.vehicle_id}`}</p>
+                                                        <p className="truncate text-[11px] text-slate-500">{v.vehicle_name ? `${v.vehicle_name} · ` : ""}{v.group || `ID ${v.vehicle_id}`}</p>
+                                                    </td>
+                                                    <td className="px-3 py-2">
+                                                        <FleetStatusBadge status={v.status} size="xs" />
+                                                    </td>
+                                                    <td className="px-3 py-2">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className={`w-9 text-right font-semibold tabular-nums ${sc.text}`}>{v.health_score ?? 0}%</span>
+                                                            <div className="h-1 w-16 overflow-hidden rounded-full bg-slate-100">
+                                                                <div
+                                                                    className={`h-full rounded-full ${sc.bar}`}
+                                                                    style={{ width: `${Math.min(100, Math.max(0, v.health_score ?? 0))}%` }}
+                                                                />
+                                                            </div>
                                                         </div>
-                                                        <span className="text-xs font-bold tabular-nums text-slate-800">{v.health_score ?? 0}%</span>
-                                                    </div>
-                                                </td>
-                                                <td className="px-3 py-2.5"><Badge label={batSt.label} cls={batSt.cls} /></td>
-                                                <td className="px-3 py-2.5"><Badge label={gpsSt.label} cls={gpsSt.cls} /></td>
-                                                <td className="px-3 py-2.5"><Badge label={connSt.label} cls={connSt.cls} /></td>
-                                                <td className="px-3 py-2.5">
-                                                    <span className="inline-flex items-center gap-1.5 whitespace-nowrap text-xs text-slate-600">
-                                                        <Clock3 size={12} className="text-slate-400" />
+                                                    </td>
+                                                    <td className="px-3 py-2"><Signal {...batteryBadge(bat.status, bat.voltage)} /></td>
+                                                    <td className="px-3 py-2"><Signal {...gpsBadge(gps.status, gps.satellites)} /></td>
+                                                    <td className="px-3 py-2"><Signal {...connBadge(conn.status)} /></td>
+                                                    <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-slate-600">
                                                         {fmtAgo(conn.seconds_since_update)}
-                                                    </span>
-                                                </td>
-                                            </tr>
-                                        )
-                                    })}
-                                </tbody>
-                            </table>
-                        </div>
-                        <div className="border-t border-slate-200 bg-slate-50/60 px-4 py-2.5 text-xs text-slate-500">
-                            <strong className="font-semibold text-slate-800">{filtered.length}</strong> of {vehicles.length} vehicles
-                        </div>
-                    </div>
-                )}
+                                                    </td>
+                                                </tr>
+                                            )
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div className="border-t border-slate-200 px-4 py-2 text-xs tabular-nums text-slate-500">
+                                <span className="font-medium text-slate-800">{filtered.length}</span> of {vehicles.length} vehicles
+                            </div>
+                        </>
+                    )}
+                </section>
             </div>
         </AppShell>
     )

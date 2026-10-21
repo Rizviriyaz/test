@@ -13,7 +13,7 @@ export default function ProtectedRoute({ children }) {
                 <div className="flex flex-col items-center gap-4">
                     <AtsLogo className="h-10 max-h-10" />
                     <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
-                        <Loader2 className="h-4 w-4 animate-spin text-[#33758F]" />
+                        <Loader2 className="h-4 w-4 animate-spin text-brand" />
                         <span>Verifying session…</span>
                     </div>
                 </div>

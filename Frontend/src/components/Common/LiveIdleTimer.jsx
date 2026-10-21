@@ -46,7 +46,7 @@ export default function LiveIdleTimer({
     const elapsed = calculateSeconds(startTime, baseDuration, nowMs)
 
     return (
-        <span className={`font-mono font-semibold ${className}`}>
+        <span className={`font-semibold tabular-nums ${className}`}>
             {formatElapsedDuration(elapsed)}
         </span>
     )

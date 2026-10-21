@@ -36,16 +36,16 @@ export default function ExcludedFuelPanel() {
 
     if (loading) {
         return (
-            <div className="rounded-xl border border-slate-200 bg-white p-4 mb-6 text-xs text-slate-500 flex items-center gap-2">
-                <Loader2 className="h-4 w-4 animate-spin text-[#33758F]" />
+            <div role="status" className="mb-5 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" />
                 <span>Reconciling transactions excluded from KPIs…</span>
             </div>
         )
     }
     if (error) {
         return (
-            <div className="rounded-xl border border-rose-200 bg-rose-50/70 p-4 mb-6 text-xs font-semibold text-rose-700 flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
+            <div role="alert" className="mb-5 flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600" />
                 <span>{error}</span>
             </div>
         )
@@ -54,8 +54,8 @@ export default function ExcludedFuelPanel() {
     const summary = excludedSummary(data?.excluded_scope)
     if (!summary) {
         return (
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 mb-6 text-xs text-emerald-800 flex items-center gap-2">
-                <CheckCircle2 className="h-4 w-4 shrink-0" />
+            <div className="mb-5 flex items-center gap-2 px-1 text-xs text-slate-500">
+                <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-status-moving" />
                 <span>Every transaction in this period is attributed to exactly one Wialon unit; nothing excluded from KPIs.</span>
             </div>
         )
@@ -63,11 +63,11 @@ export default function ExcludedFuelPanel() {
 
     const groups = Array.isArray(data?.data) ? data.data : []
     return (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4 mb-6 text-xs">
+        <div className="mb-5 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 text-amber-900">
-                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />
-                    <span className="font-bold">
+                    <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                    <span className="font-medium">
                         {summary.count.toLocaleString()} of {summary.allCount.toLocaleString()} transactions excluded from KPIs
                         ({fmt(summary.litres)} L, AED {fmt(summary.cost, 0)})
                     </span>
@@ -75,24 +75,25 @@ export default function ExcludedFuelPanel() {
                 <button
                     type="button"
                     onClick={() => setOpen((o) => !o)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-white px-2.5 py-1 font-bold text-amber-800 hover:bg-amber-100 cursor-pointer"
+                    aria-expanded={open}
+                    className="inline-flex h-7 items-center gap-1 rounded-md border border-amber-200 bg-white px-2 font-medium text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer"
                 >
                     {open ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                     {open ? "Hide list" : "Show list"}
                 </button>
             </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-[11px]">
-                <span className="rounded-md bg-white border border-amber-200 px-2 py-0.5">No Wialon unit: <b>{summary.unmatched}</b></span>
-                <span className="rounded-md bg-white border border-amber-200 px-2 py-0.5">Several Wialon units: <b>{summary.ambiguous}</b></span>
-                <span className="rounded-md bg-white border border-amber-200 px-2 py-0.5">Suspected re-imports: <b>{summary.duplicates}</b></span>
+            <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 pl-5 text-[11px] text-amber-900">
+                <span>No Wialon unit <b className="font-semibold tabular-nums">{summary.unmatched}</b></span>
+                <span>Several Wialon units <b className="font-semibold tabular-nums">{summary.ambiguous}</b></span>
+                <span>Suspected re-imports <b className="font-semibold tabular-nums">{summary.duplicates}</b></span>
             </div>
             {open && (
-                <div className="mt-3 max-h-72 overflow-auto rounded-xl border border-amber-200 bg-white">
+                <div className="mt-2.5 max-h-72 overflow-auto rounded-md border border-amber-200 bg-white">
                     {groups.length === 0 ? (
                         <div className="p-4 text-center text-slate-400">No excluded groups to list.</div>
                     ) : (
                         <table className="w-full text-left text-[11px]">
-                            <thead className="bg-slate-50 text-[10px] uppercase text-slate-500">
+                            <thead className="sticky top-0 bg-slate-50 text-[11px] text-slate-500">
                                 <tr>
                                     <th className="px-3 py-2">Identifier</th>
                                     <th className="px-3 py-2">Reason</th>
@@ -105,14 +106,14 @@ export default function ExcludedFuelPanel() {
                             <tbody className="divide-y divide-slate-100">
                                 {groups.map((g) => (
                                     <tr key={`${g.reason}-${g.vehicle_identifier}`}>
-                                        <td className="px-3 py-1.5 font-mono font-bold text-slate-800">{g.vehicle_identifier || "(blank)"}</td>
+                                        <td className="px-3 py-1.5 font-mono font-medium text-slate-900">{g.vehicle_identifier || "(blank)"}</td>
                                         <td className="px-3 py-1.5 text-slate-600">
                                             {EXCLUDED_REASON_LABELS[g.reason] || g.reason}
                                             {g.candidate_unit_names?.length ? ` (${g.candidate_unit_names.join(", ")})` : ""}
                                         </td>
-                                        <td className="px-3 py-1.5 text-right">{g.transaction_count}</td>
-                                        <td className="px-3 py-1.5 text-right">{fmt(g.litres)}</td>
-                                        <td className="px-3 py-1.5 text-right">{fmt(g.cost, 0)}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums">{g.transaction_count}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums">{fmt(g.litres)}</td>
+                                        <td className="px-3 py-1.5 text-right tabular-nums">{fmt(g.cost, 0)}</td>
                                         <td className="px-3 py-1.5 text-slate-500 whitespace-nowrap">
                                             {g.first_date || "—"}{g.last_date && g.last_date !== g.first_date ? ` → ${g.last_date}` : ""}
                                         </td>

@@ -1,9 +1,9 @@
 import { CLASSIFICATION_LABELS, classificationOf } from "./fuelLabels"
 
 const STYLES = {
-    recorded: "bg-emerald-50 text-emerald-800 border-emerald-200",
-    derived: "bg-sky-50 text-sky-800 border-sky-200",
-    estimated: "bg-amber-50 text-amber-800 border-amber-200",
+    recorded: "border-slate-200 text-slate-600",
+    derived: "border-sky-200 text-sky-800",
+    estimated: "border-amber-200 text-amber-800",
 }
 
 const TITLES = {
@@ -18,7 +18,7 @@ export default function ClassificationBadge({ classification, field }) {
     if (!kind) return null
     return (
         <span
-            className={`inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider border ${STYLES[kind]}`}
+            className={`inline-flex items-center rounded-sm border px-1 text-[10px] font-medium leading-4 ${STYLES[kind]}`}
             title={TITLES[kind]}
         >
             {CLASSIFICATION_LABELS[kind]}

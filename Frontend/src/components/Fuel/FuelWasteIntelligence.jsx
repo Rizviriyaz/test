@@ -1,18 +1,10 @@
 import { useState, useMemo } from "react"
 import {
-    AlertTriangle,
     AlertCircle,
-    Flame,
-    Clock,
-    Zap,
-    Scale,
     Search,
     ArrowUpRight,
-    ShieldAlert,
     Info,
     CheckCircle2,
-    Sliders,
-    Layers,
 } from "lucide-react"
 
 function formatNumber(val, decimals = 1) {
@@ -33,12 +25,12 @@ function formatCurrency(val) {
 
 const CATEGORY_TABS = [
     { id: "all", label: "All Findings" },
-    { id: "excessive_idling", label: "Excessive Idling", icon: Clock },
-    { id: "rapid_refuel", label: "Rapid Refuels (<24h)", icon: Zap },
-    { id: "volume_spike", label: "Volume Spikes", icon: Flame },
-    { id: "odometer_inconsistency", label: "Odometer Issues", icon: Scale },
-    { id: "duplicate_candidate", label: "Potential Duplicates", icon: Layers },
-    { id: "unmatched_vehicle", label: "Unmatched GPS", icon: AlertTriangle },
+    { id: "excessive_idling", label: "Excessive Idling" },
+    { id: "rapid_refuel", label: "Rapid Refuels (<24h)" },
+    { id: "volume_spike", label: "Volume Spikes" },
+    { id: "odometer_inconsistency", label: "Odometer Issues" },
+    { id: "duplicate_candidate", label: "Potential Duplicates" },
+    { id: "unmatched_vehicle", label: "Unmatched GPS" },
 ]
 
 // Info items for identifiers excluded from KPIs (unmatched / ambiguous / cross-import duplicates)
@@ -73,16 +65,13 @@ export default function FuelWasteIntelligence({
 
     if (loading) {
         return (
-            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-xs animate-pulse">
-                <div className="h-6 w-64 bg-slate-200 rounded mb-4" />
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
-                    <div className="h-20 bg-slate-100 rounded-xl" />
-                    <div className="h-20 bg-slate-100 rounded-xl" />
-                    <div className="h-20 bg-slate-100 rounded-xl" />
+            <div role="status" aria-label="Loading fuel waste report" className="mb-5 rounded-lg border border-slate-200 bg-white p-4">
+                <div className="mb-4 h-4 w-56 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                <div className="mb-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    {[0, 1, 2].map((i) => <div key={i} className="h-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />)}
                 </div>
-                <div className="space-y-3">
-                    <div className="h-16 bg-slate-100 rounded-xl" />
-                    <div className="h-16 bg-slate-100 rounded-xl" />
+                <div className="space-y-2">
+                    {[0, 1].map((i) => <div key={i} className="h-12 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />)}
                 </div>
             </div>
         )
@@ -90,20 +79,20 @@ export default function FuelWasteIntelligence({
 
     if (error) {
         return (
-            <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50/50 p-6 shadow-xs text-center">
-                <AlertCircle className="mx-auto h-8 w-8 text-rose-500 mb-2" />
-                <h3 className="text-sm font-bold text-rose-900">Fuel Waste Intelligence Unavailable</h3>
-                <p className="text-xs text-rose-600 mt-1 max-w-md mx-auto">{error}</p>
+            <div role="alert" className="mb-5 rounded-lg border border-slate-200 bg-white p-6 text-center">
+                <AlertCircle className="mx-auto mb-2 h-5 w-5 text-rose-600" />
+                <h3 className="text-[13px] font-semibold text-slate-900">Fuel waste report unavailable</h3>
+                <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">{error}</p>
             </div>
         )
     }
 
     if (!wasteData) {
         return (
-            <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50/50 p-6 shadow-xs text-center">
-                <Info className="mx-auto h-8 w-8 text-slate-400 mb-2" />
-                <h3 className="text-sm font-bold text-slate-700">No Fuel Waste Report Available</h3>
-                <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto">
+            <div className="mb-5 rounded-lg border border-slate-200 bg-white p-6 text-center">
+                <Info className="mx-auto mb-2 h-5 w-5 text-slate-300" />
+                <h3 className="text-[13px] font-medium text-slate-800">No fuel waste report available</h3>
+                <p className="mx-auto mt-1 max-w-md text-xs text-slate-500">
                     Select a date period or adjust filters to generate fuel waste and anomaly analytics.
                 </p>
             </div>
@@ -124,48 +113,66 @@ export default function FuelWasteIntelligence({
     const refuelAnomalies = wasteData?.refuel_anomalies_count || 0
     const dataQualityCount = wasteData?.data_quality_issues_count || 0
 
-    return (
-        <section className="mb-6 rounded-xl border border-slate-200 bg-white p-4 sm:p-5 shadow-xs">
-            {/* ─── HEADER & CONTROLS ────────────────────────────────────────── */}
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-3.5 border-b border-slate-100">
-                <div className="flex items-center gap-2.5">
-                    <div className="rounded-xl bg-amber-500/10 p-2 text-amber-700 border border-amber-500/20">
-                        <ShieldAlert className="h-4.5 w-4.5" />
-                    </div>
-                    <div>
-                        <div className="flex items-center gap-2">
-                            <h2 className="text-sm font-bold text-slate-900">
-                                Fuel Waste & Anomaly Intelligence
-                            </h2>
-                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-black text-amber-800">
-                                {totalAnomalies} Findings
-                            </span>
-                        </div>
-                    </div>
-                </div>
+    const summary = [
+        {
+            label: "Idle waste above threshold",
+            value: idleDataAvailable ? `AED ${formatCurrency(idleWasteCost)}` : "—",
+            detail: idleDataAvailable ? `${formatNumber(idleWasteLitres, 1)} L${telematicsPartial ? " · partial" : ""} · ${idleVehicleCount} vehicles` : "Idle data unavailable",
+            note: `Estimated idle fuel of vehicles idling at or above${effectiveThreshold != null
+                ? ` ${formatNumber(effectiveThreshold, 1)} h${periodDays ? ` over ${periodDays} day${periodDays === 1 ? "" : "s"}` : ""}`
+                : " the threshold"}`,
+            tone: idleDataAvailable && idleWasteCost > 0 ? "text-amber-800" : "text-slate-900",
+        },
+        {
+            label: "Refuelling pattern flags",
+            value: refuelAnomalies,
+            detail: "anomalous transactions",
+            note: "Rapid consecutive refills (<24h) and high-volume spikes",
+            tone: refuelAnomalies > 0 ? "text-amber-800" : "text-slate-900",
+        },
+        {
+            label: "Data quality",
+            value: dataQualityCount,
+            detail: "inconsistencies",
+            note: "Odometer regressions, candidate duplicates, unmatched plates",
+            tone: "text-slate-900",
+        },
+    ]
 
-                {/* Idle Threshold Selector */}
+    const severityStyle = (sev) =>
+        sev === "critical"
+            ? { rule: "before:bg-status-offline", text: "text-rose-700", label: "Critical" }
+            : sev === "warning"
+                ? { rule: "before:bg-status-idling", text: "text-amber-800", label: "Warning" }
+                : { rule: "before:bg-transparent", text: "text-slate-500", label: sev ? sev.charAt(0).toUpperCase() + sev.slice(1) : "Info" }
+
+    return (
+        <section className="mb-5 overflow-hidden rounded-lg border border-slate-200 bg-white">
+            <div className="flex flex-col justify-between gap-3 border-b border-slate-200 px-4 py-3 md:flex-row md:items-center">
+                <h2 className="text-[13px] font-semibold text-slate-900">
+                    Fuel waste & anomalies <span className="font-normal tabular-nums text-slate-500">· {totalAnomalies} findings</span>
+                </h2>
+
                 {onIdleThresholdChange && (
-                    <div className="flex items-center gap-2 bg-slate-50 p-1.5 px-3 rounded-xl border border-slate-200 self-start md:self-auto text-xs">
-                        <Sliders className="h-3.5 w-3.5 text-slate-400" />
-                        <span className="text-[11px] font-bold text-slate-500">Idle Alert Threshold:</span>
+                    <label className="inline-flex h-8 items-center gap-1.5 self-start rounded-md border border-slate-200 bg-white px-2.5 text-xs focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15 md:self-auto">
+                        <span className="text-slate-500">Idle alert threshold</span>
                         <select
                             value={idleThreshold}
                             onChange={(e) => onIdleThresholdChange(parseFloat(e.target.value))}
-                            className="rounded-lg bg-white border border-slate-200 px-2 py-1 text-xs font-bold text-slate-700 shadow-2xs cursor-pointer focus:outline-hidden"
+                            className="cursor-pointer bg-transparent font-medium text-slate-800 outline-none"
                         >
                             <option value={3.0}>≥ 3.0 h{perDay ? "/day" : ""}</option>
                             <option value={5.0}>≥ 5.0 h{perDay ? "/day" : ""} (Standard)</option>
                             <option value={10.0}>≥ 10.0 h{perDay ? "/day" : ""}</option>
                             <option value={15.0}>≥ 15.0 h{perDay ? "/day" : ""} (Severe)</option>
                         </select>
-                    </div>
+                    </label>
                 )}
             </div>
 
             {telematicsPartial && (
-                <div role="status" className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
-                    <span className="font-bold">Partial Wialon telematics:</span> idle figures cover only vehicles whose idle hours were reported.
+                <div role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+                    <span className="font-medium">Partial Wialon telematics:</span> idle figures cover only vehicles whose idle hours were reported.
                     {dataWarnings.length > 0 && (
                         <ul className="mt-1 list-disc pl-4">
                             {dataWarnings.slice(0, 5).map((w, i) => <li key={i}>{w}</li>)}
@@ -174,88 +181,22 @@ export default function FuelWasteIntelligence({
                 </div>
             )}
 
-            {/* ─── SUMMARY CARDS ────────────────────────────────────────────── */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 my-4">
-                {/* 1. Idling Fuel Waste */}
-                <div className="rounded-xl border border-rose-200/80 bg-gradient-to-br from-rose-50/50 via-white to-white p-3.5 shadow-2xs">
-                    <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-rose-800">
-                            Idle Waste Above Threshold
-                        </span>
-                        <span className="rounded-md bg-rose-100 px-1.5 py-0.5 text-[9px] font-bold text-rose-800">
-                            {idleDataAvailable ? `${idleVehicleCount} Vehicles Exceeding` : "Idle data unavailable"}
-                        </span>
+            <dl className="grid grid-cols-1 gap-px border-b border-slate-200 bg-slate-200 sm:grid-cols-3">
+                {summary.map((item) => (
+                    <div key={item.label} className="bg-white px-4 py-3">
+                        <dt className="text-xs font-medium text-slate-500">{item.label}</dt>
+                        <dd className="mt-1 flex items-baseline gap-1.5">
+                            <span className={`text-xl font-semibold tabular-nums ${item.tone}`}>{item.value}</span>
+                            <span className="text-xs text-slate-500">{item.detail}</span>
+                        </dd>
+                        <dd className="mt-0.5 text-[11px] text-slate-400">{item.note}</dd>
                     </div>
-                    <div className="flex items-baseline gap-1.5">
-                        {idleDataAvailable ? (
-                            <>
-                                <span className="text-xl font-black text-rose-900">
-                                    AED {formatCurrency(idleWasteCost)}
-                                </span>
-                                <span className="text-xs font-bold text-rose-700">
-                                    ({formatNumber(idleWasteLitres, 1)} L){telematicsPartial ? " · partial" : ""}
-                                </span>
-                            </>
-                        ) : (
-                            <span className="text-xl font-black text-rose-900">—</span>
-                        )}
-                    </div>
-                    <p className="mt-1 text-[10px] text-rose-600">
-                        Estimated idle fuel of vehicles idling at or above
-                        {effectiveThreshold != null
-                            ? ` ${formatNumber(effectiveThreshold, 1)} h${periodDays ? ` over ${periodDays} day${periodDays === 1 ? "" : "s"}` : ""}`
-                            : " the threshold"}
-                    </p>
-                </div>
+                ))}
+            </dl>
 
-                {/* 2. Refuelling Pattern Anomalies */}
-                <div className="rounded-xl border border-amber-200/80 bg-gradient-to-br from-amber-50/50 via-white to-white p-3.5 shadow-2xs">
-                    <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
-                            Refuelling Pattern Flags
-                        </span>
-                        <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[9px] font-bold text-amber-800">
-                            {refuelAnomalies} Events
-                        </span>
-                    </div>
-                    <div className="flex items-baseline gap-1.5">
-                        <span className="text-xl font-black text-amber-900">
-                            {refuelAnomalies}
-                        </span>
-                        <span className="text-xs font-bold text-amber-700">Anomalous Transactions</span>
-                    </div>
-                    <p className="mt-1 text-[10px] text-amber-600">
-                        Rapid consecutive refills (&lt;24h) and high volume dispensed spikes
-                    </p>
-                </div>
-
-                {/* 3. Data Integrity & Coverage */}
-                <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50/70 via-white to-white p-3.5 shadow-2xs">
-                    <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
-                            Data Quality & Safeguards
-                        </span>
-                        <span className="rounded-md bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold text-slate-700">
-                            {dataQualityCount} Items
-                        </span>
-                    </div>
-                    <div className="flex items-baseline gap-1.5">
-                        <span className="text-xl font-black text-slate-900">
-                            {dataQualityCount}
-                        </span>
-                        <span className="text-xs font-bold text-slate-500">Inconsistencies</span>
-                    </div>
-                    <p className="mt-1 text-[10px] text-slate-500">
-                        Odometer regressions, candidate duplicates, and unmatched plates
-                    </p>
-                </div>
-            </div>
-
-            {/* ─── FILTER TABS & SEARCH BAR ─────────────────────────────────── */}
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pt-1">
-                <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto pb-1">
+            <div className="flex flex-col justify-between gap-2 px-4 pt-3 lg:flex-row lg:items-center">
+                <div role="group" aria-label="Finding category" className="flex flex-wrap items-center gap-1">
                     {CATEGORY_TABS.map((tab) => {
-                        const Icon = tab.icon
                         const isActive = selectedTab === tab.id
                         const count = tab.id === "all"
                             ? anomalies.length
@@ -266,125 +207,84 @@ export default function FuelWasteIntelligence({
                                 key={tab.id}
                                 type="button"
                                 onClick={() => setSelectedTab(tab.id)}
-                                className={`inline-flex items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-bold transition-all cursor-pointer ${
+                                aria-pressed={isActive}
+                                className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
                                     isActive
-                                        ? "bg-[#33758F] text-white shadow-xs"
-                                        : "bg-slate-100 text-slate-600 hover:bg-slate-200/70 hover:text-slate-900"
+                                        ? "border-brand/50 bg-brand-light font-medium text-slate-900"
+                                        : "border-transparent text-slate-600 hover:bg-slate-100 hover:text-slate-900"
                                 }`}
                             >
-                                {Icon && <Icon className="h-3.5 w-3.5" />}
-                                <span>{tab.label}</span>
-                                <span
-                                    className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono ${
-                                        isActive ? "bg-white/20 text-white" : "bg-slate-200 text-slate-700"
-                                    }`}
-                                >
-                                    {count}
-                                </span>
+                                {tab.label}
+                                <span className={`tabular-nums ${isActive ? "text-brand" : "text-slate-400"}`}>{count}</span>
                             </button>
                         )
                     })}
                 </div>
 
                 <div className="relative min-w-[220px]">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-400" />
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" aria-hidden="true" />
                     <input
-                        type="text"
+                        type="search"
                         placeholder="Search vehicle or anomaly…"
+                        aria-label="Search vehicle or anomaly"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50/50 pl-9 pr-3 py-1.5 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:border-[#33758F] focus:bg-white focus:outline-hidden"
+                        className="h-8 w-full rounded-md border border-slate-200 bg-white pl-8 pr-3 text-xs text-slate-800 placeholder-slate-400 focus:border-brand focus:outline-hidden focus:ring-2 focus:ring-brand/15"
                     />
                 </div>
             </div>
 
-            {/* ─── ANOMALY FINDINGS LIST ────────────────────────────────────── */}
-            <div className="mt-3.5 space-y-2">
+            <div className="mt-3 border-t border-slate-200">
                 {filteredAnomalies.length === 0 ? (
-                    <div className="py-6 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
-                        <CheckCircle2 className="mx-auto h-5 w-5 text-emerald-500 mb-1" />
-                        <span className="font-bold text-slate-700">No anomalies detected</span> in this category for the selected period.
-                    </div>
+                    <p className="flex items-center justify-center gap-2 px-4 py-6 text-xs text-slate-500">
+                        <CheckCircle2 className="h-4 w-4 text-status-moving" />
+                        No anomalies in this category for the selected period.
+                    </p>
                 ) : (
-                    filteredAnomalies.map((item) => {
-                        const isCritical = item.severity === "critical"
-                        const isWarning = item.severity === "warning"
-
-                        return (
-                            <div
-                                key={item.id}
-                                className={`group rounded-xl border p-2.5 sm:p-3 transition-all hover:shadow-xs ${
-                                    isCritical
-                                        ? "border-rose-200 bg-gradient-to-r from-rose-50/40 to-white"
-                                        : isWarning
-                                        ? "border-amber-200 bg-gradient-to-r from-amber-50/30 to-white"
-                                        : "border-slate-200 bg-white"
-                                }`}
-                            >
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                    <div className="space-y-1">
-                                        <div className="flex flex-wrap items-center gap-2">
-                                            <span className="font-mono text-xs font-black text-slate-900 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
-                                                {item.vehicle_identifier}
-                                            </span>
-
-                                            <span
-                                                className={`rounded-md px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wider ${
-                                                    isCritical
-                                                        ? "bg-rose-100 text-rose-800 border border-rose-200"
-                                                        : isWarning
-                                                        ? "bg-amber-100 text-amber-800 border border-amber-200"
-                                                        : "bg-slate-100 text-slate-700 border border-slate-200"
-                                                }`}
-                                            >
-                                                {item.severity}
-                                            </span>
-
-                                            <span className="rounded-md bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 border border-slate-200">
-                                                [{item.finding_type.toUpperCase()}]
-                                            </span>
-
-                                            <h4 className="text-xs font-black text-slate-900">
-                                                {item.title}
-                                            </h4>
+                    <ul className="max-h-[520px] divide-y divide-slate-100 overflow-y-auto">
+                        {filteredAnomalies.map((item) => {
+                            const sev = severityStyle(item.severity)
+                            return (
+                                <li
+                                    key={item.id}
+                                    className={`relative flex flex-col justify-between gap-3 px-4 py-3 before:absolute before:inset-y-0 before:left-0 before:w-0.5 sm:flex-row sm:items-center ${sev.rule}`}
+                                >
+                                    <div className="min-w-0 space-y-1">
+                                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                                            <span className="font-mono text-xs font-semibold text-slate-900">{item.vehicle_identifier}</span>
+                                            <span className={`text-xs font-medium ${sev.text}`}>{sev.label}</span>
+                                            <span className="text-[11px] text-slate-400">{item.finding_type}</span>
                                         </div>
-
-                                        <p className="text-xs text-slate-600 leading-relaxed pl-0.5">
-                                            {item.description}
-                                        </p>
-
-                                        <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-500 pt-1">
+                                        <h4 className="text-[13px] font-medium text-slate-900">{item.title}</h4>
+                                        <p className="text-xs leading-relaxed text-slate-600">{item.description}</p>
+                                        <dl className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[11px] text-slate-500">
                                             {item.recorded_value && (
-                                                <span>
-                                                    <strong className="text-slate-700">Recorded:</strong> {item.recorded_value}
-                                                </span>
+                                                <div className="flex gap-1"><dt>Recorded</dt><dd className="font-medium text-slate-800">{item.recorded_value}</dd></div>
                                             )}
                                             {item.threshold_or_baseline && (
-                                                <span>
-                                                    <strong className="text-slate-700">Baseline:</strong> {item.threshold_or_baseline}
-                                                </span>
+                                                <div className="flex gap-1"><dt>Baseline</dt><dd className="font-medium text-slate-800">{item.threshold_or_baseline}</dd></div>
                                             )}
                                             {item.transaction_date && (
-                                                <span>
-                                                    <strong className="text-slate-700">Date:</strong> {item.transaction_date}
-                                                </span>
+                                                <div className="flex gap-1"><dt>Date</dt><dd className="font-medium tabular-nums text-slate-800">{item.transaction_date}</dd></div>
                                             )}
-                                        </div>
+                                        </dl>
                                     </div>
 
-                                    {/* Action button (not for identifiers excluded from KPIs: they have no single Wialon unit) */}
-                                    {!isExcludedIdentifierItem(item) && <button
-                                        type="button"
-                                        onClick={() => onSelectVehicle?.(item.vehicle_identifier)}
-                                        className="inline-flex items-center gap-1 self-start sm:self-center shrink-0 rounded-xl bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-[#33758F] hover:text-white transition-colors cursor-pointer"
-                                    >
-                                        <span>Inspect</span>
-                                        <ArrowUpRight className="h-3.5 w-3.5" />
-                                    </button>}
-                                </div>
-                            </div>
-                        )
-                    })
+                                    {/* No action for identifiers excluded from KPIs: they have no single Wialon unit */}
+                                    {!isExcludedIdentifierItem(item) && (
+                                        <button
+                                            type="button"
+                                            onClick={() => onSelectVehicle?.(item.vehicle_identifier)}
+                                            className="inline-flex h-7 shrink-0 items-center gap-1 self-start rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 cursor-pointer sm:self-center"
+                                        >
+                                            Inspect
+                                            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+                                        </button>
+                                    )}
+                                </li>
+                            )
+                        })}
+                    </ul>
                 )}
             </div>
         </section>

@@ -1,21 +1,12 @@
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import {
-    Droplets,
-    DollarSign,
-    Route,
-    Gauge,
-    Clock,
-    Flame,
-    ShieldCheck,
-    Activity,
     AlertTriangle,
     X,
     Info,
     Calendar,
     Database,
     Calculator,
-    ArrowUpRight,
 } from "lucide-react"
 import ClassificationBadge from "./ClassificationBadge"
 import { excludedSummary } from "./fuelLabels"
@@ -48,31 +39,21 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
     if (loading) {
         return (
-            <div className="space-y-4 mb-6">
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                    {[1, 2, 3, 4].map((i) => (
-                        <div key={i} className="animate-pulse rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
-                            <div className="flex items-center justify-between mb-2.5">
-                                <div className="h-3 w-24 bg-slate-200 rounded" />
-                                <div className="h-7 w-7 bg-slate-100 rounded-lg" />
-                            </div>
-                            <div className="h-7 w-32 bg-slate-200 rounded mb-2" />
-                            <div className="h-3 w-20 bg-slate-100 rounded" />
+            <div className="mb-5 space-y-4" role="status" aria-label="Loading fuel KPIs">
+                {[0, 1].map((row) => (
+                    <div key={row}>
+                        <div className="mb-2 h-3 w-40 animate-pulse rounded bg-slate-200 motion-reduce:animate-none" />
+                        <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4">
+                            {[0, 1, 2, 3].map((i) => (
+                                <div key={i} className="bg-white px-4 py-3">
+                                    <div className="h-3 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                                    <div className="mt-2 h-6 w-28 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                                    <div className="mt-2 h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                                </div>
+                            ))}
                         </div>
-                    ))}
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                    {[5, 6, 7, 8].map((i) => (
-                        <div key={i} className="animate-pulse rounded-xl border border-slate-200 bg-white p-4 shadow-xs">
-                            <div className="flex items-center justify-between mb-2.5">
-                                <div className="h-3 w-24 bg-slate-200 rounded" />
-                                <div className="h-7 w-7 bg-slate-100 rounded-lg" />
-                            </div>
-                            <div className="h-7 w-32 bg-slate-200 rounded mb-2" />
-                            <div className="h-3 w-20 bg-slate-100 rounded" />
-                        </div>
-                    ))}
-                </div>
+                    </div>
+                ))}
             </div>
         )
     }
@@ -289,374 +270,189 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
     const activeBreakdown = selectedKpi ? getBreakdownDetails(selectedKpi) : null
 
+    const has = (v) => v !== null && v !== undefined
+
+    const recordedCells = [
+        {
+            key: "total_litres",
+            label: "Fuel purchased",
+            value: formatNumber(totalLitres, 1),
+            unit: "L",
+            note: "Net purchased volume",
+            badge: <ClassificationBadge classification={vc} field="total_litres" />,
+        },
+        {
+            key: "total_cost",
+            label: "Recorded expenditure",
+            prefix: "AED",
+            value: formatCurrency(totalCost),
+            note: "Total fuel spend",
+            badge: <ClassificationBadge classification={vc} field="total_cost" />,
+        },
+        {
+            key: "transaction_count",
+            label: "Refuel transactions",
+            value: transactionCount !== undefined ? formatCurrency(transactionCount) : "—",
+            unit: "events",
+            note: totalLitres && transactionCount ? `~${(totalLitres / transactionCount).toFixed(1)} L per refuel` : "Statement records",
+            badge: <ClassificationBadge classification={vc} field="transaction_count" />,
+        },
+        {
+            key: "vehicle_count",
+            label: "Vehicles refuelled",
+            value: has(vehicleCount) ? vehicleCount : "—",
+            unit: "Wialon units",
+            note: [
+                has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : "—",
+                engineOnlyCount ? `${engineOnlyCount} engine-only` : null,
+            ].filter(Boolean).join(" · "),
+        },
+    ]
+
+    const estimatedCells = [
+        {
+            key: "estimated_idle_fuel",
+            label: "Estimated idling fuel",
+            value: has(estimatedIdleFuel) ? formatNumber(estimatedIdleFuel, 1) : "—",
+            unit: "L",
+            note: has(idlePct) ? `${idlePct.toFixed(1)}% of fuel` : "Idle consumption",
+            tag: `${idleRate.toFixed(1)} L/h`,
+        },
+        {
+            key: "estimated_idle_cost",
+            label: "Estimated idle cost",
+            prefix: "AED",
+            value: has(estimatedIdleCost) ? formatCurrency(estimatedIdleCost) : "—",
+            valueClass: has(estimatedIdleCost) && estimatedIdleCost > 0 ? "text-amber-800" : "text-slate-900",
+            note: "Direct idling loss",
+        },
+        {
+            key: "estimated_driving_fuel",
+            label: "Estimated driving fuel",
+            value: has(estimatedDrivingFuel) ? formatNumber(estimatedDrivingFuel, 1) : "—",
+            unit: "L",
+            note: has(drivingPct) ? `${drivingPct.toFixed(1)}% productive` : (drivingHours ? `${drivingHours.toFixed(1)}h in motion` : "Productive motion"),
+            tag: `${formatNumber(totalDistance, 0)} km`,
+            tagTitle: has(trackedLitres) ? `${formatNumber(trackedLitres, 1)} L purchased by vehicles with Wialon distance` : undefined,
+        },
+        {
+            key: "efficiency",
+            label: "Purchase-based efficiency",
+            value: has(efficiency) ? formatNumber(efficiency, 1) : "—",
+            unit: "L/100 km",
+            note: has(costPerKm)
+                ? `AED ${formatNumber(costPerKm, 2)} per km`
+                : suppressedReason === "insufficient_distance"
+                    ? "Below minimum distance"
+                    : suppressedReason === "non_positive_net_fuel"
+                        ? "Refunds exceed purchases"
+                        : "Fuel purchased ÷ Wialon km",
+            badge: <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />,
+        },
+    ]
+
+    const renderCell = (cell) => (
+        <button
+            key={cell.key}
+            type="button"
+            onClick={() => setSelectedKpi(cell.key)}
+            className="group flex min-w-0 flex-col bg-white px-4 py-3 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
+            title="View formula and calculation breakdown"
+        >
+            <span className="flex items-center justify-between gap-2">
+                <span className="truncate text-xs font-medium text-slate-500">{cell.label}</span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                    {cell.badge}
+                    <Calculator className="h-3.5 w-3.5 text-slate-300 transition-colors group-hover:text-brand" aria-hidden="true" />
+                </span>
+            </span>
+            <span className="mt-1 flex items-baseline gap-1">
+                {cell.prefix && <span className="text-xs text-slate-500">{cell.prefix}</span>}
+                <span className={`text-[22px] font-semibold leading-7 tracking-tight tabular-nums ${cell.valueClass || "text-slate-900"}`}>{cell.value}</span>
+                {cell.unit && <span className="text-xs text-slate-500">{cell.unit}</span>}
+            </span>
+            <span className="mt-0.5 flex items-center justify-between gap-2 text-xs text-slate-500">
+                <span className="truncate">{cell.note}</span>
+                {cell.tag && (
+                    <span className="shrink-0 font-mono text-[11px] text-slate-600" title={cell.tagTitle}>{cell.tag}</span>
+                )}
+            </span>
+        </button>
+    )
+
+    const strip = "grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4"
+
     return (
-        <div className="space-y-4 mb-6">
+        <div className="mb-5 space-y-4">
             {(excluded || showTelemetryNotice) && (
-                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
-                    <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+                <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" role="status">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
                     <div className="space-y-0.5">
                         {excluded && (
-                            <span className="block font-bold">
+                            <span className="block">
                                 KPIs cover vehicles matched to exactly one Wialon unit; {excluded.count.toLocaleString()} of {excluded.allCount.toLocaleString()} transactions
                                 ({formatNumber(excluded.litres, 1)} L) are excluded and listed separately.
                             </span>
                         )}
                         {showTelemetryNotice && (
-                            <span className="block font-bold">Wialon telemetry {telemetryStatus}: values shown as "—" were not reported.</span>
+                            <span className="block font-medium">Wialon telemetry {telemetryStatus}: values shown as "—" were not reported.</span>
                         )}
                         {showTelemetryNotice && dataWarnings.map((w) => <span key={w} className="block">{w}</span>)}
                     </div>
                 </div>
             )}
 
-            {/* ─── SECTION 1: RECORDED FUEL TRANSACTIONS ────────────────────── */}
-            <div>
-                <div className="flex items-center justify-between mb-2 px-1">
-                    <div className="flex items-center gap-2">
-                        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] font-black tracking-wider uppercase text-emerald-800 border border-emerald-200/60">
-                            <ShieldCheck className="h-3 w-3" />
-                            Recorded Fuel Transactions
-                        </span>
-                        <span className="text-[11px] font-medium text-slate-400 hidden sm:inline">
-                            Fuel statement invoices (net of refunds)
-                        </span>
-                    </div>
+            <section aria-labelledby="fuel-recorded-heading">
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                    <h2 id="fuel-recorded-heading" className="text-[13px] font-semibold text-slate-900">
+                        Recorded <span className="font-normal text-slate-500">· fuel statement invoices, net of refunds</span>
+                    </h2>
                     {avgPrice !== null && (
-                        <span className="text-[11px] font-bold text-slate-500">
-                            Weighted Avg: <span className="font-mono text-slate-900 font-black">AED {avgPrice.toFixed(2)}/L</span>
+                        <span className="text-xs text-slate-500">
+                            Weighted avg <span className="font-mono font-medium text-slate-900">AED {avgPrice.toFixed(2)}/L</span>
                         </span>
                     )}
                 </div>
+                <div className={strip}>{recordedCells.map(renderCell)}</div>
+            </section>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                    {/* 1. Fuel Purchased */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("total_litres")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                Fuel Purchased
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400 group-hover:text-[#33758F] font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-blue-50 p-1.5 text-blue-600 border border-blue-100">
-                                    <Droplets className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-slate-900">
-                                {formatNumber(totalLitres, 1)}
-                            </span>
-                            <span className="text-xs font-bold text-slate-400">Litres</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                            <span>Net purchased volume</span>
-                            <ClassificationBadge classification={vc} field="total_litres" />
-                        </div>
-                    </button>
-
-                    {/* 2. Fuel Expenditure */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("total_cost")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                Recorded Expenditure
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400 group-hover:text-[#33758F] font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-emerald-50 p-1.5 text-emerald-600 border border-emerald-100">
-                                    <DollarSign className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-xs font-bold text-slate-500">AED</span>
-                            <span className="text-2xl font-black tracking-tight text-slate-900">
-                                {formatCurrency(totalCost)}
-                            </span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                            <span>Total fuel spend</span>
-                            <ClassificationBadge classification={vc} field="total_cost" />
-                        </div>
-                    </button>
-
-                    {/* 3. Refuel Transactions */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("transaction_count")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                Refuel Transactions
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400 group-hover:text-[#33758F] font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-amber-50 p-1.5 text-amber-600 border border-amber-100">
-                                    <Activity className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-slate-900">
-                                {transactionCount !== undefined ? formatCurrency(transactionCount) : "—"}
-                            </span>
-                            <span className="text-xs font-bold text-slate-400">Events</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                            <span>
-                                {totalLitres && transactionCount ? `~${(totalLitres / transactionCount).toFixed(1)} L / refuel` : "Statement records"}
-                            </span>
-                            <ClassificationBadge classification={vc} field="transaction_count" />
-                        </div>
-                    </button>
-
-                    {/* 4. Vehicles Refuelled */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("vehicle_count")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-xs hover:border-[#33758F]/60 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                                Vehicles Refuelled
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-slate-400 group-hover:text-[#33758F] font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-purple-50 p-1.5 text-purple-600 border border-purple-100">
-                                    <Route className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-slate-900">
-                                {vehicleCount !== undefined && vehicleCount !== null ? vehicleCount : "—"}
-                            </span>
-                            <span className="text-xs font-bold text-slate-400">Wialon units</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                            <span className="text-emerald-700 font-bold">
-                                {vehiclesWithDistance !== undefined && vehiclesWithDistance !== null ? `${vehiclesWithDistance} with distance` : "—"}
-                            </span>
-                            <span className="font-semibold text-slate-500">
-                                {engineOnlyCount ? `${engineOnlyCount} engine-only` : ""}
-                            </span>
-                        </div>
-                    </button>
-                </div>
-            </div>
-
-            {/* ─── SECTION 2: ESTIMATED TELEMATICS & CONSUMPTION ─────────── */}
-            <div>
-                <div className="flex items-center justify-between mb-2 px-1">
-                    <div className="flex items-center gap-2">
-                        <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-2 py-0.5 text-[10px] font-black tracking-wider uppercase text-amber-800 border border-amber-200/60">
-                            <Flame className="h-3 w-3" />
-                            Estimated Telematics Intelligence
-                        </span>
-                        <span className="text-[11px] font-medium text-slate-400 hidden sm:inline">
-                            Stationary engine duration @ {idleRate.toFixed(1)} L/h rate
-                        </span>
-                    </div>
-                    {idleHours !== undefined && idleHours !== null && (
-                        <span className="text-[11px] font-bold text-slate-500">
-                            Qualifying Idle: <span className="font-mono text-amber-700 font-black">{idleHours.toFixed(1)} hrs</span>
+            <section aria-labelledby="fuel-estimated-heading">
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+                    <h2 id="fuel-estimated-heading" className="text-[13px] font-semibold text-slate-900">
+                        Estimated <span className="font-normal text-slate-500">· stationary engine time at {idleRate.toFixed(1)} L/h</span>
+                    </h2>
+                    {has(idleHours) && (
+                        <span className="text-xs text-slate-500">
+                            Qualifying idle <span className="font-mono font-medium text-slate-900">{idleHours.toFixed(1)} h</span>
                         </span>
                     )}
                 </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-                    {/* 5. Estimated Idle Fuel */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("estimated_idle_fuel")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-amber-200/80 bg-gradient-to-br from-amber-50/40 to-white p-4 shadow-xs hover:border-amber-400 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-900">
-                                Estimated Idling Fuel
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-amber-700/80 group-hover:text-amber-900 font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-amber-100 p-1.5 text-amber-700 border border-amber-200">
-                                    <Clock className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-amber-900">
-                                {estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) : "—"}
-                            </span>
-                            <span className="text-xs font-bold text-amber-700">Litres</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-amber-800">
-                            <span>
-                                {idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}% of fuel` : "Idle consumption"}
-                            </span>
-                            <span className="font-mono text-[10px] bg-amber-100 px-1.5 py-0.5 rounded font-bold">
-                                {idleRate.toFixed(1)} L/h
-                            </span>
-                        </div>
-                    </button>
-
-                    {/* 6. Estimated Idle Fuel Cost */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("estimated_idle_cost")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-rose-200/80 bg-gradient-to-br from-rose-50/40 to-white p-4 shadow-xs hover:border-rose-400 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-900">
-                                Estimated Idle Cost
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-rose-700/80 group-hover:text-rose-900 font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-rose-100 p-1.5 text-rose-700 border border-rose-200">
-                                    <Flame className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-xs font-bold text-rose-700">AED</span>
-                            <span className="text-2xl font-black tracking-tight text-rose-900">
-                                {estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}
-                            </span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-rose-800">
-                            <span>Direct idling loss</span>
-                            <span className="font-semibold text-rose-700">Actionable Waste</span>
-                        </div>
-                    </button>
-
-                    {/* 7. Estimated Driving Fuel */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("estimated_driving_fuel")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-sky-200/80 bg-gradient-to-br from-sky-50/30 to-white p-4 shadow-xs hover:border-sky-400 hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-sky-900">
-                                Estimated Driving Fuel
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-sky-700/80 group-hover:text-sky-900 font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-sky-100 p-1.5 text-sky-700 border border-sky-200">
-                                    <Route className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-sky-900">
-                                {estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? formatNumber(estimatedDrivingFuel, 1) : "—"}
-                            </span>
-                            <span className="text-xs font-bold text-sky-700">Litres</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-sky-800">
-                            <span>
-                                {drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}% productive` : (drivingHours ? `${drivingHours.toFixed(1)}h in motion` : "Productive motion")}
-                            </span>
-                            <span className="font-mono text-[10px] bg-sky-100 px-1.5 py-0.5 rounded font-bold" title={trackedLitres !== undefined && trackedLitres !== null ? `${formatNumber(trackedLitres, 1)} L purchased by vehicles with Wialon distance` : undefined}>
-                                {formatNumber(totalDistance, 0)} km
-                            </span>
-                        </div>
-                    </button>
-
-                    {/* 8. Fleet Fuel Efficiency */}
-                    <button
-                        type="button"
-                        onClick={() => setSelectedKpi("efficiency")}
-                        className="group text-left relative overflow-hidden rounded-xl border border-[#33758F]/30 bg-gradient-to-br from-[#33758F]/5 to-white p-4 shadow-xs hover:border-[#33758F] hover:shadow-sm transition-all cursor-pointer"
-                        title="Click to view exact formula and calculation breakdown"
-                    >
-                        <div className="flex items-center justify-between mb-1.5">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-[#33758F]">
-                                Purchase-based Efficiency
-                            </span>
-                            <div className="flex items-center gap-1">
-                                <span className="text-[10px] text-[#33758F]/80 group-hover:text-[#33758F] font-semibold transition-colors flex items-center">
-                                    Formula <ArrowUpRight className="h-3 w-3 ml-0.5" />
-                                </span>
-                                <div className="rounded-lg bg-[#33758F]/10 p-1.5 text-[#33758F] border border-[#33758F]/20">
-                                    <Gauge className="h-3.5 w-3.5" />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-black tracking-tight text-slate-900">
-                                {efficiency !== null && efficiency !== undefined ? formatNumber(efficiency, 1) : "—"}
-                            </span>
-                            <span className="text-xs font-bold text-slate-500">L / 100 km</span>
-                        </div>
-                        <div className="mt-2 flex items-center justify-between text-[11px] text-slate-600">
-                            <span>
-                                {costPerKm !== null && costPerKm !== undefined
-                                    ? `AED ${formatNumber(costPerKm, 2)} / km`
-                                    : suppressedReason === "insufficient_distance"
-                                        ? "Below minimum distance"
-                                        : suppressedReason === "non_positive_net_fuel"
-                                            ? "Refunds exceed purchases"
-                                            : "Fuel purchased ÷ Wialon km"}
-                            </span>
-                            <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />
-                        </div>
-                    </button>
-                </div>
-            </div>
+                <div className={strip}>{estimatedCells.map(renderCell)}</div>
+            </section>
 
             {/* ─── INTERACTIVE KPI FORMULA & BREAKDOWN MODAL ───────────── */}
             {activeBreakdown && createPortal(
                 <div
-                    className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4 overflow-y-auto"
+                    className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4"
                     onClick={() => setSelectedKpi(null)}
                 >
                     <div
                         role="dialog"
                         aria-modal="true"
                         aria-label={`${activeBreakdown.title} calculation breakdown`}
-                        className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl my-8 sm:p-6"
+                        className="my-8 w-full max-w-xl rounded-xl border border-slate-200 bg-white p-5 shadow-dialog"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* Header */}
                         <div className="flex items-center justify-between pb-3.5 border-b border-slate-100">
                             <div className="flex items-center gap-2.5">
-                                <div className="rounded-xl bg-[#33758F]/10 p-2 text-[#33758F]">
-                                    <Calculator className="h-4 w-4" />
-                                </div>
                                 <div>
                                     <div className="flex items-center gap-2">
-                                        <h3 className="text-base font-black text-slate-900">
+                                        <h3 className="text-[15px] font-semibold text-slate-900">
                                             {activeBreakdown.title}
                                         </h3>
                                         <span
-                                            className={`rounded-md px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${
+                                            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
                                                 activeBreakdown.classificationBadge === "recorded"
                                                     ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
                                                     : activeBreakdown.classificationBadge === "estimated"
@@ -676,7 +472,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                             <button
                                 type="button"
                                 onClick={() => setSelectedKpi(null)}
-                                className="rounded-xl p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                                className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
                                 aria-label="Close"
                             >
                                 <X className="h-5 w-5" />
@@ -684,19 +480,19 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         </div>
 
                         {/* Top Result & Metadata Card */}
-                        <div className="my-4 rounded-xl border border-slate-200/90 bg-slate-50/70 p-4">
+                        <div className="my-4 rounded-lg border border-slate-200 p-4">
                             <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pb-3 border-b border-slate-200/60">
                                 <div>
-                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">
-                                        Current Filter Result
+                                    <span className="block text-xs text-slate-500">
+                                        Result for current filters
                                     </span>
-                                    <span className="text-3xl font-black tracking-tight text-slate-900">
+                                    <span className="text-[28px] font-semibold tracking-tight tabular-nums text-slate-900">
                                         {activeBreakdown.resultText}
                                     </span>
                                 </div>
                                 <div className="text-left sm:text-right text-[11px] text-slate-500 space-y-0.5">
                                     <div className="flex items-center sm:justify-end gap-1.5 font-medium">
-                                        <Calendar className="h-3 w-3 text-[#33758F]" />
+                                        <Calendar className="h-3 w-3 text-brand" />
                                         <span>{activeBreakdown.dateRange}</span>
                                     </div>
                                     <div className="flex items-center sm:justify-end gap-1.5 text-slate-400">
@@ -708,10 +504,10 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
                             {/* Exact Mathematical Formula */}
                             <div className="pt-3">
-                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-1">
-                                    Exact Calculation Formula
+                                <span className="mb-1 block text-xs text-slate-500">
+                                    Formula
                                 </span>
-                                <div className="rounded-xl bg-white border border-slate-200/90 p-2.5 font-mono text-xs font-bold text-slate-800 shadow-2xs">
+                                <div className="rounded-md bg-slate-50 px-2.5 py-2 font-mono text-xs text-slate-800">
                                     {activeBreakdown.formulaText}
                                 </div>
                             </div>
@@ -719,24 +515,24 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
                         {/* Actual Input Values Table */}
                         <div className="my-4">
-                            <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block mb-2 px-0.5">
-                                Actual Input Values (From API Data)
+                            <span className="mb-1.5 block text-xs text-slate-500">
+                                Input values (from API data)
                             </span>
-                            <div className="rounded-xl border border-slate-200 overflow-hidden text-xs">
+                            <div className="rounded-lg border border-slate-200 overflow-hidden text-xs">
                                 <table className="w-full text-left">
-                                    <thead className="bg-slate-100/70 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                    <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
                                         <tr>
-                                            <th className="px-3 py-2">Variable / Metric</th>
-                                            <th className="px-3 py-2 text-right">Actual Value</th>
-                                            <th className="px-3 py-2 text-slate-400">Data Source</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Variable</th>
+                                            <th scope="col" className="px-3 py-2 text-right font-medium">Value</th>
+                                            <th scope="col" className="px-3 py-2 font-medium">Source</th>
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100 bg-white">
                                         {activeBreakdown.inputs.map((inp, idx) => (
                                             <tr key={idx} className="hover:bg-slate-50/60">
-                                                <td className="px-3 py-2 font-semibold text-slate-700">{inp.label}</td>
-                                                <td className="px-3 py-2 font-mono font-bold text-slate-900 text-right">{inp.value}</td>
-                                                <td className="px-3 py-2 text-[11px] text-slate-400">{inp.source}</td>
+                                                <td className="px-3 py-2 text-slate-700">{inp.label}</td>
+                                                <td className="px-3 py-2 text-right font-mono font-medium text-slate-900">{inp.value}</td>
+                                                <td className="px-3 py-2 text-[11px] text-slate-500">{inp.source}</td>
                                             </tr>
                                         ))}
                                     </tbody>
@@ -746,9 +542,9 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
                         {/* Step-by-Step Calculation */}
                         {activeBreakdown.calculationSteps && activeBreakdown.calculationSteps.length > 0 && (
-                            <div className="my-4 rounded-xl border border-slate-100 bg-slate-50/50 p-3 text-xs space-y-1">
-                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block mb-1">
-                                    Substitution & Calculation Steps
+                            <div className="my-4 space-y-1 rounded-md bg-slate-50 px-3 py-2.5 text-xs">
+                                <span className="mb-1 block text-xs text-slate-500">
+                                    Calculation
                                 </span>
                                 {activeBreakdown.calculationSteps.map((step, i) => (
                                     <div key={i} className="font-mono text-[11px] text-slate-700 flex items-center gap-2">
@@ -760,8 +556,8 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         )}
 
                         {/* Nature & Data Quality Guarantee */}
-                        <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3 text-xs text-slate-600 flex items-start gap-2">
-                            <Info className="h-4 w-4 text-[#33758F] shrink-0 mt-0.5" />
+                        <div className="flex items-start gap-2 border-t border-slate-200 pt-3 text-xs text-slate-600">
+                            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
                             <p className="text-[11px] leading-relaxed">
                                 {activeBreakdown.natureText}
                             </p>
@@ -772,9 +568,9 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                             <button
                                 type="button"
                                 onClick={() => setSelectedKpi(null)}
-                                className="rounded-xl bg-slate-100 hover:bg-slate-200 px-4 py-2 text-xs font-bold text-slate-700 transition-colors cursor-pointer"
+                                className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 cursor-pointer"
                             >
-                                Close Breakdown
+                                Close
                             </button>
                         </div>
                     </div>

@@ -1,23 +1,19 @@
 import { Link } from "react-router-dom"
-import { ArrowUpRight } from "lucide-react"
 
 /**
- * Enterprise White-Surface KPI Card.
- * Complies with ATS Fleet design system:
- * - Pure white background (#FFFFFF)
- * - Subtle neutral border (#E2E8F0)
- * - Bold legible typography with clear visual hierarchy
- * - Interactive link or button capability with ATS brand accent (#33758F)
+ * One metric cell. Place cells inside <KpiStrip> so they share a single panel with
+ * hairline dividers instead of floating as separate cards.
+ * - `dot`: a status color class (e.g. "bg-status-moving") shown before the label
+ * - `valueColor`: only when the value itself signals a state (e.g. offline > 0)
+ * - `to` / `onClick` make the cell interactive; `selected` marks an active filter
+ * `icon`, `iconBg`, `badge`, `badgeCls` are accepted for API compatibility but not rendered.
  */
 export default function KpiCard({
     label,
     value,
     sub,
-    icon: Icon,
-    iconBg = "bg-slate-50 text-[#33758F] border border-slate-100",
+    dot,
     valueColor = "text-slate-900",
-    badge,
-    badgeCls = "bg-slate-100 text-slate-600 border-slate-200",
     to,
     onClick,
     selected = false,
@@ -25,83 +21,49 @@ export default function KpiCard({
     className = "",
     title,
 }) {
-    const cardContent = (
+    const body = (
         <>
-            <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block truncate">
-                        {label}
-                    </span>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                    {badge && (
-                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${badgeCls}`}>
-                            {badge}
-                        </span>
-                    )}
-                    {Icon && (
-                        <div className={`flex h-7 w-7 items-center justify-center rounded-lg ${iconBg}`}>
-                            <Icon className="h-3.5 w-3.5" />
-                        </div>
-                    )}
-                    {to && (
-                        <ArrowUpRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-[#33758F] group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all" />
-                    )}
-                </div>
-            </div>
-
-            <div className="my-2">
-                {loading ? (
-                    <div className="my-0.5 h-7 w-20 animate-pulse rounded-md bg-slate-100" />
-                ) : (
-                    <p className={`truncate text-2xl font-bold tracking-tight tabular-nums ${valueColor}`}>
-                        {value ?? "—"}
-                    </p>
-                )}
-            </div>
-
-            {sub && (
-                <div className="text-[11px] font-medium text-slate-500 truncate">
-                    {sub}
-                </div>
+            <span className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-slate-500">
+                {dot && <span className={`h-2 w-2 shrink-0 rounded-[2px] ${dot}`} aria-hidden="true" />}
+                <span className="truncate">{label}</span>
+            </span>
+            {loading ? (
+                <span className="mt-1.5 block h-6 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+            ) : (
+                <span className={`mt-1 block truncate text-[22px] font-semibold leading-7 tracking-tight tabular-nums ${valueColor}`}>
+                    {value ?? "—"}
+                </span>
             )}
+            {sub && <span className="mt-0.5 block truncate text-xs text-slate-500">{sub}</span>}
         </>
     )
 
-    const baseClasses = `flex min-w-0 flex-col justify-between rounded-xl border bg-white p-4 shadow-xs transition-all text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#33758F]/40 ${
-        selected
-            ? "border-[#33758F] ring-2 ring-[#33758F]/20 shadow-sm"
-            : "border-slate-200/90 hover:border-slate-300"
-    } ${className}`
+    const base = `relative flex min-w-0 flex-col bg-white px-4 py-3 text-left ${className}`
+    const interactive = `${base} cursor-pointer transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40 ${
+        selected ? "bg-brand-light/60 shadow-[inset_0_-2px_0_var(--color-brand)] hover:bg-brand-light/60" : ""
+    }`
 
     if (to) {
-        return (
-            <Link
-                to={to}
-                title={title || label}
-                className={`${baseClasses} group hover:border-[#33758F]/40 hover:shadow-sm cursor-pointer`}
-            >
-                {cardContent}
-            </Link>
-        )
+        return <Link to={to} title={title || label} className={interactive}>{body}</Link>
     }
-
     if (onClick) {
         return (
-            <button
-                type="button"
-                onClick={onClick}
-                title={title || label}
-                className={`${baseClasses} cursor-pointer group hover:border-[#33758F]/40 hover:shadow-sm`}
-            >
-                {cardContent}
+            <button type="button" onClick={onClick} title={title || label} aria-pressed={selected} className={interactive}>
+                {body}
             </button>
         )
     }
+    return <div className={base} title={title || label}>{body}</div>
+}
 
+/** Single panel that lays metric cells out on a grid with 1px hairline dividers. */
+export function KpiStrip({ children, className = "", label }) {
     return (
-        <div className={baseClasses} title={title || label}>
-            {cardContent}
-        </div>
+        <section
+            aria-label={label}
+            className={`grid gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 ${className}`}
+        >
+            {children}
+        </section>
     )
 }

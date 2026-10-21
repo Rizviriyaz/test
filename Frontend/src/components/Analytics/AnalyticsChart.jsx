@@ -1,4 +1,4 @@
-import { useState, useId } from "react"
+import { useState } from "react"
 import {
     ResponsiveContainer,
     BarChart,
@@ -24,30 +24,32 @@ import {
     Disc,
     AlignLeft,
     Check,
+    ChevronDown,
 } from "lucide-react"
-
-const DEFAULT_PALETTE = [
-    "#F97316", // Amber / Orange
-    "#3B82F6", // Blue
-    "#10B981", // Emerald
-    "#8B5CF6", // Purple
-    "#EC4899", // Pink
-    "#06B6D4", // Cyan
-    "#F59E0B", // Yellow
-    "#6366F1", // Indigo
-    "#14B8A6", // Teal
-    "#EF4444", // Red
-]
+import {
+    AXIS_LINE,
+    CATEGORY_TICK,
+    GRID_STROKE,
+    SERIES_COLOR,
+    TICK,
+    TOOLTIP_CURSOR,
+    categoricalColor,
+} from "../Common/chartTheme"
 
 const TYPE_CONFIG = {
-    bar: { label: "Vertical Bar", icon: BarChart3 },
-    "horizontal-bar": { label: "Horizontal Bar", icon: AlignLeft },
+    bar: { label: "Vertical bar", icon: BarChart3 },
+    "horizontal-bar": { label: "Horizontal bar", icon: AlignLeft },
     line: { label: "Line", icon: LineChartIcon },
     area: { label: "Area", icon: AreaChartIcon },
     pie: { label: "Pie", icon: PieChartIcon },
     donut: { label: "Donut", icon: Disc },
 }
 
+/**
+ * Single-measure chart with a switchable form. Bars, lines and areas use one color
+ * (`color`, brand teal by default); only pie/donut slices take the categorical palette,
+ * in data order, with a legend.
+ */
 export default function AnalyticsChart({
     title,
     subtitle,
@@ -57,29 +59,31 @@ export default function AnalyticsChart({
     availableTypes = ["bar", "horizontal-bar", "line", "area", "pie", "donut"],
     defaultType = "bar",
     unit = "",
-    color = "#F97316",
+    color = SERIES_COLOR,
     height = 280,
     onItemClick = null,
     emptyMessage = "No data available for this chart",
 }) {
     const [chartType, setChartType] = useState(defaultType)
     const [dropdownOpen, setDropdownOpen] = useState(false)
-    const gradientId = useId()
 
     // Validate current chartType against availableTypes
     const activeType = availableTypes.includes(chartType)
         ? chartType
         : availableTypes[0] || "bar"
 
+    const tickFormatter = (v) => `${v}${unit ? " " + unit : ""}`
+    const pointer = onItemClick ? "pointer" : "default"
+
     const CustomTooltip = ({ active, payload, label }) => {
         if (active && payload && payload.length) {
             const currentItem = payload[0]
             const val = currentItem.value
-            const name = label || currentItem.name || currentItem.payload?.[nameKey] || ""
+            const name = currentItem.payload?.fullLabel || label || currentItem.name || currentItem.payload?.[nameKey] || ""
             return (
-                <div className="rounded-xl border border-slate-100 bg-white/95 p-3 shadow-lg backdrop-blur-sm">
-                    <p className="text-xs font-semibold text-slate-700">{name}</p>
-                    <p className="mt-1 text-sm font-bold text-slate-900">
+                <div className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 shadow-pop">
+                    <p className="text-[11px] text-slate-500">{name}</p>
+                    <p className="text-[13px] font-semibold tabular-nums text-slate-900">
                         {val == null ? "Unknown" : <>{val} <span className="text-xs font-normal text-slate-500">{unit}</span></>}
                     </p>
                 </div>
@@ -101,44 +105,12 @@ export default function AnalyticsChart({
             case "horizontal-bar":
                 return (
                     <ResponsiveContainer width="100%" height="100%">
-                        <BarChart
-                            layout="vertical"
-                            data={data}
-                            margin={{ top: 10, right: 20, left: 40, bottom: 5 }}
-                            onClick={onItemClick}
-                        >
-                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" horizontal={false} />
-                            <XAxis
-                                type="number"
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                                tickFormatter={(v) => `${v}${unit ? " " + unit : ""}`}
-                            />
-                            <YAxis
-                                type="category"
-                                dataKey={nameKey}
-                                stroke="#64748B"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                                width={85}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
-                            <Bar
-                                dataKey={dataKey}
-                                fill={color}
-                                radius={[0, 6, 6, 0]}
-                                cursor={onItemClick ? "pointer" : "default"}
-                            >
-                                {data.map((_, index) => (
-                                    <Cell
-                                        key={`cell-${index}`}
-                                        fill={DEFAULT_PALETTE[index % DEFAULT_PALETTE.length]}
-                                    />
-                                ))}
-                            </Bar>
+                        <BarChart layout="vertical" data={data} margin={{ top: 4, right: 20, left: 8, bottom: 4 }} onClick={onItemClick}>
+                            <CartesianGrid stroke={GRID_STROKE} horizontal={false} />
+                            <XAxis type="number" tick={TICK} tickLine={false} axisLine={false} tickFormatter={tickFormatter} />
+                            <YAxis type="category" dataKey={nameKey} tick={CATEGORY_TICK} tickLine={false} axisLine={false} width={92} />
+                            <Tooltip cursor={TOOLTIP_CURSOR} content={<CustomTooltip />} />
+                            <Bar dataKey={dataKey} fill={color} radius={[0, 3, 3, 0]} maxBarSize={16} cursor={pointer} />
                         </BarChart>
                     </ResponsiveContainer>
                 )
@@ -146,34 +118,18 @@ export default function AnalyticsChart({
             case "line":
                 return (
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart
-                            data={data}
-                            margin={{ top: 10, right: 20, left: 0, bottom: 5 }}
-                            onClick={onItemClick}
-                        >
-                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                            <XAxis
-                                dataKey={nameKey}
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                            />
-                            <YAxis
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                                tickFormatter={(v) => `${v}${unit ? " " + unit : ""}`}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
+                        <LineChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 4 }} onClick={onItemClick}>
+                            <CartesianGrid stroke={GRID_STROKE} vertical={false} />
+                            <XAxis dataKey={nameKey} tick={TICK} tickLine={false} axisLine={{ stroke: AXIS_LINE }} />
+                            <YAxis tick={TICK} tickLine={false} axisLine={false} tickFormatter={tickFormatter} />
+                            <Tooltip cursor={{ stroke: AXIS_LINE }} content={<CustomTooltip />} />
                             <Line
                                 type="monotone"
                                 dataKey={dataKey}
                                 stroke={color}
-                                strokeWidth={2.5}
-                                dot={{ r: 3, fill: color, strokeWidth: 1.5, stroke: "#fff" }}
-                                activeDot={{ r: 6, fill: color, stroke: "#fff", strokeWidth: 2 }}
+                                strokeWidth={2}
+                                dot={data.length <= 31 ? { r: 2.5, fill: color, strokeWidth: 0 } : false}
+                                activeDot={{ r: 4.5, fill: color, stroke: "#fff", strokeWidth: 2 }}
                             />
                         </LineChart>
                     </ResponsiveContainer>
@@ -182,40 +138,19 @@ export default function AnalyticsChart({
             case "area":
                 return (
                     <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart
-                            data={data}
-                            margin={{ top: 10, right: 20, left: 0, bottom: 5 }}
-                            onClick={onItemClick}
-                        >
-                            <defs>
-                                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="5%" stopColor={color} stopOpacity={0.4} />
-                                    <stop offset="95%" stopColor={color} stopOpacity={0.0} />
-                                </linearGradient>
-                            </defs>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" />
-                            <XAxis
-                                dataKey={nameKey}
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                            />
-                            <YAxis
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                                tickFormatter={(v) => `${v}${unit ? " " + unit : ""}`}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
+                        <AreaChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 4 }} onClick={onItemClick}>
+                            <CartesianGrid stroke={GRID_STROKE} vertical={false} />
+                            <XAxis dataKey={nameKey} tick={TICK} tickLine={false} axisLine={{ stroke: AXIS_LINE }} />
+                            <YAxis tick={TICK} tickLine={false} axisLine={false} tickFormatter={tickFormatter} />
+                            <Tooltip cursor={{ stroke: AXIS_LINE }} content={<CustomTooltip />} />
                             <Area
                                 type="monotone"
                                 dataKey={dataKey}
                                 stroke={color}
-                                strokeWidth={2.5}
-                                fillOpacity={1}
-                                fill={`url(#${gradientId})`}
+                                strokeWidth={2}
+                                fill={color}
+                                fillOpacity={0.1}
+                                activeDot={{ r: 4.5, fill: color, stroke: "#fff", strokeWidth: 2 }}
                             />
                         </AreaChart>
                     </ResponsiveContainer>
@@ -232,29 +167,25 @@ export default function AnalyticsChart({
                                 dataKey={dataKey}
                                 nameKey={nameKey}
                                 cx="50%"
-                                cy="50%"
-                                innerRadius={activeType === "donut" ? 50 : 0}
-                                outerRadius={78}
-                                paddingAngle={activeType === "donut" ? 3 : 0}
-                                cursor={onItemClick ? "pointer" : "default"}
+                                cy="45%"
+                                innerRadius={activeType === "donut" ? 52 : 0}
+                                outerRadius={80}
+                                paddingAngle={0}
+                                stroke="#fff"
+                                strokeWidth={2}
+                                cursor={pointer}
                                 onClick={onItemClick}
                             >
                                 {data.map((_, index) => (
-                                    <Cell
-                                        key={`pie-cell-${index}`}
-                                        fill={DEFAULT_PALETTE[index % DEFAULT_PALETTE.length]}
-                                    />
+                                    <Cell key={`pie-cell-${index}`} fill={categoricalColor(index)} />
                                 ))}
                             </Pie>
                             <Legend
                                 verticalAlign="bottom"
                                 height={36}
-                                iconType="circle"
-                                formatter={(val) => (
-                                    <span className="text-[11px] font-medium text-slate-600">
-                                        {val}
-                                    </span>
-                                )}
+                                iconType="square"
+                                iconSize={8}
+                                formatter={(val) => <span className="text-[11px] text-slate-600">{val}</span>}
                             />
                         </PieChart>
                     </ResponsiveContainer>
@@ -264,40 +195,12 @@ export default function AnalyticsChart({
             default:
                 return (
                     <ResponsiveContainer width="100%" height="100%">
-                        <BarChart
-                            data={data}
-                            margin={{ top: 10, right: 10, left: -10, bottom: 5 }}
-                            onClick={onItemClick}
-                        >
-                            <CartesianGrid strokeDasharray="3 3" stroke="#F1F5F9" vertical={false} />
-                            <XAxis
-                                dataKey={nameKey}
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                            />
-                            <YAxis
-                                stroke="#94A3B8"
-                                fontSize={11}
-                                tickLine={false}
-                                axisLine={false}
-                                tickFormatter={(v) => `${v}${unit ? " " + unit : ""}`}
-                            />
-                            <Tooltip content={<CustomTooltip />} />
-                            <Bar
-                                dataKey={dataKey}
-                                fill={color}
-                                radius={[6, 6, 0, 0]}
-                                cursor={onItemClick ? "pointer" : "default"}
-                            >
-                                {data.map((_, index) => (
-                                    <Cell
-                                        key={`bar-cell-${index}`}
-                                        fill={DEFAULT_PALETTE[index % DEFAULT_PALETTE.length]}
-                                    />
-                                ))}
-                            </Bar>
+                        <BarChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 4 }} onClick={onItemClick}>
+                            <CartesianGrid stroke={GRID_STROKE} vertical={false} />
+                            <XAxis dataKey={nameKey} tick={TICK} tickLine={false} axisLine={{ stroke: AXIS_LINE }} />
+                            <YAxis tick={TICK} tickLine={false} axisLine={false} tickFormatter={tickFormatter} />
+                            <Tooltip cursor={TOOLTIP_CURSOR} content={<CustomTooltip />} />
+                            <Bar dataKey={dataKey} fill={color} radius={[3, 3, 0, 0]} maxBarSize={32} cursor={pointer} />
                         </BarChart>
                     </ResponsiveContainer>
                 )
@@ -307,41 +210,34 @@ export default function AnalyticsChart({
     const ActiveIcon = TYPE_CONFIG[activeType]?.icon || BarChart3
 
     return (
-        <div className="flex min-w-0 flex-col justify-between rounded-xl border border-slate-200 bg-white p-4 shadow-xs sm:p-5">
-            {/* Chart Header with Interactive Type Switcher */}
-            <div className="flex items-start justify-between gap-2 pb-3">
+        <div className="flex min-w-0 flex-col rounded-lg border border-slate-200 bg-white p-4">
+            <div className="flex items-start justify-between gap-2 pb-2">
                 <div className="min-w-0">
-                    <h3 className="truncate text-sm font-semibold text-slate-900">{title}</h3>
-                    {subtitle && (
-                        <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>
-                    )}
+                    <h3 className="truncate text-[13px] font-semibold text-slate-900">{title}</h3>
+                    {subtitle && <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>}
                 </div>
 
-                {/* Chart Type Selector Dropdown */}
                 {availableTypes && availableTypes.length > 1 && (
                     <div className="relative">
                         <button
                             type="button"
                             onClick={() => setDropdownOpen(!dropdownOpen)}
-                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-semibold text-slate-700 shadow-2xs transition hover:border-slate-300 hover:text-slate-900 cursor-pointer"
+                            onKeyDown={(e) => { if (e.key === "Escape") setDropdownOpen(false) }}
+                            className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:text-slate-900 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
                             title="Change visualization type"
                             aria-haspopup="listbox"
                             aria-expanded={dropdownOpen}
+                            aria-label={`Chart type: ${TYPE_CONFIG[activeType]?.label || activeType}`}
                         >
-                            <ActiveIcon className="h-3.5 w-3.5 text-[#33758F]" />
-                            <span className="capitalize">{TYPE_CONFIG[activeType]?.label || activeType}</span>
+                            <ActiveIcon className="h-3.5 w-3.5 text-slate-500" />
+                            <span className="hidden sm:inline">{TYPE_CONFIG[activeType]?.label || activeType}</span>
+                            <ChevronDown className="h-3 w-3 text-slate-400" />
                         </button>
 
                         {dropdownOpen && (
                             <>
-                                <div
-                                    className="fixed inset-0 z-40"
-                                    onClick={() => setDropdownOpen(false)}
-                                />
-                                <div className="absolute right-0 z-50 mt-1 w-40 rounded-xl border border-slate-200 bg-white py-1 shadow-lg animate-in fade-in zoom-in-95 duration-100">
-                                    <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                                        Chart Type
-                                    </div>
+                                <div className="fixed inset-0 z-40" onClick={() => setDropdownOpen(false)} />
+                                <div role="listbox" className="absolute right-0 z-50 mt-1 w-40 rounded-md border border-slate-200 bg-white p-1 shadow-pop">
                                     {availableTypes.map((typeKey) => {
                                         const cfg = TYPE_CONFIG[typeKey] || { label: typeKey, icon: BarChart3 }
                                         const Icon = cfg.icon
@@ -350,21 +246,21 @@ export default function AnalyticsChart({
                                             <button
                                                 key={typeKey}
                                                 type="button"
+                                                role="option"
+                                                aria-selected={isSelected}
                                                 onClick={() => {
                                                     setChartType(typeKey)
                                                     setDropdownOpen(false)
                                                 }}
-                                                className={`flex w-full items-center justify-between px-3 py-1.5 text-xs transition cursor-pointer ${
-                                                    isSelected
-                                                        ? "bg-[#F0F6F9] font-semibold text-[#33758F]"
-                                                        : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                                                className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-xs transition-colors cursor-pointer ${
+                                                    isSelected ? "font-medium text-slate-900" : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
                                                 }`}
                                             >
-                                                <div className="flex items-center gap-2">
-                                                    <Icon className={`h-3.5 w-3.5 ${isSelected ? "text-[#33758F]" : "text-slate-400"}`} />
-                                                    <span>{cfg.label}</span>
-                                                </div>
-                                                {isSelected && <Check className="h-3.5 w-3.5 text-[#33758F]" />}
+                                                <span className="flex items-center gap-2">
+                                                    <Icon className="h-3.5 w-3.5 text-slate-400" />
+                                                    {cfg.label}
+                                                </span>
+                                                {isSelected && <Check className="h-3.5 w-3.5 text-brand" />}
                                             </button>
                                         )
                                     })}
@@ -375,8 +271,7 @@ export default function AnalyticsChart({
                 )}
             </div>
 
-            {/* Chart Body */}
-            <div style={{ height: `${height}px` }} className="w-full pt-2">
+            <div style={{ height: `${height}px` }} className="w-full">
                 {renderChartContent()}
             </div>
         </div>

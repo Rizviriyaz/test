@@ -2,12 +2,10 @@ import { useState, useEffect } from "react"
 import { createPortal } from "react-dom"
 import {
     X,
-    Flame,
     AlertTriangle,
     Info,
     Loader2,
     CheckCircle2,
-    Fuel,
 } from "lucide-react"
 import { getVehicleFuelDetail } from "../../api/fleetApi"
 import VehicleStatusBadge from "./VehicleStatusBadge"
@@ -105,28 +103,25 @@ export default function VehicleFuelDetailModal({
     const costPerKm = summary?.fuel_cost_per_km
 
     return createPortal(
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 overflow-y-auto" onClick={onClose}>
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-3 sm:p-6 overflow-y-auto" onClick={onClose}>
             <div
                 role="dialog"
                 aria-modal="true"
                 aria-label={`${vehicleIdentifier} fuel details`}
-                className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-2xl border border-slate-200 bg-white shadow-2xl overflow-hidden my-auto"
+                className="relative w-full max-w-4xl max-h-[90vh] flex flex-col rounded-xl border border-slate-200 bg-white shadow-dialog overflow-hidden my-auto"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* ─── MODAL HEADER ────────────────────────────────────────── */}
-                <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50/70 px-4 py-4 sm:items-center sm:px-6">
+                <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4 sm:items-center sm:px-5">
                     <div className="flex min-w-0 items-center gap-3">
-                        <div className="hidden rounded-xl border border-[#33758F]/20 bg-[#33758F]/10 p-2.5 text-[#33758F] sm:block">
-                            <Fuel className="h-5 w-5" />
-                        </div>
                         <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
-                                <h3 className="font-mono text-lg font-bold tracking-tight text-slate-900">
+                                <h3 className="font-mono text-base font-semibold text-slate-900">
                                     {vehicleIdentifier}
                                 </h3>
                                 <VehicleStatusBadge status={summary?.status || "matched"} />
                                 {summary?.estimation_status && (
-                                    <span className="rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                                    <span className="rounded-sm border border-slate-200 px-1 text-[10px] text-slate-500">
                                         {summary.estimation_status}
                                     </span>
                                 )}
@@ -141,29 +136,29 @@ export default function VehicleFuelDetailModal({
                     <button
                         type="button"
                         onClick={onClose}
-                        className="rounded-xl p-2 text-slate-400 hover:bg-slate-200/60 hover:text-slate-700 transition-colors cursor-pointer"
+                        className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
                         aria-label="Close"
                     >
-                        <X className="h-5 w-5" />
+                        <X className="h-4 w-4" />
                     </button>
                 </div>
 
                 {/* ─── MODAL BODY ──────────────────────────────────────────── */}
-                <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
+                <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-5">
                     {loading ? (
-                        <div role="status" className="py-16 text-center text-xs font-semibold text-slate-500">
-                            <Loader2 className="mx-auto mb-3 h-6 w-6 animate-spin text-[#33758F]" />
+                        <div role="status" className="py-16 text-center text-xs text-slate-500">
+                            <Loader2 className="mx-auto mb-3 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
                             <span>Loading fuel transactions and activity…</span>
                         </div>
                     ) : error ? (
-                        <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700 flex items-center gap-3">
+                        <div role="alert" className="flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
                             <AlertTriangle className="h-5 w-5 shrink-0 text-rose-600" />
                             <span>{error}</span>
                         </div>
                     ) : (
                         <>
                             {/* Navigation Sub-Tabs */}
-                            <div role="tablist" className="-mx-1 flex items-center gap-1.5 overflow-x-auto border-b border-slate-100 px-1 pb-3">
+                            <div role="tablist" className="-mx-4 flex items-center gap-4 overflow-x-auto border-b border-slate-200 px-4 sm:-mx-5 sm:px-5">
                                 {[
                                     { id: "overview", label: "Performance Overview" },
                                     { id: "transactions", label: `Transactions (${txns.length})` },
@@ -176,10 +171,10 @@ export default function VehicleFuelDetailModal({
                                         role="tab"
                                         aria-selected={activeTab === t.id}
                                         onClick={() => setActiveTab(t.id)}
-                                        className={`shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                                        className={`-mb-px shrink-0 whitespace-nowrap border-b-2 py-2 text-xs font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:text-brand ${
                                             activeTab === t.id
-                                                ? "bg-[#33758F] text-white shadow-xs"
-                                                : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
+                                                ? "border-brand text-slate-900"
+                                                : "border-transparent text-slate-500 hover:text-slate-900"
                                         }`}
                                     >
                                         {t.label}
@@ -188,10 +183,10 @@ export default function VehicleFuelDetailModal({
                             </div>
 
                             {telemetryNotice && (
-                                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11px] text-amber-900 flex items-start gap-2" role="status">
+                                <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" role="status">
                                     <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
                                     <div className="space-y-0.5">
-                                        <span className="font-bold block">
+                                        <span className="font-semibold block">
                                             Wialon telemetry {telemetryNotice.status}: values shown as "—" were not reported.
                                         </span>
                                         {telemetryNotice.warnings.map((w) => (
@@ -205,107 +200,106 @@ export default function VehicleFuelDetailModal({
                             {activeTab === "overview" && (
                                 <div className="space-y-6">
                                     {/* 4 Core Vehicle KPIs */}
-                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="text-[11px] font-medium text-slate-500 mb-1 flex items-center gap-1.5">
                                                 Fuel Purchased <ClassificationBadge classification={vc} field="litres" />
                                             </span>
-                                            <span className="text-xl font-black text-slate-900 block">
+                                            <span className="text-xl font-semibold tabular-nums text-slate-900 block">
                                                 {formatNumber(totalLitres, 1)} <span className="text-xs font-semibold text-slate-400">L</span>
                                             </span>
-                                            <span className="text-[11px] text-slate-500 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 {txns.length} refuel transactions
                                             </span>
                                         </div>
 
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="text-[11px] font-medium text-slate-500 mb-1 flex items-center gap-1.5">
                                                 Total Expenditure <ClassificationBadge classification={vc} field="total_cost" />
                                             </span>
-                                            <span className="text-xl font-black text-slate-900 block">
+                                            <span className="text-xl font-semibold tabular-nums text-slate-900 block">
                                                 AED {formatCurrency(totalCost)}
                                             </span>
-                                            <span className="text-[11px] text-slate-500 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 {totalLitres > 0 ? `AED ${(totalCost / totalLitres).toFixed(2)} / L avg` : "—"}
                                             </span>
                                         </div>
 
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="text-[11px] font-medium text-slate-500 mb-1 flex items-center gap-1.5">
                                                 Distance Traveled <ClassificationBadge classification={vc} field="distance_km" />
                                             </span>
-                                            <span className="text-xl font-black text-sky-900 block">
+                                            <span className="text-xl font-semibold tabular-nums text-slate-900 block">
                                                 {distanceKm !== null && distanceKm !== undefined ? `${formatNumber(distanceKm, 1)}` : "—"} <span className="text-xs font-semibold text-slate-400">km</span>
                                             </span>
-                                            <span className="text-[11px] text-slate-500 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 Wialon trip report
                                             </span>
                                         </div>
 
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1.5">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="text-[11px] font-medium text-slate-500 mb-1 flex items-center gap-1.5">
                                                 Purchase-based Efficiency <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />
                                             </span>
-                                            <span className="text-xl font-black text-[#33758F] block">
+                                            <span className="text-xl font-semibold tabular-nums text-slate-900 block">
                                                 {efficiency !== null && efficiency !== undefined ? `${efficiency.toFixed(1)}` : "—"} <span className="text-xs font-semibold text-slate-400">L/100km</span>
                                             </span>
-                                            <span className="text-[11px] text-slate-500 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 {costPerKm !== null && costPerKm !== undefined ? `AED ${costPerKm.toFixed(2)}/km` : "—"}
                                             </span>
                                         </div>
                                     </div>
 
                                     {/* Driving vs Idling Breakdown Panel */}
-                                    <div className="rounded-xl border border-amber-200/80 bg-gradient-to-r from-amber-50/40 via-white to-sky-50/40 p-5 shadow-2xs">
+                                    <div className="rounded-lg border border-slate-200 bg-white p-4">
                                         <div className="flex items-center justify-between mb-3">
                                             <div className="flex items-center gap-2">
-                                                <Flame className="h-4 w-4 text-amber-700" />
-                                                <h4 className="text-xs font-black uppercase tracking-wider text-slate-900">
-                                                    Estimated Driving vs Idling Fuel Segregation
+                                                <h4 className="text-xs font-semibold text-slate-900">
+                                                    Estimated driving vs idling fuel
                                                 </h4>
                                             </div>
-                                            <span className="rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-black text-amber-900">
+                                            <span className="font-mono text-[11px] text-slate-600">
                                                 Rate: {idleRate.toFixed(1)} L/h
                                             </span>
                                         </div>
 
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                             {/* Driving Segment */}
-                                            <div className="rounded-xl border border-sky-200 bg-white/90 p-4 shadow-2xs">
+                                            <div className="rounded-md border border-slate-200 p-3">
                                                 <div className="flex items-center justify-between mb-2">
-                                                    <span className="text-xs font-bold text-sky-900">Productive Driving Fuel</span>
-                                                    <span className="text-xs font-black text-sky-700">
+                                                    <span className="text-xs font-medium text-slate-600">Productive driving fuel</span>
+                                                    <span className="text-xs tabular-nums text-slate-500">
                                                         {drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—"}
                                                     </span>
                                                 </div>
-                                                <span className="text-2xl font-black text-sky-900">
+                                                <span className="text-xl font-semibold tabular-nums text-slate-900">
                                                     {estDrivingFuel !== null && estDrivingFuel !== undefined ? `${formatNumber(estDrivingFuel, 1)} L` : "—"}
                                                 </span>
                                                 <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-between">
                                                     <span>Moving duration:</span>
-                                                    <span className="font-bold text-slate-800">{formatMeasurement(drivingHours, 1, "hrs")}</span>
+                                                    <span className="font-semibold text-slate-800">{formatMeasurement(drivingHours, 1, "hrs")}</span>
                                                 </div>
                                             </div>
 
                                             {/* Idling Segment */}
-                                            <div className="rounded-xl border border-rose-200 bg-white/90 p-4 shadow-2xs">
+                                            <div className="rounded-md border border-slate-200 p-3">
                                                 <div className="flex items-center justify-between mb-2">
-                                                    <span className="text-xs font-bold text-rose-900">Estimated Idling Waste</span>
-                                                    <span className="text-xs font-black text-rose-700">
+                                                    <span className="text-xs font-medium text-slate-600">Estimated idling waste</span>
+                                                    <span className="text-xs tabular-nums text-slate-500">
                                                         {idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—"}
                                                     </span>
                                                 </div>
                                                 <div className="flex items-baseline justify-between">
-                                                    <span className="text-2xl font-black text-rose-900">
+                                                    <span className="text-xl font-semibold tabular-nums text-amber-800">
                                                         {estIdleFuel !== null && estIdleFuel !== undefined ? `${formatNumber(estIdleFuel, 1)} L` : "—"}
                                                     </span>
-                                                    <span className="text-sm font-bold text-rose-700">
+                                                    <span className="text-sm font-semibold tabular-nums text-slate-700">
                                                         AED {formatCurrency(estIdleCost)}
                                                     </span>
                                                 </div>
                                                 <div className="mt-2 text-[11px] text-slate-500 flex items-center justify-between">
                                                     <span>Qualifying idle time:</span>
-                                                    <span className="font-bold text-slate-800">{formatMeasurement(idleHours, 1, "hrs")}</span>
+                                                    <span className="font-semibold text-slate-800">{formatMeasurement(idleHours, 1, "hrs")}</span>
                                                 </div>
                                             </div>
                                         </div>
@@ -313,18 +307,18 @@ export default function VehicleFuelDetailModal({
                                         {/* Activity ratio bar */}
                                         {totalLitres > 0 && estIdleFuel !== null && estIdleFuel !== undefined && (
                                             <div className="mt-4 pt-3 border-t border-slate-200/60">
-                                                <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 mb-1.5">
-                                                    <span>Fuel Segregation Distribution</span>
+                                                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600 mb-1.5">
+                                                    <span>Fuel split</span>
                                                     <span>{formatMeasurement(drivingPct, 1, "%")} Driving • {formatMeasurement(idlePct, 1, "%")} Idling</span>
                                                 </div>
-                                                <div className="h-3 w-full rounded-full bg-slate-100 overflow-hidden flex border border-slate-200/50">
+                                                <div className="flex h-2 w-full gap-0.5 overflow-hidden rounded-sm bg-slate-100">
                                                     <div
-                                                        className="h-full bg-sky-500 transition-all"
+                                                        className="h-full bg-brand"
                                                         style={{ width: `${isKnownNumber(drivingPct) ? drivingPct : 0}%` }}
                                                         title={`Driving: ${formatMeasurement(drivingPct, 1, "%")}`}
                                                     />
                                                     <div
-                                                        className="h-full bg-rose-500 transition-all"
+                                                        className="h-full bg-status-idling"
                                                         style={{ width: `${isKnownNumber(idlePct) ? idlePct : 0}%` }}
                                                         title={`Idling: ${formatMeasurement(idlePct, 1, "%")}`}
                                                     />
@@ -334,10 +328,10 @@ export default function VehicleFuelDetailModal({
                                     </div>
 
                                     {/* Transparency & Assumptions Note */}
-                                    <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-xs space-y-2">
-                                        <div className="flex items-center gap-1.5 font-bold text-slate-800">
-                                            <Info className="h-4 w-4 text-[#33758F]" />
-                                            <span>Calculation Transparency & Data Sources</span>
+                                    <div className="space-y-2 rounded-md bg-slate-50 p-3 text-xs">
+                                        <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                                            <Info className="h-3.5 w-3.5 text-slate-400" />
+                                            <span>Calculation & data sources</span>
                                         </div>
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600 pt-1">
                                             <div>
@@ -363,18 +357,18 @@ export default function VehicleFuelDetailModal({
                             {/* ─── TAB 2: TRANSACTIONS ─────────────────────────────── */}
                             {activeTab === "transactions" && (
                                 <div className="space-y-4">
-                                    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+                                    <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                                         <table className="w-full text-left text-xs">
-                                            <thead className="border-b border-slate-200 bg-slate-50 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                                            <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
                                                 <tr>
-                                                    <th className="px-3.5 py-3">Date & Time</th>
-                                                    <th className="px-3.5 py-3">Site / Station</th>
-                                                    <th className="px-3.5 py-3">Product</th>
-                                                    <th className="px-3.5 py-3 text-right">Quantity (L)</th>
-                                                    <th className="px-3.5 py-3 text-right">Unit Price</th>
-                                                    <th className="px-3.5 py-3 text-right">Total (AED)</th>
-                                                    <th className="px-3.5 py-3 text-right">Odometer</th>
-                                                    <th className="px-3.5 py-3">Driver / Invoice</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium">Date & Time</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium">Site / Station</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium">Product</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Quantity (L)</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Unit Price</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Total (AED)</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Odometer</th>
+                                                    <th scope="col" className="px-3.5 py-2 font-medium">Driver / Invoice</th>
                                                 </tr>
                                             </thead>
                                             <tbody className="divide-y divide-slate-100">
@@ -387,30 +381,30 @@ export default function VehicleFuelDetailModal({
                                                 ) : (
                                                     txns.map((t) => (
                                                         <tr key={t.id} className="hover:bg-slate-50/60 transition-colors">
-                                                            <td className="px-3.5 py-2.5 font-mono text-[11px] font-bold text-slate-800 whitespace-nowrap">
+                                                            <td className="px-3.5 py-2.5 font-mono text-[11px] font-semibold text-slate-800 whitespace-nowrap">
                                                                 {t.transaction_date}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-slate-700 whitespace-nowrap">
                                                                 {t.station_name || "—"}
                                                             </td>
-                                                            <td className="px-3.5 py-2.5 font-bold text-slate-800 whitespace-nowrap">
+                                                            <td className="px-3.5 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
                                                                 {fuelTypeLabel(t.fuel_type)}
                                                                 {isRefundAdjustment(t) && (
-                                                                    <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[9px] font-bold text-amber-800">Refund</span>
+                                                                    <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-800">Refund</span>
                                                                 )}
                                                             </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-black text-slate-900 whitespace-nowrap">
+                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-slate-900 whitespace-nowrap">
                                                                 {formatNumber(t.litres, 1)}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
                                                                 {t.unit_price != null ? `AED ${fixedOrDash(t.unit_price)}` : "—"}
                                                             </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-black text-emerald-800 whitespace-nowrap">
+                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-emerald-800 whitespace-nowrap">
                                                                 {t.total_cost != null ? `AED ${formatNumber(t.total_cost, 2)}` : "—"}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
                                                                 {t.odometer_km ? `${formatNumber(t.odometer_km, 0)} km` : (
-                                                                    <span className="text-amber-600 text-[10px] font-bold">Missing</span>
+                                                                    <span className="text-amber-600 text-[10px] font-semibold">Missing</span>
                                                                 )}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-slate-500 whitespace-nowrap text-[11px]">
@@ -428,33 +422,33 @@ export default function VehicleFuelDetailModal({
                             {/* ─── TAB 3: ACTIVITY ─────────────────────────────────── */}
                             {activeTab === "activity" && (
                                 <div className="space-y-4">
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
-                                        <div className="rounded-xl border border-sky-200 bg-sky-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase text-sky-700 block">Driving Time</span>
-                                            <span className="text-2xl font-black text-sky-900 block mt-1">
+                                    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-3">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="block text-xs font-medium text-slate-500">Driving time</span>
+                                            <span className="mt-1 block text-xl font-semibold tabular-nums text-slate-900">
                                                 {formatMeasurement(drivingHours, 1, "hrs")}
                                             </span>
-                                            <span className="text-[11px] text-sky-700 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 {activity.trip_count ? `${activity.trip_count} trips recorded` : "Moving telemetry"}
                                             </span>
                                         </div>
 
-                                        <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase text-amber-700 block">Idling Time</span>
-                                            <span className="text-2xl font-black text-amber-900 block mt-1">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="block text-xs font-medium text-slate-500">Idling time</span>
+                                            <span className="mt-1 block text-xl font-semibold tabular-nums text-amber-800">
                                                 {formatMeasurement(idleHours, 1, "hrs")}
                                             </span>
-                                            <span className="text-[11px] text-amber-700 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 {activity.idle_events_count ? `${activity.idle_events_count} idle sessions` : "Stationary ignition"}
                                             </span>
                                         </div>
 
-                                        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
-                                            <span className="text-[10px] font-bold uppercase text-slate-500 block">Engine Hours</span>
-                                            <span className="text-2xl font-black text-slate-800 block mt-1">
+                                        <div className="bg-white px-4 py-3">
+                                            <span className="block text-xs font-medium text-slate-500">Engine hours</span>
+                                            <span className="mt-1 block text-xl font-semibold tabular-nums text-slate-900">
                                                 {formatMeasurement(engineHours, 1, "hrs")}
                                             </span>
-                                            <span className="text-[11px] text-slate-500 mt-1 block">
+                                            <span className="mt-0.5 block text-xs text-slate-500">
                                                 Total operational runtime
                                             </span>
                                         </div>
@@ -462,15 +456,15 @@ export default function VehicleFuelDetailModal({
 
                                     {/* Discrete Idle Events if present */}
                                     {activity.idle_events && activity.idle_events.length > 0 && (
-                                        <div className="rounded-xl border border-slate-200 bg-white p-4">
-                                            <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
+                                        <div className="rounded-lg border border-slate-200 bg-white p-4">
+                                            <h4 className="mb-2 text-xs font-semibold text-slate-900">
                                                 Discrete Idling Events Log
                                             </h4>
                                             <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 text-xs">
                                                 {activity.idle_events.map((ev, idx) => (
                                                     <div key={idx} className="py-2.5 flex items-center justify-between">
                                                         <div>
-                                                            <span className="font-bold text-slate-800 block">
+                                                            <span className="font-semibold text-slate-800 block">
                                                                 {ev.address || "Stationary Location"}
                                                             </span>
                                                             <span className="text-[10px] text-slate-400">
@@ -478,7 +472,7 @@ export default function VehicleFuelDetailModal({
                                                             </span>
                                                         </div>
                                                         <div className="text-right">
-                                                            <span className="font-mono font-bold text-amber-700">
+                                                            <span className="font-mono font-semibold text-amber-700">
                                                                 {isKnownNumber(ev.duration_minutes)
                                                                     ? formatMeasurement(ev.duration_minutes, 0, "mins")
                                                                     : formatMeasurement(isKnownNumber(ev.duration) ? ev.duration / 60 : null, 0, "mins")}
@@ -496,19 +490,19 @@ export default function VehicleFuelDetailModal({
                             {activeTab === "anomalies" && (
                                 <div className="space-y-3">
                                     {anomalies.length === 0 ? (
-                                        <div className="py-12 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl bg-slate-50/50">
-                                            <CheckCircle2 className="mx-auto h-7 w-7 text-emerald-500 mb-2" />
-                                            <span className="font-bold text-slate-800">No anomalies detected</span> for this vehicle in the selected timeframe.
+                                        <div className="py-10 text-center text-xs text-slate-500">
+                                            <CheckCircle2 className="mx-auto mb-2 h-5 w-5 text-status-moving" />
+                                            <span className="font-medium text-slate-800">No anomalies detected</span> for this vehicle in the selected timeframe.
                                         </div>
                                     ) : (
                                         anomalies.map((a) => (
                                             <div
                                                 key={a.id}
-                                                className="rounded-xl border border-amber-200 bg-amber-50/30 p-4 text-xs space-y-1"
+                                                className="relative space-y-1 rounded-md border border-slate-200 px-4 py-3 text-xs before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:rounded-l-md before:bg-status-idling"
                                             >
                                                 <div className="flex items-center justify-between">
-                                                    <span className="font-black text-slate-900">{a.title}</span>
-                                                    <span className="rounded-md bg-amber-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-amber-800">
+                                                    <span className="text-[13px] font-medium text-slate-900">{a.title}</span>
+                                                    <span className="text-[11px] font-medium text-amber-800">
                                                         {a.severity}
                                                     </span>
                                                 </div>
@@ -528,11 +522,11 @@ export default function VehicleFuelDetailModal({
                 </div>
 
                 {/* ─── MODAL FOOTER ────────────────────────────────────────── */}
-                <div className="flex items-center justify-end px-6 py-3.5 border-t border-slate-100 bg-slate-50/50">
+                <div className="flex items-center justify-end border-t border-slate-200 px-5 py-3">
                     <button
                         type="button"
                         onClick={onClose}
-                        className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors shadow-2xs cursor-pointer"
+                        className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 cursor-pointer"
                     >
                         Close Details
                     </button>

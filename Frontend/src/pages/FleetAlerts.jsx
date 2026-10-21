@@ -1,18 +1,14 @@
 import { useCallback, useEffect, useState, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
-    Bell,
     AlertTriangle,
     Info,
     XCircle,
-    Truck,
     CheckCircle2,
-    Clock3,
-    Tag,
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
-import KpiCard from "../components/Common/KpiCard"
+import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
 import { EmptyState, ErrorState, LoadingState } from "../components/Common/StateViews"
 import { getFleetAlertsAnalytics } from "../api/fleetApi"
@@ -26,92 +22,72 @@ const SEVERITY_CONFIG = {
     CRITICAL: {
         icon: XCircle,
         label: "Critical",
-        badgeCls: "text-red-700 bg-red-50 border-red-200",
-        iconCls: "text-red-500",
-        borderCls: "border-l-red-500",
+        iconCls: "text-rose-600",
+        textCls: "text-rose-700",
+        dot: "bg-status-offline",
+        rule: "before:bg-status-offline",
     },
     WARNING: {
         icon: AlertTriangle,
         label: "Warning",
-        badgeCls: "text-amber-700 bg-amber-50 border-amber-200",
-        iconCls: "text-amber-500",
-        borderCls: "border-l-amber-500",
+        iconCls: "text-amber-600",
+        textCls: "text-amber-800",
+        dot: "bg-status-idling",
+        rule: "before:bg-status-idling",
     },
     INFO: {
         icon: Info,
         label: "Info",
-        badgeCls: "text-[#33758F] bg-[#F0F6F9] border-[#D1E2EA]",
-        iconCls: "text-[#33758F]",
-        borderCls: "border-l-[#33758F]",
+        iconCls: "text-slate-400",
+        textCls: "text-slate-600",
+        dot: "bg-slate-400",
+        rule: "before:bg-transparent",
     },
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function AlertCard({ alert }) {
+function AlertRow({ alert }) {
     const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.INFO
     const Icon = sev.icon
+    const vehicleLabel = alert.registration_plate || alert.plate || alert.vehicle_name || "Fleet-wide"
 
     return (
-        <div className={`flex gap-3 rounded-xl border border-l-4 border-slate-200 ${sev.borderCls} bg-white p-3.5 shadow-xs transition-colors hover:border-slate-300`}>
-            <div className={`mt-0.5 flex-none ${sev.iconCls}`}>
-                <Icon size={18} />
-            </div>
-            <div className="flex-1 min-w-0">
-                <div className="flex items-start justify-between gap-3 flex-wrap">
-                    <div className="min-w-0 flex-1">
-                        <p className="font-bold text-slate-900 text-sm leading-snug">
-                            {alert.title || alert.message}
-                        </p>
-                        {alert.title && alert.message && alert.title !== alert.message && (
-                            <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                                {alert.message}
-                            </p>
-                        )}
-                    </div>
-                    <div className="flex items-center gap-2 flex-none">
-                        {alert.value && (
-                            <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-                                {alert.value}
-                            </span>
-                        )}
-                        <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${sev.badgeCls}`}>
-                            {sev.label}
-                        </span>
-                    </div>
-                </div>
+        <li className={`relative grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 px-4 py-3 before:absolute before:inset-y-0 before:left-0 before:w-0.5 ${sev.rule} md:grid-cols-[auto_minmax(0,1fr)_minmax(0,220px)_auto] md:items-start`}>
+            <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${sev.iconCls}`} aria-hidden="true" />
 
-                <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs text-slate-400">
-                    <div className="flex items-center gap-1.5 text-slate-700 font-semibold">
-                        <Truck size={13} className="text-slate-400" />
-                        <span>{alert.registration_plate || alert.plate || alert.vehicle_name || "Fleet-wide"}</span>
-                        {alert.registration_plate && alert.vehicle_name && alert.registration_plate !== alert.vehicle_name && (
-                            <span className="text-slate-400 font-normal">· {alert.vehicle_name}</span>
-                        )}
-                        {alert.vehicle_id && (
-                            <span className="text-slate-400 font-normal">· Unit #{alert.vehicle_id}</span>
-                        )}
-                    </div>
-                    {alert.group && (
-                        <span className="text-slate-600 bg-slate-100 px-2 py-0.5 rounded-md text-[11px] font-medium border border-slate-200/60">
-                            {alert.group}
-                        </span>
+            <div className="min-w-0">
+                <p className="text-[13px] font-medium leading-snug text-slate-900">
+                    <span className={`mr-2 text-xs font-medium ${sev.textCls}`}>{sev.label}</span>
+                    {alert.title || alert.message}
+                    {alert.value && (
+                        <span className="ml-2 whitespace-nowrap font-mono text-xs text-slate-600">{alert.value}</span>
                     )}
-                    {alert.alert_type && (
-                        <div className="flex items-center gap-1 text-slate-500">
-                            <Tag size={11} className="text-slate-400" />
-                            <span>{alert.alert_type}</span>
-                        </div>
-                    )}
-                    {alert.timestamp && (
-                        <div className="flex items-center gap-1 text-slate-400 ml-auto">
-                            <Clock3 size={12} />
-                            <span>{formatDateTime(alert.timestamp)}</span>
-                        </div>
-                    )}
-                </div>
+                </p>
+                {alert.title && alert.message && alert.title !== alert.message && (
+                    <p className="mt-0.5 text-xs leading-relaxed text-slate-600">{alert.message}</p>
+                )}
+                {alert.alert_type && (
+                    <p className="mt-1 text-[11px] text-slate-400">{alert.alert_type}</p>
+                )}
             </div>
-        </div>
+
+            <div className="col-start-2 mt-1.5 min-w-0 text-xs md:col-start-auto md:mt-0">
+                <p className="truncate">
+                    <span className="font-mono font-semibold text-slate-800">{vehicleLabel}</span>
+                    {alert.registration_plate && alert.vehicle_name && alert.registration_plate !== alert.vehicle_name && (
+                        <span className="text-slate-500"> · {alert.vehicle_name}</span>
+                    )}
+                </p>
+                <p className="truncate text-[11px] text-slate-500">
+                    {[alert.group, alert.vehicle_id ? `Unit #${alert.vehicle_id}` : null].filter(Boolean).join(" · ")}
+                </p>
+            </div>
+
+            <p className="col-start-2 mt-1 whitespace-nowrap text-[11px] tabular-nums text-slate-500 md:col-start-auto md:mt-0.5 md:text-right">
+                {alert.timestamp ? formatDateTime(alert.timestamp) : "—"}
+            </p>
+        </li>
     )
 }
 
@@ -199,116 +175,107 @@ export default function FleetAlerts() {
             <PageHeader
                 title="Fleet Alerts"
                 subtitle="Battery, connectivity and sensor threshold events"
-                icon={Bell}
                 onRefresh={refresh}
                 loading={loading}
                 lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
             />
 
-            <div className="space-y-5">
-                {/* ─── SEVERITY KPI CARDS ───────────────────────────── */}
-                <section aria-label="Alert Severity Breakdown">
-                    <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                        <KpiCard
-                            label="Total Alerts"
-                            value={counts.total}
-                            valueColor="text-slate-900"
-                            sub="All active events"
-                            selected={sevFilter === "ALL"}
-                            onClick={() => handleFilterChange("ALL")}
-                            loading={loading && !data}
-                            title="Show all alerts"
-                        />
-
-                        <KpiCard
-                            label="Critical"
-                            value={counts.critical}
-                            valueColor="text-red-600"
-                            sub="Immediate risk"
-                            badge={counts.critical > 0 ? "Action Required" : undefined}
-                            badgeCls="bg-red-50 text-red-700 border-red-200"
-                            selected={sevFilter === "CRITICAL"}
-                            onClick={() => handleFilterChange("CRITICAL")}
-                            loading={loading && !data}
-                            title="Show critical alerts only"
-                        />
-
-                        <KpiCard
-                            label="Warning"
-                            value={counts.warning}
-                            valueColor="text-amber-600"
-                            sub="Threshold alerts"
-                            badge={counts.warning > 0 ? "Review" : undefined}
-                            badgeCls="bg-amber-50 text-amber-700 border-amber-200"
-                            selected={sevFilter === "WARNING"}
-                            onClick={() => handleFilterChange("WARNING")}
-                            loading={loading && !data}
-                            title="Show warning alerts only"
-                        />
-
-                        <KpiCard
-                            label="Info"
-                            value={counts.info}
-                            valueColor="text-[#33758F]"
-                            sub="Operational notices"
-                            selected={sevFilter === "INFO"}
-                            onClick={() => handleFilterChange("INFO")}
-                            loading={loading && !data}
-                            title="Show info alerts only"
-                        />
-                    </div>
-                </section>
-
-                {/* ─── SEARCH BAR & ACTIVE FILTER STATUS ────────────── */}
-                <section className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <SearchInput
-                        id="alerts-search"
-                        value={search}
-                        onChange={setSearch}
-                        placeholder="Search alert, vehicle or group…"
-                        className="w-full sm:max-w-sm"
+            <div className="space-y-4">
+                {/* Severity counts double as the severity filter */}
+                <KpiStrip label="Alert severity filter" className="grid-cols-2 md:grid-cols-4">
+                    <KpiCard
+                        label="All alerts"
+                        value={counts.total}
+                        sub="Active events"
+                        selected={sevFilter === "ALL"}
+                        onClick={() => handleFilterChange("ALL")}
+                        loading={loading && !data}
+                        title="Show all alerts"
                     />
-
-                    <p className="text-xs text-slate-500">
-                        <strong className="font-semibold text-slate-800">{filtered.length}</strong>{" "}
-                        {sevFilter === "ALL" ? "" : `${SEVERITY_CONFIG[sevFilter]?.label.toLowerCase() || sevFilter.toLowerCase()} `}
-                        event{filtered.length !== 1 ? "s" : ""}
-                    </p>
-                </section>
-
-                {/* ─── ALERTS LIST & EMPTY STATES ──────────────────── */}
-                {loading && !data ? (
-                    <LoadingState label="Loading fleet alerts…" />
-                ) : error ? (
-                    <ErrorState message={error} onRetry={refresh} />
-                ) : filtered.length === 0 ? (
-                    <EmptyState
-                        icon={CheckCircle2}
-                        title={allAlerts.length === 0 ? "No active alerts" : "No alerts match your filters"}
-                        message={allAlerts.length === 0 ? "All telemetry is within normal thresholds." : undefined}
-                        action={(search || sevFilter !== "ALL") && (
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setSearch("")
-                                    handleFilterChange("ALL")
-                                }}
-                                className="text-xs font-semibold text-[#33758F] hover:underline cursor-pointer"
-                            >
-                                Clear filters
-                            </button>
-                        )}
+                    <KpiCard
+                        label="Critical"
+                        dot="bg-status-offline"
+                        value={counts.critical}
+                        valueColor={counts.critical > 0 ? "text-rose-700" : "text-slate-900"}
+                        sub="Immediate risk"
+                        selected={sevFilter === "CRITICAL"}
+                        onClick={() => handleFilterChange("CRITICAL")}
+                        loading={loading && !data}
+                        title="Show critical alerts only"
                     />
-                ) : (
-                    <div className="space-y-2.5">
-                        {filtered.map((alert, i) => (
-                            <AlertCard
-                                key={alert.id || `${alert.vehicle_id}-${alert.alert_type}-${i}`}
-                                alert={alert}
-                            />
-                        ))}
+                    <KpiCard
+                        label="Warning"
+                        dot="bg-status-idling"
+                        value={counts.warning}
+                        valueColor={counts.warning > 0 ? "text-amber-800" : "text-slate-900"}
+                        sub="Threshold crossed"
+                        selected={sevFilter === "WARNING"}
+                        onClick={() => handleFilterChange("WARNING")}
+                        loading={loading && !data}
+                        title="Show warning alerts only"
+                    />
+                    <KpiCard
+                        label="Info"
+                        dot="bg-slate-400"
+                        value={counts.info}
+                        sub="Operational notices"
+                        selected={sevFilter === "INFO"}
+                        onClick={() => handleFilterChange("INFO")}
+                        loading={loading && !data}
+                        title="Show info alerts only"
+                    />
+                </KpiStrip>
+
+                <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+                    <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                        <SearchInput
+                            id="alerts-search"
+                            value={search}
+                            onChange={setSearch}
+                            placeholder="Search alert, vehicle or group…"
+                            className="w-full sm:max-w-xs"
+                        />
+                        <p className="text-xs tabular-nums text-slate-500" aria-live="polite">
+                            <span className="font-medium text-slate-800">{filtered.length}</span>{" "}
+                            {sevFilter === "ALL" ? "" : `${SEVERITY_CONFIG[sevFilter]?.label.toLowerCase() || sevFilter.toLowerCase()} `}
+                            event{filtered.length !== 1 ? "s" : ""}
+                        </p>
                     </div>
-                )}
+
+                    {loading && !data ? (
+                        <LoadingState label="Loading fleet alerts…" className="border-0" />
+                    ) : error ? (
+                        <ErrorState message={error} onRetry={refresh} className="border-0" />
+                    ) : filtered.length === 0 ? (
+                        <EmptyState
+                            icon={CheckCircle2}
+                            className="border-0"
+                            title={allAlerts.length === 0 ? "No active alerts" : "No alerts match your filters"}
+                            message={allAlerts.length === 0 ? "All telemetry is within normal thresholds." : undefined}
+                            action={(search || sevFilter !== "ALL") && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSearch("")
+                                        handleFilterChange("ALL")
+                                    }}
+                                    className="text-xs font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
+                                >
+                                    Clear filters
+                                </button>
+                            )}
+                        />
+                    ) : (
+                        <ul className="divide-y divide-slate-100">
+                            {filtered.map((alert, i) => (
+                                <AlertRow
+                                    key={alert.id || `${alert.vehicle_id}-${alert.alert_type}-${i}`}
+                                    alert={alert}
+                                />
+                            ))}
+                        </ul>
+                    )}
+                </section>
             </div>
         </AppShell>
     )

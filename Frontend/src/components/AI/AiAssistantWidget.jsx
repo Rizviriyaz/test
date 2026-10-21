@@ -277,7 +277,7 @@ export default function AiAssistantWidget() {
                                 key={aIdx}
                                 type="button"
                                 onClick={() => handleActionClick(act)}
-                                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-slate-50 hover:bg-[#33758F] text-[#33758F] hover:text-white border border-[#33758F]/25 transition-all duration-150 cursor-pointer shadow-xs select-none"
+                                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-slate-50 hover:bg-brand text-brand hover:text-white border border-brand/25 transition-all duration-150 cursor-pointer select-none"
                             >
                                 {act.type === "map" && <MapPin className="w-3 h-3 shrink-0" />}
                                 {act.type === "vehicle" && <ExternalLink className="w-3 h-3 shrink-0" />}
@@ -298,14 +298,14 @@ export default function AiAssistantWidget() {
             {/* ─── CHAT PANEL WITH SMOOTH UX ANIMATIONS ────────────────────── */}
             {isVisible && (
                 <div
-                    className={`mb-3 w-[calc(100vw-3rem)] max-w-[360px] sm:w-[410px] sm:max-w-none h-[550px] max-h-[calc(100dvh-100px)] bg-white border border-slate-200 rounded-2xl shadow-xl flex flex-col overflow-hidden origin-bottom-right transition-all duration-[220ms] ease-out ${
+                    className={`mb-3 w-[calc(100vw-3rem)] max-w-[360px] sm:w-[410px] sm:max-w-none h-[550px] max-h-[calc(100dvh-100px)] bg-white border border-slate-200 rounded-xl shadow-xl flex flex-col overflow-hidden origin-bottom-right transition-all duration-[220ms] ease-out ${
                         isOpen
                             ? "opacity-100 translate-y-0 scale-100 pointer-events-auto"
                             : "opacity-0 translate-y-2 scale-[0.96] pointer-events-none"
                     }`}
                 >
                     {/* Header */}
-                    <div className="px-4 py-3 bg-[#33758F] text-white flex items-center justify-between select-none shrink-0">
+                    <div className="px-4 py-3 bg-brand text-white flex items-center justify-between select-none shrink-0">
                         <div className="flex items-center gap-2.5">
                             <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center text-white">
                                 <Bot className="w-4.5 h-4.5" />
@@ -348,16 +348,16 @@ export default function AiAssistantWidget() {
                                 }`}
                             >
                                 {msg.role === "assistant" && (
-                                    <div className="w-7 h-7 rounded-lg bg-[#33758F] text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+                                    <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center flex-shrink-0 mt-0.5">
                                         <Bot className="w-4 h-4" />
                                     </div>
                                 )}
 
                                 <div
-                                    className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl ${
+                                    className={`max-w-[85%] px-3.5 py-2.5 rounded-xl ${
                                         msg.role === "user"
-                                            ? "bg-[#33758F] text-white rounded-br-xs"
-                                            : "bg-white border border-slate-200 text-slate-800 rounded-bl-xs shadow-xs"
+                                            ? "bg-brand text-white rounded-br-xs"
+                                            : "bg-white border border-slate-200 text-slate-800 rounded-bl-xs"
                                     }`}
                                 >
                                     {renderMessageContent(msg)}
@@ -374,11 +374,11 @@ export default function AiAssistantWidget() {
                         {/* Loading Indicator */}
                         {isLoading && (
                             <div className="flex gap-2.5 justify-start">
-                                <div className="w-7 h-7 rounded-lg bg-[#33758F] text-white flex items-center justify-center flex-shrink-0 mt-0.5">
+                                <div className="w-7 h-7 rounded-lg bg-brand text-white flex items-center justify-center flex-shrink-0 mt-0.5">
                                     <Bot className="w-4 h-4" />
                                 </div>
-                                <div className="bg-white border border-slate-200 px-3.5 py-2.5 rounded-2xl rounded-bl-xs flex items-center gap-2 text-slate-500 shadow-xs">
-                                    <Loader2 className="w-4 h-4 animate-spin text-[#33758F]" />
+                                <div className="bg-white border border-slate-200 px-3.5 py-2.5 rounded-xl rounded-bl-xs flex items-center gap-2 text-slate-500">
+                                    <Loader2 className="w-4 h-4 animate-spin text-brand" />
                                     <span className="text-xs">Checking fleet telemetry...</span>
                                 </div>
                             </div>
@@ -407,7 +407,7 @@ export default function AiAssistantWidget() {
                                 <button
                                     key={pIdx}
                                     onClick={() => handleSend(prompt)}
-                                    className="text-[11px] bg-slate-100 hover:bg-[#33758F]/10 hover:border-[#33758F]/40 border border-slate-200 text-slate-700 hover:text-[#33758F] px-2.5 py-1 rounded-full transition-all text-left truncate max-w-full cursor-pointer"
+                                    className="text-[11px] bg-slate-100 hover:bg-brand/10 hover:border-brand/40 border border-slate-200 text-slate-700 hover:text-brand px-2.5 py-1 rounded-full transition-all text-left truncate max-w-full cursor-pointer"
                                 >
                                     {prompt}
                                 </button>
@@ -425,12 +425,12 @@ export default function AiAssistantWidget() {
                             placeholder="Ask about idling, vehicles, alerts..."
                             rows={1}
                             disabled={isLoading}
-                            className="flex-1 bg-slate-50 border border-slate-200 focus:border-[#33758F] focus:ring-1 focus:ring-[#33758F] rounded-xl px-3.5 py-2 text-xs sm:text-sm text-slate-900 placeholder-slate-400 resize-none outline-none transition-all disabled:opacity-50 max-h-24"
+                            className="flex-1 bg-slate-50 border border-slate-200 focus:border-brand focus:ring-1 focus:ring-brand rounded-xl px-3.5 py-2 text-xs sm:text-sm text-slate-900 placeholder-slate-400 resize-none outline-none transition-all disabled:opacity-50 max-h-24"
                         />
                         <button
                             onClick={() => handleSend()}
                             disabled={!input.trim() || isLoading}
-                            className="w-9 h-9 bg-[#33758F] hover:bg-[#285d73] disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl flex items-center justify-center flex-shrink-0 transition-colors shadow-xs cursor-pointer"
+                            className="w-9 h-9 bg-brand hover:bg-brand-hover disabled:bg-slate-200 disabled:text-slate-400 text-white rounded-xl flex items-center justify-center flex-shrink-0 transition-colors cursor-pointer"
                         >
                             <Send className="w-4 h-4" />
                         </button>
@@ -443,7 +443,7 @@ export default function AiAssistantWidget() {
                 type="button"
                 onClick={toggleOpen}
                 title={isOpen ? "Close Assistant" : "Open Fleet AI Assistant"}
-                className="relative w-12 h-12 rounded-full bg-[#33758F] hover:bg-[#285d73] text-white shadow-lg flex items-center justify-center transition-colors duration-150 active:scale-95 cursor-pointer select-none"
+                className="relative w-12 h-12 rounded-full bg-brand hover:bg-brand-hover text-white shadow-lg flex items-center justify-center transition-colors duration-150 active:scale-95 cursor-pointer select-none"
             >
                 <Bot
                     className={`w-5 h-5 absolute transition-all duration-200 ease-out ${

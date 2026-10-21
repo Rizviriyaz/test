@@ -1,60 +1,25 @@
-
 /**
- * Standardized operational fleet status badge.
- * Represents real-time vehicle movement/ignition states:
- * - MOVING: speed > 0, ignition ON (Emerald green)
- * - IDLING: speed = 0, ignition ON (Amber)
- * - STOPPED: stationary, ignition OFF (Neutral slate)
- * - OFFLINE: telemetry stale / disconnected (Rose red)
+ * Operational vehicle status: a colored marker plus label (never color alone).
+ * - MOVING: speed > 0, ignition on
+ * - IDLING: speed = 0, ignition on
+ * - STOPPED: stationary, ignition off
+ * - OFFLINE: telemetry stale / disconnected
+ * Unknown values render as Stopped.
  */
+const STATUS = {
+    MOVING: { label: "Moving", dot: "bg-status-moving", text: "text-emerald-800" },
+    IDLING: { label: "Idling", dot: "bg-status-idling", text: "text-amber-800" },
+    STOPPED: { label: "Stopped", dot: "bg-status-stopped", text: "text-slate-600" },
+    OFFLINE: { label: "Offline", dot: "bg-status-offline", text: "text-rose-700" },
+}
+
 export default function FleetStatusBadge({ status, className = "", size = "sm", showDot = true }) {
-    const raw = String(status || "").toUpperCase().trim()
-
-    let config = {
-        label: "Stopped",
-        badgeCls: "bg-slate-100 text-slate-700 border-slate-200",
-        dotCls: "bg-slate-400",
-    }
-
-    if (raw === "MOVING") {
-        config = {
-            label: "Moving",
-            badgeCls: "bg-emerald-50 text-emerald-700 border-emerald-200",
-            dotCls: "bg-emerald-500",
-        }
-    } else if (raw === "IDLING") {
-        config = {
-            label: "Idling",
-            badgeCls: "bg-amber-50 text-amber-700 border-amber-200",
-            dotCls: "bg-amber-500",
-        }
-    } else if (raw === "OFFLINE") {
-        config = {
-            label: "Offline",
-            badgeCls: "bg-rose-50 text-rose-700 border-rose-200",
-            dotCls: "bg-rose-500",
-        }
-    } else if (raw === "STOPPED") {
-        config = {
-            label: "Stopped",
-            badgeCls: "bg-slate-100 text-slate-700 border-slate-200",
-            dotCls: "bg-slate-400",
-        }
-    }
-
-    const sizeCls = size === "xs"
-        ? "px-2 py-0.5 text-[10px]"
-        : size === "md"
-        ? "px-3 py-1 text-xs"
-        : "px-2.5 py-0.5 text-[11px]"
+    const config = STATUS[String(status || "").toUpperCase().trim()] || STATUS.STOPPED
+    const sizeCls = size === "xs" ? "text-[11px]" : size === "md" ? "text-[13px]" : "text-xs"
 
     return (
-        <span
-            className={`inline-flex items-center gap-1.5 rounded-full border font-semibold select-none transition-colors ${config.badgeCls} ${sizeCls} ${className}`}
-        >
-            {showDot && (
-                <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${config.dotCls}`} />
-            )}
+        <span className={`inline-flex items-center gap-1.5 whitespace-nowrap font-medium select-none ${config.text} ${sizeCls} ${className}`}>
+            {showDot && <span className={`h-2 w-2 shrink-0 rounded-full ${config.dot}`} aria-hidden="true" />}
             <span>{config.label}</span>
         </span>
     )

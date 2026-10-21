@@ -115,7 +115,7 @@ export default function Login() {
 
                         {/* Error Banner */}
                         {error && (
-                            <div className="mb-5 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-700 animate-in fade-in">
+                            <div className="mb-5 flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3.5 text-xs text-red-700 animate-in fade-in">
                                 <AlertCircle className="h-4 w-4 text-red-500 shrink-0 mt-0.5" />
                                 <div className="flex-1">
                                     <p className="font-semibold text-red-800">Authentication Failed</p>
@@ -126,7 +126,7 @@ export default function Login() {
 
                         {/* Success Banner */}
                         {successMessage && (
-                            <div className="mb-5 flex items-center gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50 p-3.5 text-xs text-emerald-700">
+                            <div className="mb-5 flex items-center gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50 p-3.5 text-xs text-emerald-700">
                                 <CheckCircle2 className="h-4 w-4 text-emerald-500 shrink-0" />
                                 <span>{successMessage}</span>
                             </div>
@@ -138,7 +138,7 @@ export default function Login() {
                             <div>
                                 <label
                                     htmlFor="email"
-                                    className="block text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-1.5"
+                                    className="block text-xs font-semibold text-zinc-500 mb-1.5"
                                 >
                                     Email or Username
                                 </label>
@@ -156,7 +156,7 @@ export default function Login() {
                                         onChange={(e) => setEmail(e.target.value)}
                                         placeholder="Enter your email"
                                         disabled={submitting}
-                                        className="w-full rounded-xl border border-zinc-200 bg-zinc-50 pl-10 pr-4 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 transition disabled:opacity-50"
+                                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50 pl-10 pr-4 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 transition disabled:opacity-50"
                                     />
                                 </div>
                             </div>
@@ -166,7 +166,7 @@ export default function Login() {
                                 <div className="flex items-center justify-between mb-1.5">
                                     <label
                                         htmlFor="password"
-                                        className="block text-xs font-semibold uppercase tracking-wider text-zinc-500"
+                                        className="block text-xs font-semibold text-zinc-500"
                                     >
                                         Password
                                     </label>
@@ -187,7 +187,7 @@ export default function Login() {
                                         onChange={(e) => setPassword(e.target.value)}
                                         placeholder="••••••••"
                                         disabled={submitting}
-                                        className="w-full rounded-xl border border-zinc-200 bg-zinc-50 pl-10 pr-10 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 transition disabled:opacity-50"
+                                        className="w-full rounded-lg border border-zinc-200 bg-zinc-50 pl-10 pr-10 py-2.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 transition disabled:opacity-50"
                                     />
                                     <button
                                         type="button"
