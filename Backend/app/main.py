@@ -107,6 +107,10 @@ if VERCEL_FRONTEND_ORIGIN not in allowed_origins:
 if "*" in allowed_origins:
     raise RuntimeError("CORS_ORIGINS must list explicit origins when credentialed authentication is enabled")
 
+# Vercel gives every deployment its own hashed URL (test-<hash>-ats-5a9e.vercel.app); match only this
+# project's deployments in its team scope. Starlette full-matches the pattern against the Origin header.
+allowed_origin_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or r"https://test-[a-z0-9]+-ats-5a9e\.vercel\.app"
+
 
 @app.exception_handler(WialonAPIError)
 async def wialon_upstream_error_handler(_request: Request, exc: WialonAPIError):
@@ -177,6 +181,7 @@ async def _authenticate_and_dispatch(request: Request, call_next):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=allowed_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
