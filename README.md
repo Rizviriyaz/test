@@ -43,7 +43,7 @@ Related documents:
 | Telematics | Wialon Remote API (default `https://hst-api.wialon.com/wialon/ajax.html`) |
 | Auth and fuel data | Supabase (Auth, `profiles`, `fuel_imports`, `fuel_transactions` via PostgREST) |
 | AI | Groq (`openai/gpt-oss-120b`) with tool calling |
-| Hosting (intended) | Render (backend), Vercel (frontend). See [Deployment](#deployment) |
+| Hosting (intended) | One Vercel project with two services (`backend`, `frontend`) on one domain. See [Deployment](#deployment) |
 
 ---
 
@@ -78,7 +78,7 @@ Templates: [Backend/.env.example](Backend/.env.example) and [Frontend/.env.examp
 | `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Yes | Server-side validation of user bearer tokens |
 | `SUPABASE_SERVICE_ROLE_KEY` | For fuel | Fuel database reads/writes. Backend only, never in `VITE_*` |
 | `GROQ_API_KEY` | For AI chat | AI assistant |
-| `CORS_ORIGINS` | Yes in production | Comma-separated exact frontend origins. `*` is rejected at startup |
+| `CORS_ORIGINS` | Only for cross-origin hosting | Comma-separated exact frontend origins. `*` is rejected at startup. Leave blank on the single-domain Vercel deployment (same origin, no CORS) |
 | `ENVIRONMENT` | Recommended | `production` disables localhost CORS defaults. Only `development` enables `/docs`, `/redoc`, `/openapi.json` |
 | `LOG_LEVEL` | No | `INFO` (default) or `DEBUG` to see `PERF` timings |
 | `WIALON_REPORT_RESOURCE_ID`, `WIALON_TEMPLATE_*` | No | Report resource/template IDs. Defaults match the ATS production account |
@@ -91,7 +91,7 @@ Templates: [Backend/.env.example](Backend/.env.example) and [Frontend/.env.examp
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `VITE_API_URL` | Yes | Backend base URL. Production builds fail unless it is an absolute, non-loopback HTTP(S) URL |
+| `VITE_API_URL` | Locally and off Vercel | Backend base URL. Leave **unset** on Vercel: the app then calls relative `/api/*` on its own domain. Elsewhere, production builds fail unless it is an absolute, non-loopback HTTP(S) URL |
 | `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | Yes | Supabase sign-in. The anon key is public by design |
 
 ---
@@ -137,7 +137,7 @@ Without a permitted role, the backend returns 403 for every API call. `viewer` i
 | --- | --- | --- |
 | Frontend lint | `cd Frontend && npm run lint` | Offline |
 | Frontend unit tests | `cd Frontend && npm test` (Node test runner) | Offline |
-| Frontend production build | `cd Frontend && npm run build` (needs `VITE_API_URL`) | Offline |
+| Frontend production build | `cd Frontend && npm run build` (needs `VITE_API_URL`, except on Vercel where `VERCEL` is set) | Offline |
 | Backend regression scripts | `cd Backend && python scripts/test_<name>.py` | Mocked (`TestClient` + patched Wialon/Supabase/Groq) |
 | End-to-end (Playwright) | `cd Frontend && npx playwright test` | **Live** Wialon + Supabase; needs `E2E_EMAIL` / `E2E_PASSWORD` (or `Frontend/.env.e2e.local`) |
 | Audit/verify scripts | `Backend/scripts/audit_*`, `verify_*`, `wialon_*_inspector.py`, etc. | **Live**; need a populated `Backend/.env` |
@@ -148,38 +148,47 @@ Many backend scripts install `scripts/offline_guard.py`, which blocks outbound H
 
 ## Deployment
 
-The repository holds no `render.yaml` or `vercel.json`; Render and Vercel are configured in their dashboards. The settings below are what the code requires. They have **not** been confirmed against a live deployment from this repository.
+The app deploys as one Vercel project using [Vercel Services](https://vercel.com/docs/services), configured in the root [vercel.json](vercel.json). It has **not** yet been confirmed against a live deployment.
 
-### Backend on Render (web service)
+| Service | Root | Framework | Public path |
+| --- | --- | --- | --- |
+| `backend` | `Backend` | FastAPI (entrypoint `app.main:app`) | `/api/*` (receives the full path, e.g. `/api/vehicles`) |
+| `frontend` | `Frontend` | Vite | everything else; its own rewrite serves `index.html` for client-side deep links |
 
-| Setting | Value |
-| --- | --- |
-| Root directory | `Backend` |
-| Build command | `pip install -r requirements.txt` |
-| Start command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
-| Health check path | `/api/health` (public; reports `wialon_configured`) |
-| Environment | All backend variables above, with `ENVIRONMENT=production` and `CORS_ORIGINS=https://<your-vercel-domain>` |
+There are no service bindings: only the browser calls the backend, over relative `/api/*` URLs on the same domain.
 
-Run a single process. Caches, the Wialon session and report locks are per process, so extra workers multiply Wialon sessions and cold caches.
+### Vercel environment variables
 
-### Frontend on Vercel
+Set these in **Project → Settings → Environment Variables** (Production, and Preview if used). Never commit values.
 
-| Setting | Value |
-| --- | --- |
-| Root directory | `Frontend` |
-| Framework preset | Vite |
-| Build command / output | `npm run build` / `dist` |
-| Environment | `VITE_API_URL=https://<your-render-service>`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` |
+| Variable | Used by | Value |
+| --- | --- | --- |
+| `WIALON_TOKEN`, `WIALON_API` | backend | Wialon credentials (secret) |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | backend | Supabase project URL and anon key |
+| `SUPABASE_SERVICE_ROLE_KEY` | backend | Secret; fuel data. Never in a `VITE_*` variable |
+| `GROQ_API_KEY` | backend | Secret; AI chat |
+| `ENVIRONMENT` | backend | `production` (keeps `/docs` off) |
+| `FUEL_IMPORT_MAX_FILE_BYTES` | backend | `4000000`. Vercel rejects function request bodies over 4.5 MB, so this keeps uploads under it and shows the app's own "split the statement" message |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` | frontend (build time) | Supabase project URL and anon key |
+| `VITE_API_URL`, `CORS_ORIGINS` | — | Leave **unset** (same origin) |
 
-`VITE_*` values are baked in at build time; redeploy after changing them.
+Optional backend tuning variables from the table above can also be set. `VITE_*` values are baked in at build time; redeploy after changing them.
+
+### Runtime notes
+
+- The backend runs as a Vercel Function (Fluid compute, 300 s default max duration). The ~30 s cold fleet-alerts scan fits inside it.
+- Caches, the Wialon session and report locks are per instance, so each cold start logs in to Wialon again and starts with empty caches.
+- The startup alerts prewarm is best-effort: it runs on a background thread that may pause while the instance is idle or stop when the instance is recycled. A later `/api/fleet/alerts` request then builds the alerts itself.
 
 ### Post-deploy checks
 
-1. `GET https://<backend>/api/health` returns `"status": "healthy"` and `"wialon_configured": true`.
-2. `GET https://<backend>/api/vehicles` without a token returns 401. `/docs` returns 404 in production.
-3. Sign in on the Vercel site, then confirm the dashboard loads with no CORS errors in the browser console.
-4. Open a deep link such as `https://<frontend>/dashboard` directly and refresh it. The app uses client-side routing; if Vercel returns 404, add an SPA rewrite to `index.html` in the Vercel project settings.
-5. Check backend logs for `Wialon session established at startup`.
+1. `GET https://<domain>/api/health` returns `"status": "healthy"` and `"wialon_configured": true`.
+2. `GET https://<domain>/api/vehicles` without a token returns 401. `/docs` returns 404.
+3. Sign in, then confirm the dashboard loads and the browser network tab shows same-origin `/api/*` calls.
+4. Open a deep link such as `https://<domain>/dashboard` directly and refresh it; it must load the app, not 404.
+5. Check backend runtime logs for `Wialon session established at startup`.
+
+To host the backend elsewhere instead, set `VITE_API_URL` to its URL and `CORS_ORIGINS` to the frontend origin.
 
 ---
 

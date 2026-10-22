@@ -8,9 +8,13 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig(({ mode }) => {
-  if (mode === 'production') {
-    const fileEnv = loadEnv(mode, process.cwd(), 'VITE_')
-    const apiUrl = (process.env.VITE_API_URL ?? fileEnv.VITE_API_URL ?? '').trim()
+  const fileEnv = loadEnv(mode, process.cwd(), 'VITE_')
+  const apiUrl = (process.env.VITE_API_URL ?? fileEnv.VITE_API_URL ?? '').trim()
+  // On Vercel the backend service is served same-origin under /api (see vercel.json rewrites),
+  // so an unset VITE_API_URL is valid there: fleetApi.js falls back to relative /api/* URLs.
+  const sameOriginOnVercel = !apiUrl && Boolean(process.env.VERCEL)
+
+  if (mode === 'production' && !sameOriginOnVercel) {
     if (!apiUrl) {
       throw new Error('VITE_API_URL is required for production builds.')
     }
