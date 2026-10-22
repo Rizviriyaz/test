@@ -1,101 +1,110 @@
 # Fleet Management Platform — Project Memory
 
+Decisions and knowledge that are not obvious from the code. Reflects `main` at commit `0040ae0`. For system design see [ARCHITECTURE.md](ARCHITECTURE.md); for delivery status see [TASKS.md](TASKS.md).
+
 ---
 
 ## 1. Project Identity
+
 - **Project Name**: ATS Fleet Management Platform
 - **Repository Context**: Advanced Technology Solutions (ATS) Telematics & Fleet Intelligence
-- **Version**: V1 Production Hardened
-- **Domain**: Real-time fleet telematics, GPS vehicle monitoring, operational analytics, and mileage intelligence.
+- **Domain**: Real-time fleet telematics, GPS vehicle monitoring, idle and mileage analytics, fuel management, AI-assisted fleet queries.
 
 ---
 
 ## 2. Product Purpose
-Transforms raw Wialon GPS tracker message streams into standardized operational metrics: real-time location mapping, vehicle motion state segregation (`MOVING`, `IDLING`, `STOPPED`), continuous idle duration diagnostics, dynamic driver assignments, and timeframe-based mileage rankings.
+
+Turns Wialon telematics into operational metrics:
+
+- live location and motion state (`MOVING`, `IDLING`, `STOPPED`)
+- idle and engine-hour analytics
+- trip and mileage rankings
+- vehicle health and alerts
+
+It also joins Supabase fuel transactions with Wialon distance to produce fuel efficiency.
 
 ---
 
-## 3. Current V1 Status
-- **Backend**: FastAPI (Python 3.11+) with dynamic Wialon session management, thread-pool parallelization, in-memory TTL caching, and 14 REST endpoints.
-- **Frontend**: React 19 + Vite + Tailwind CSS v4 + Recharts + Leaflet + Lucide Icons.
-- **Authentication**: Dual-mode authentication (Supabase Auth + V1 Local Session fallback with route protection).
-- **Hardening**: Secrets isolated, health check endpoints implemented, full documentation suite generated.
+## 3. Current Status
+
+- **Backend**: FastAPI with Wialon session management, including a dedicated `events` session for long report paging. It uses Wialon's native report engine for distance, trips, engine hours and idle, keeps bounded TTL caches, mounts the fuel module under `/api/fuel`, and runs a Groq assistant at `/api/ai/chat`.
+- **Frontend**: React 19 + Vite 8 + Tailwind CSS v4 + Recharts + react-leaflet + lucide-react.
+- **Authentication**: Supabase only. Every `/api/*` route except `/api/health` needs a bearer token whose user has a permitted `profiles.role`.
+- **Hosting**: intended to be Render (backend) and Vercel (frontend). Live deployment has not been verified from this repository; see [README.md](README.md#deployment).
 
 ---
 
-## 4. Current Stack
+## 4. Wialon Integration Knowledge
 
-| Layer | Technology |
-| :--- | :--- |
-| **Frontend Framework** | React 19 (`react`, `react-dom`, `react-router-dom` v7) |
-| **Styling & Icons** | Tailwind CSS v4 (`@tailwindcss/vite`), Lucide React |
-| **Maps & Charts** | Leaflet, React-Leaflet, Recharts |
-| **Authentication** | `@supabase/supabase-js` + Session Context Provider |
-| **Backend Framework** | FastAPI, Uvicorn, Pydantic |
-| **Telematics Gateway** | Wialon Remote API (`https://hst-api.wialon.com/wialon/ajax.html`) |
-| **Concurrency & Cache**| `concurrent.futures.ThreadPoolExecutor`, In-Memory Thread-Safe Cache |
-
----
-
-## 5. Wialon Integration Knowledge & SDK Methods
-
-- **Login / Session**:
-  - Service: `token/login` with `{"token": WIALON_TOKEN}`. Returns `eid` session token.
-  - Automatic Recovery: Intercepts `Error 1` (Invalid Session) and executes `login(force=True)`.
-  - Rate Limiting: Intercepts `Error 1003` (API Concurrent Limit) and retries with backoff.
-- **Vehicle Discovery**:
-  - Service: `core/search_items`
-  - Params: `{"spec": {"itemsType": "avl_unit", "propName": "sys_name", "propValueMask": "*", "sortType": "sys_name"}, "force": 1, "flags": 5121, "from": 0, "to": 0}`
-  - Returns: Array of all AVL units (`items`).
-- **Telemetry & Sensor Calculation**:
-  - Service: `unit/calc_last` with `{"itemIds": [vehicle_ids...]}`. Returns computed sensors, position (`pos`), mileage, engine hours.
-- **History & Message Telemetry**:
-  - Service: `messages/load_interval` with `{"itemId": vehicle_id, "timeFrom": start, "timeTo": end, "flags": 0x0000, "flagsMask": 0xFF00, "loadCount": 1000}`.
-- **Group Mapping**:
-  - Service: `core/search_items` with `itemsType: "avl_unit_group"`.
+- **Login / sessions**:
+  - `token/login` with `{"token": WIALON_TOKEN}` returns the `eid` session id.
+  - `login(session="events")` opens a second session with the same token.
+  - Wialon keeps **one report result per session**, so reports are serialized per session.
+- **Errors**:
+  - Error 1 (invalid session) re-logs in the session that owned the stale id.
+  - Error 1003 (concurrency limit) retries with back-off.
+- **Discovery**: `core/search_items` with `itemsType: "avl_unit"` and flags `8393729` (base + last message + admin fields + profile fields `pflds`, which hold the registration plate), then `unit/calc_last` for computed sensors, position and odometer.
+- **Groups**: `core/search_items` with `itemsType: "avl_unit_group"`. The fleet-wide "All Unit" group is found **by name**. `WIALON_GROUP_ALL_UNITS` is only an override; the old hardcoded default ID was removed in `0040ae0`.
+- **Reports**:
+  - `report/exec_report` on resource `WIALON_REPORT_RESOURCE_ID`.
+  - Templates: unit trips 4, unit engine 1, group trips 5, group engine/idle 2. The defaults match the ATS production account and can be overridden by env vars.
+- **Report quirks verified live** (recorded in code comments in `wialon_reports.py`):
+  - The unit trips template groups trips **by day**. A row with sub-rows (`d > 0`) is a day summary whose sub-rows are the trips.
+  - In the group trips template, each unit row's sub-rows are its trips. A unit with no trips gets one `-----` placeholder sub-row.
+  - `report/get_result_subrows` can **ignore `indexFrom/indexTo`** and return the whole list for every page (seen live: the same 313 intervals for every page). Sub-rows are therefore de-duplicated, and completeness is checked against `d`.
+  - One unit can have 100k+ idle sub-rows. Paging them can hold a report lock for minutes; this is why event paging runs on the `events` session and is limited to the target vehicles.
+- **History**: `messages/load_interval` is read in chunks (`WIALON_HISTORY_CHUNK_SECONDS`, `WIALON_HISTORY_PAGE_LIMIT`, `WIALON_HISTORY_MAX_REQUESTS`).
 
 ---
 
-## 6. Normalization Decisions
+## 5. Normalization and Accuracy Decisions
 
-1. **Sensor Resolution by Name**: Wialon does not guarantee fixed sensor IDs across hardware models. Sensors are resolved dynamically by matching `sensor_config.get("n", "").strip().lower() == target_name`.
-2. **Sentinel Filtering**: Wialon outputs large negative sentinels for disconnected or uncalibrated sensors. The normalization layer filters `INVALID_WIALON_VALUE = -348201.3876` and any value `<= -100000` (`is_valid_sensor_value()`).
-3. **Motion State Logic**:
-   - `speed > 0` -> `MOVING`
-   - `speed == 0` AND `ignition == 1` -> `IDLING`
-   - `speed == 0` AND `ignition == 0` -> `STOPPED`
-4. **Trip Segmentation**: Sequences of moving points separated by stops exceeding `stop_tolerance_seconds = 60` are segmented into individual trips.
-
----
-
-## 7. Authentication & Route Protection Decisions
-
-- Dual-mode architecture enables the platform to work immediately in local / demo mode (`admin@ats-fleet.com` / `admin123`) while being 100% prepared for production Supabase Auth with zero code alterations.
-- `ProtectedRoute.jsx` intercepts all operations pages and redirects unauthenticated visits to `/login`.
-- Session tokens are stored in `localStorage` when `rememberMe` is enabled, or `sessionStorage` for single-session browsing.
+1. **Sensors by name**: sensor IDs differ across hardware, so sensors are matched by name.
+2. **Sentinel filtering**: values equal to `INVALID_WIALON_VALUE = -348201.3876`, or `<= -100000`, are dropped (`is_valid_sensor_value()`).
+3. **Live motion state** (`status.calculate_status`): `speed > 0` gives `MOVING`; otherwise ignition on gives `IDLING`; otherwise `STOPPED`. Connection status: `STABLE` for messages within 10 minutes, `DELAYED` beyond that, and `OFFLINE` after `CONN_DELAYED_SECONDS` (default 12 h) or with no message at all.
+4. **Reports are authoritative** for distance, trip counts, engine hours and idle totals. Raw-message segmentation (`stop_tolerance_seconds = 60`) is kept for history, route, safety and deep analytics only. The AI trips tool was switched to the trips report in `0040ae0`, because segmentation gave counts that differed from the dashboard.
+5. **Unknown is `null`, never `0`**:
+   - An unreadable Wialon cell, a missing row or an incomplete sub-row list yields `null` plus a flag: `incomplete_fields`, `column_warnings`, `events_complete`, `idle_events_complete`.
+   - Period-derived idle metrics (count, longest, average) are `null` unless the event list is complete.
+   - The UI shows "—", "unavailable" or "partial", never a fabricated 0.
+6. **Incomplete results are not cached**: unit trips, unit idle and dashboard mileage.
+7. **Time**: compute in UTC epoch seconds. Named periods resolve in UAE time (UTC+4, no DST). Format for display only.
 
 ---
 
-## 8. Things Explicitly NOT to Change
+## 6. Authentication Decisions
 
-1. **Do NOT hardcode vehicle IDs or names**: Dynamic discovery must always be used.
-2. **Do NOT remove backend telemetry processing**: Telemetry is critical for trip, idle, and speed calculations.
-3. **Do NOT expose Wialon Token to client**: Must remain server-side.
-4. **Do NOT re-add telemetry charts to the Landing Page**: Landing page must remain lightweight and balanced.
-5. **Do NOT alter existing REST API contract envelopes** without cross-layer coordination.
+- There is **no local or demo login fallback**. Without Supabase configuration, sign-in fails with a clear error and no API call can succeed.
+- The backend validates each token with Supabase `/auth/v1/user`, caches it for 5 minutes, and requires a `profiles` row with role `admin`, `manager`, `fleet_manager` or `viewer`. Fuel import excludes `viewer`.
+- The "Remember me" checkbox is currently a no-op: Supabase always persists the session.
 
 ---
 
-## 9. Current Limitations & Technical Debt
+## 7. Things Explicitly NOT to Change
 
-- **In-Memory Caching**: Cache is currently local in-memory. For multi-instance horizontal scaling, transition to Redis.
-- **Message Limit**: `messages/load_interval` currently caps at 1,000 points per batch. Multi-page iteration should be added in V2 for 90-day audits.
-- **Geofence Evaluation**: Currently evaluated client-side on Leaflet; server-side polygon containment can be added in V2.
+1. Do **not** hardcode vehicle IDs, names, counts, sensor IDs or group IDs.
+2. Do **not** replace report-based metrics with message segmentation.
+3. Do **not** expose the Wialon token, Supabase service-role key or Groq key to the client.
+4. Do **not** add live telemetry charts to the Landing page. It uses static screenshots.
+5. Do **not** change API response envelopes without updating `fleetApi.js`.
+6. Do **not** turn unknown values into `0`.
 
 ---
 
-## 10. Future AI Roadmap
+## 8. Current Limitations & Technical Debt
 
-- **AI Fleet Assistant**: Natural language querying of live telemetry and driver assignments.
-- **Predictive Anomaly Detection**: Identifying erratic speed fluctuations or unusual fuel drops.
-- **Automated Fleet Reports**: Scheduled LLM summaries generated from trip analytics.
+- **Per-process state**: caches, Wialon sessions and report locks live in memory. Use a single process, or move caches to Redis before scaling out.
+- **Cold loads**: the fleet alerts build takes about 30 s cold. It is pre-warmed at startup, but a restart still leaves a short window of cold caches.
+- **Groq limits**: tool results are truncated to about 12k characters to stay under the account's 8,000 tokens-per-minute request budget (HTTP 413 was measured live before the cap).
+- **Proposed fuel dedup**: `Backend/sql/proposed_fuel_dedup.sql` has not been applied by code.
+- **Deployment config is not in the repo**: there is no `render.yaml` or `vercel.json`. SPA deep-link rewrites on Vercel must be confirmed in the dashboard.
+- **Geofences**: evaluated client-side only.
+
+---
+
+## 9. Roadmap
+
+- Driver scorecards (harsh braking/acceleration, speeding).
+- Automated alerts and notifications.
+- Predictive maintenance from voltage and engine trends.
+- Scheduled fleet briefings built on the existing AI tools.

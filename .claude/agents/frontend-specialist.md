@@ -10,7 +10,7 @@ You are the frontend specialist for the ATS Fleet Management Platform (`Frontend
 - Every backend call goes through `src/api/fleetApi.js` (`apiFetch` attaches and refreshes the Supabase bearer token and maps HTTP errors to user-facing messages). Add new endpoints there; never call `fetch` directly from a page or component.
 - Routes are defined in `src/App.jsx`. Operational pages are wrapped in `components/Auth/ProtectedRoute`. Fuel pages live under `/fuel/*` and read shared filters from `context/FuelFilterContext.jsx`.
 - Reuse the shared components before creating new ones: `components/Common/*` (KpiCard, PageHeader, SearchInput, FleetStatusBadge, LiveIdleTimer), `components/Layout/Sidebar.jsx`, `components/core/*`.
-- Styling is Tailwind v4 via `@tailwindcss/vite` and the tokens in `src/index.css`. The primary colour is `#1C5E7A`; status colours are emerald (moving), amber (idle) and rose (stopped/critical). Follow `DESIGN.md`. Support dark and light themes.
+- Styling is Tailwind v4 via `@tailwindcss/vite` and the tokens in `src/index.css`. The brand colour is `--color-brand` (`#33758F`); status colours are `--color-status-moving` (emerald), `-idling` (amber), `-stopped` (slate) and `-offline` (rose). Follow `DESIGN.md`. The app is light-theme only.
 - The import alias `@` maps to `src/`.
 - Format timestamps for display only, using `src/utils/datetime.js`. The backend sends UTC/UAE-normalized values; don't re-shift them.
 

@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) when working in this repository.
 
-ATS Fleet Management Platform: a FastAPI backend that brokers the Wialon telematics API (plus Supabase for auth and fuel data, Groq for an AI assistant) and a React 19 + Vite frontend. For product and design context see `README.md`, `ARCHITECTURE.md`, `RULES.md`, `MEMORY.md`, `PRD.md`, `DESIGN.md` and `TASKS.md`. Some of those docs are out of date (see [Auth](#auth)); trust the code when they disagree.
+ATS Fleet Management Platform: a FastAPI backend that brokers the Wialon telematics API (plus Supabase for auth and fuel data, Groq for an AI assistant) and a React 19 + Vite frontend. For product and design context see `README.md`, `ARCHITECTURE.md`, `RULES.md`, `MEMORY.md`, `PRD.md`, `DESIGN.md` and `TASKS.md`. Those docs were last synced with the code at commit `0040ae0`; trust the code when they disagree. Latest test evidence is in `TASKS.md` (Verification Status).
 
 ## Commands
 
@@ -31,7 +31,9 @@ There is no pytest suite. `Backend/scripts/test_*.py` are standalone scripts tha
 python scripts/test_fuel_analytics.py
 ```
 
-Many of them (and the `audit_*`, `verify_*` and `wialon_*_inspector.py` scripts) hit live Wialon/Supabase and need a populated `Backend/.env`.
+Most use `scripts/offline_guard.py`, which blocks outbound HTTP so a missing mock fails loudly. Exceptions that need live services: `test_ai_fuel_assistant.py` and three endpoint cases in `test_fuel_efficiency.py`. The `audit_*`, `verify_*`, `check_*`, `inspect_*` and `wialon_*_inspector.py` scripts also hit live Wialon/Supabase and need a populated `Backend/.env`.
+
+Frontend: `npm test` runs the offline Node unit tests (`src/**/*.test.js`). `npx playwright test` runs `tests/e2e/` against live Wialon/Supabase (it starts both servers and needs `E2E_EMAIL`/`E2E_PASSWORD` or `.env.e2e.local`), so it needs approval like any live test.
 
 ### Environment
 
@@ -58,7 +60,7 @@ Copy `Backend/.env.example` and `Frontend/.env.example`.
 
 - The backend middleware (`require_supabase_auth` in `main.py`) requires a Supabase bearer token on **every** `/api/*` route except `/api/health`. It validates the token against Supabase `/auth/v1/user` and loads the profile (`auth.py`, which caches tokens for 5 minutes).
 - The frontend `apiFetch` in `src/api/fleetApi.js` attaches and refreshes the Supabase token and throws if there is no session.
-- The "local fallback login" described in README/ARCHITECTURE therefore cannot call the API; Supabase must be configured for real use.
+- There is no local/demo login fallback; Supabase must be configured, and the user needs a `profiles` row with role `admin`, `manager`, `fleet_manager` or `viewer` (fuel import excludes `viewer`).
 - CORS defaults to localhost:5173 only when `ENVIRONMENT` is not `production`, and `*` is rejected.
 - `/docs`, `/redoc` and `/openapi.json` are served only when `ENVIRONMENT=development` is set explicitly; unset or any other value disables them.
 

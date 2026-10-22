@@ -1,16 +1,36 @@
-# React + Vite
+# ATS Fleet — Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + Vite 8 single-page app for the ATS Fleet Management Platform. It talks only to the FastAPI backend (`VITE_API_URL`) and uses Supabase for sign-in. Project overview, environment variables and deployment: [../README.md](../README.md). Architecture: [../ARCHITECTURE.md](../ARCHITECTURE.md).
 
-Currently, two official plugins are available:
+## Scripts
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Dev server at `http://localhost:5173` |
+| `npm run lint` | ESLint |
+| `npm test` | Offline unit tests (Node test runner, `src/**/*.test.js`) |
+| `npm run build` | Production build to `dist/`. Fails unless `VITE_API_URL` is an absolute, non-loopback HTTP(S) URL (enforced in `vite.config.js`) |
+| `npm run preview` | Serve the built `dist/` locally |
+| `npx playwright test` | End-to-end tests in `tests/e2e/` (see below) |
 
-## React Compiler
+## Environment
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Copy `.env.example` to `.env`: `VITE_API_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`. Values are baked in at build time.
 
-## Expanding the ESLint configuration
+## Code layout
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- `src/api/fleetApi.js`: every backend call (token attach/refresh, error messages). Pages never call `fetch` directly.
+- `src/api/requestCache.js`: in-flight request sharing and a short client cache, cleared on sign-out.
+- `src/context/`: `AuthContext` (Supabase session and profile) and `FuelFilterContext` (fuel period/filters).
+- `src/pages/`: Landing, Login, Dashboard, FuelPerformance, Tracking, IdleAnalytics, VehicleHealth, FleetAlerts.
+- `src/utils/dateRange.js`: UAE-time presets and custom range validation. `src/utils/knownTotals.js`: null-safe totals, so unknown values never become 0.
+
+## End-to-end tests (Playwright)
+
+`playwright.config.js` starts the backend (`../Backend`, port 8000) and the dev server (port 5173), or reuses ones already running. Projects:
+
+- `setup` signs in through the real `/login` form. Credentials come from `E2E_EMAIL` / `E2E_PASSWORD`, or the git-ignored `.env.e2e.local`. The session is stored in `playwright/.auth/user.json` (git-ignored).
+- `public` covers the landing page, the login form, protected-route redirects and backend 401 without a token.
+- `chromium` (authenticated) covers sidebar navigation and legacy route redirects.
+
+These tests hit **live** Wialon and Supabase and run with one worker. `tests/example.spec.js` is the generated Playwright sample and is ignored by the config.
