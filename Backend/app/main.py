@@ -99,6 +99,11 @@ elif os.getenv("ENVIRONMENT", "development").lower() != "production":
 else:
     allowed_origins = []
 
+# Deployed Vercel frontend; always allowed in addition to the env-configured origins.
+VERCEL_FRONTEND_ORIGIN = "https://test-eta-pink-edg2397shy.vercel.app"
+if VERCEL_FRONTEND_ORIGIN not in allowed_origins:
+    allowed_origins.append(VERCEL_FRONTEND_ORIGIN)
+
 if "*" in allowed_origins:
     raise RuntimeError("CORS_ORIGINS must list explicit origins when credentialed authentication is enabled")
 
