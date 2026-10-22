@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from offline_guard import OfflineGuard  # noqa: E402
 from wialon_report_fixtures import (  # noqa: E402
-    BASE_TS, GROUP_ENGINE_HEADER, TEMPLATE_GROUP_ENGINE, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_ENGINE,
+    BASE_TS, GROUP_ENGINE_HEADER, GROUPS, TEMPLATE_GROUP_ENGINE, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_ENGINE,
     TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine, default_tables, group_engine_row, group_engine_subrow,
     group_trip_row, unit_engine_row,
 )
@@ -559,6 +559,8 @@ if __name__ == "__main__":
     print("FUEL PHASE 2 - WIALON TELEMATICS COMPLETENESS (OFFLINE)")
     print("=" * 60)
     guard = OfflineGuard().start()
+    # Report executors discover the account's "All Unit" group; serve the fixture groups offline
+    patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS).start()
     failures = 0
     try:
         for t in TESTS:

@@ -274,57 +274,199 @@ class TestFuelEfficiency(unittest.TestCase):
     # 21-25. Live FastAPI TestClient Route Tests
     # -------------------------------------------------------------
 
+    # Live data changes as fuel statements are imported, so these tests check the response contract and
+    # internal reconciliation (excluded_scope from the same response), never historical totals.
+    LIVE_RANGE = {"date_from": "2026-08-03", "date_to": "2026-08-31"}
+    BUCKET_KEYS = ("transaction_count", "litres", "cost", "refund_count", "refund_litres", "refund_cost", "identifier_count")
+
+    def _assert_number(self, value, allow_none=False, non_negative=False, msg=""):
+        if allow_none and value is None:
+            return
+        self.assertIsInstance(value, (int, float), msg)
+        self.assertNotIsInstance(value, bool, msg)
+        if non_negative:
+            self.assertGreaterEqual(value, 0, msg)
+
+    def _assert_count(self, value, msg=""):
+        self.assertIsInstance(value, int, msg)
+        self.assertNotIsInstance(value, bool, msg)
+        self.assertGreaterEqual(value, 0, msg)
+
+    def _assert_excluded_scope_reconciles(self, ex):
+        """kpi + unmatched + ambiguous + suspected_duplicates == all_*; the three exclusions == excluded_*."""
+        for bucket in ("kpi", "unmatched", "ambiguous", "suspected_duplicates"):
+            self.assertIn(bucket, ex)
+            for key in self.BUCKET_KEYS:
+                self.assertIn(key, ex[bucket], f"{bucket}.{key}")
+                self._assert_number(ex[bucket][key], msg=f"{bucket}.{key}")
+            self._assert_count(ex[bucket]["transaction_count"], bucket)
+            self._assert_count(ex[bucket]["identifier_count"], bucket)
+            self.assertLessEqual(ex[bucket]["identifier_count"], ex[bucket]["transaction_count"], bucket)
+        self._assert_count(ex["kpi"]["unit_count"], "kpi.unit_count")
+        self.assertLessEqual(ex["kpi"]["unit_count"], ex["kpi"]["identifier_count"])
+
+        excluded = ("unmatched", "ambiguous", "suspected_duplicates")
+        for field, key in (("transaction_count", "transaction_count"), ("litres", "litres"), ("cost", "cost")):
+            excl_sum = sum(ex[b][key] for b in excluded)
+            self.assertAlmostEqual(ex[f"excluded_{field}"], excl_sum, delta=0.011, msg=f"excluded_{field}")
+            self.assertAlmostEqual(ex[f"all_{field}"], ex["kpi"][key] + excl_sum, delta=0.011, msg=f"all_{field}")
+        self.assertIsInstance(ex["merged_units"], list)
+        self.assertIsInstance(ex["warnings"], list)
+
     def test_10_api_fleet_efficiency_endpoint(self):
-        """GET /api/fuel/analytics/efficiency returns valid summary against live Supabase data."""
+        """GET /api/fuel/analytics/efficiency: summary schema, KPI/excluded reconciliation and weighted ratio (live data)."""
         resp = self.client.get(
             "/api/fuel/analytics/efficiency",
-            params={"date_from": "2026-08-03", "date_to": "2026-08-31"},
+            params=self.LIVE_RANGE,
             headers={"Authorization": "Bearer mock-admin-token"},
         )
         self.assertEqual(resp.status_code, 200, f"Error: {resp.text}")
         data = resp.json()
 
-        self.assertEqual(data["transaction_count"], 2335)
-        self.assertEqual(data["vehicle_count"], 238)
-        self.assertAlmostEqual(data["total_litres"], 110553.52, places=2)
-        self.assertAlmostEqual(data["total_cost"], 404532.95, places=2)
+        # Schema and value types
+        for key in ("transaction_count", "vehicle_count", "matched_vehicle_count", "unmatched_vehicle_count",
+                    "vehicles_with_distance", "vehicles_without_distance", "unmatched_transactions_count",
+                    "vehicles_telemetry_unknown", "vehicles_engine_hours_only", "vehicles_fuel_type_mixed"):
+            self._assert_count(data[key], key)
+        for key in ("total_litres", "total_cost", "tracked_litres", "tracked_cost", "unmatched_litres",
+                    "unmatched_cost", "telemetry_litres", "engine_only_litres", "idle_rate_lph",
+                    "min_efficiency_distance_km"):
+            self._assert_number(data[key], msg=key)
+        for key in ("total_distance_km", "total_driving_hours", "total_idle_hours", "total_engine_hours"):
+            self._assert_number(data[key], allow_none=True, non_negative=True, msg=key)
+        self._assert_number(data["fuel_efficiency_l_per_100km"], allow_none=True, non_negative=True)
+        self._assert_number(data["fuel_cost_per_km"], allow_none=True, non_negative=True)
+        self.assertIn(data["telematics_status"], ("complete", "partial"))
+        self.assertIn(data["efficiency_suppressed_reason"], (None, "insufficient_distance", "non_positive_net_fuel"))
+        self.assertEqual(data["efficiency_basis"], "purchase_based")
+        self.assertIsInstance(data["data_warnings"], list)
+        self.assertEqual(data["excluded_scope"]["period"], self.LIVE_RANGE)
 
-        # Matched and tracked fleet metrics
-        self.assertIn(data["matched_vehicle_count"], (28, 29))
-        self.assertIn(data["unmatched_vehicle_count"], (209, 210))
-        self.assertIn(data["vehicles_with_distance"], (28, 29))
-        self.assertGreater(data["total_distance_km"], 100000.0)
+        # Matched and excluded totals reconcile with the full fetched dataset
+        ex = data["excluded_scope"]
+        self._assert_excluded_scope_reconciles(ex)
 
-        # Weighted efficiency should be ~15.60 L/100 km
-        self.assertGreater(data["fuel_efficiency_l_per_100km"], 10.0)
-        self.assertLess(data["fuel_efficiency_l_per_100km"], 25.0)
+        # Summary KPIs are exactly the KPI-scope bucket
+        kpi = ex["kpi"]
+        self.assertEqual(data["transaction_count"], kpi["transaction_count"])
+        self.assertEqual(data["vehicle_count"], kpi["unit_count"])
+        self.assertEqual(data["matched_vehicle_count"], kpi["unit_count"])
+        self.assertAlmostEqual(data["total_litres"], kpi["litres"], places=2)
+        self.assertAlmostEqual(data["total_cost"], kpi["cost"], places=2)
 
-    def test_11_api_vehicles_efficiency_endpoint(self):
-        """GET /api/fuel/analytics/efficiency/vehicles returns paginated and sorted list."""
+        # Legacy unmatched_* fields are unmatched + ambiguous identifiers
+        um, amb = ex["unmatched"], ex["ambiguous"]
+        self.assertEqual(data["unmatched_vehicle_count"], um["identifier_count"] + amb["identifier_count"])
+        self.assertEqual(data["unmatched_transactions_count"], um["transaction_count"] + amb["transaction_count"])
+        self.assertAlmostEqual(data["unmatched_litres"], um["litres"] + amb["litres"], delta=0.011)
+        self.assertAlmostEqual(data["unmatched_cost"], um["cost"] + amb["cost"], delta=0.011)
+
+        # Per-unit distance buckets never exceed the KPI fleet (non-positive net-fuel units are not exposed)
+        self.assertLessEqual(
+            data["vehicles_with_distance"] + data["vehicles_without_distance"]
+            + data["vehicles_telemetry_unknown"] + data["vehicles_fuel_type_mixed"],
+            data["vehicle_count"],
+        )
+        self.assertLessEqual(data["vehicles_engine_hours_only"], data["vehicle_count"])
+        if data["vehicles_with_distance"] == 0:
+            self.assertEqual(data["tracked_litres"], 0.0)
+            self.assertIsNone(data["total_distance_km"])
+
+        # Weighted ratio: tracked litres / total distance, never an average of vehicle ratios
+        if data["fuel_efficiency_l_per_100km"] is not None:
+            self.assertIsNone(data["efficiency_suppressed_reason"])
+            dist = data["total_distance_km"]
+            self.assertIsNotNone(dist)
+            self.assertGreaterEqual(dist, data["min_efficiency_distance_km"])
+            self.assertAlmostEqual(data["fuel_efficiency_l_per_100km"], data["tracked_litres"] / dist * 100, delta=0.02)
+            self.assertAlmostEqual(data["fuel_cost_per_km"], data["tracked_cost"] / dist, delta=0.02)
+        else:
+            self.assertIsNone(data["fuel_cost_per_km"])
+
+    def _get_vehicles(self, **params):
         resp = self.client.get(
             "/api/fuel/analytics/efficiency/vehicles",
-            params={
-                "date_from": "2026-08-03",
-                "date_to": "2026-08-31",
-                "page": 1,
-                "page_size": 10,
-                "sort_by": "litres",
-                "sort_order": "desc",
-            },
+            params={**self.LIVE_RANGE, **params},
             headers={"Authorization": "Bearer mock-admin-token"},
         )
         self.assertEqual(resp.status_code, 200, f"Error: {resp.text}")
-        data = resp.json()
+        return resp.json()
 
-        self.assertEqual(data["page"], 1)
-        self.assertEqual(data["page_size"], 10)
-        self.assertEqual(data["total"], 238)
-        self.assertEqual(len(data["data"]), 10)
+    def test_11_api_vehicles_efficiency_endpoint(self):
+        """GET /api/fuel/analytics/efficiency/vehicles: schema, pagination, sorting and KPI reconciliation (live data)."""
+        page1 = self._get_vehicles(page=1, page_size=10, sort_by="litres", sort_order="desc")
 
-        # Top vehicle has positive litres
-        top = data["data"][0]
-        self.assertGreater(top["litres"], 0)
-        self.assertIn(top["status"], ["matched", "not_tracked", "no_distance_data"])
+        self.assertEqual(page1["page"], 1)
+        self.assertEqual(page1["page_size"], 10)
+        self._assert_count(page1["total"], "total")
+        self.assertEqual(len(page1["data"]), min(10, page1["total"]))
+        self.assertIn(page1["telematics_status"], ("complete", "partial"))
+        self._assert_excluded_scope_reconciles(page1["excluded_scope"])
+        kpi = page1["excluded_scope"]["kpi"]
+
+        # The default list is one record per Wialon unit in the KPI scope
+        self.assertEqual(page1["total"], kpi["unit_count"])
+
+        # Fetch every page so list totals can be reconciled with the KPI bucket
+        full_size = 500
+        items, page = [], 1
+        while True:
+            body = self._get_vehicles(page=page, page_size=full_size, sort_by="litres", sort_order="desc")
+            self.assertEqual(body["total"], page1["total"])
+            self.assertEqual(body["page"], page)
+            items.extend(body["data"])
+            if page * full_size >= body["total"]:
+                break
+            page += 1
+        self.assertEqual(len(items), page1["total"])
+
+        for item in items:
+            vid = item["vehicle_identifier"]
+            self.assertIsInstance(vid, str)
+            self.assertTrue(vid.strip(), "vehicle_identifier must not be blank")
+            self.assertIn(item["status"], ("matched", "no_distance_data"), vid)
+            self.assertIsInstance(item["wialon_unit_id"], int, vid)
+            self._assert_number(item["litres"], msg=vid)
+            self._assert_number(item["total_cost"], msg=vid)
+            self._assert_count(item["transaction_count"], vid)
+            self.assertGreater(item["transaction_count"], 0, vid)
+            self._assert_number(item["distance_km"], allow_none=True, non_negative=True, msg=vid)
+            self._assert_number(item["fuel_efficiency_l_per_100km"], allow_none=True, non_negative=True, msg=vid)
+            self._assert_number(item["fuel_cost_per_km"], allow_none=True, non_negative=True, msg=vid)
+            self.assertIn(item["estimation_status"], ("estimated", "provisional", "unavailable"), vid)
+            if item["fuel_efficiency_l_per_100km"] is not None:
+                self.assertEqual(item["status"], "matched", vid)
+                self.assertGreater(item["distance_km"], 0, vid)
+                self.assertAlmostEqual(item["fuel_efficiency_l_per_100km"],
+                                       item["litres"] / item["distance_km"] * 100, delta=0.02, msg=vid)
+
+        # One record per unit: no unit appears twice
+        unit_ids = [i["wialon_unit_id"] for i in items]
+        self.assertEqual(len(unit_ids), len(set(unit_ids)))
+
+        # List totals agree with the KPI bucket from the same response
+        self.assertEqual(sum(i["transaction_count"] for i in items), kpi["transaction_count"])
+        tolerance = 0.005 * len(items) + 0.01  # per-item 2 dp rounding
+        self.assertAlmostEqual(sum(i["litres"] for i in items), kpi["litres"], delta=tolerance)
+        self.assertAlmostEqual(sum(i["total_cost"] for i in items), kpi["cost"], delta=tolerance)
+
+        # Sorted by litres desc across all pages
+        litres = [i["litres"] for i in items]
+        self.assertEqual(litres, sorted(litres, reverse=True))
+        # Page 1 (size 10) is the head of the same ordering
+        self.assertEqual([i["litres"] for i in page1["data"]], litres[:10])
+
+        # Page 2 continues where page 1 ends; a page past the end is empty
+        if page1["total"] > 10:
+            page2 = self._get_vehicles(page=2, page_size=10, sort_by="litres", sort_order="desc")
+            self.assertEqual([i["litres"] for i in page2["data"]], litres[10:20])
+        beyond = self._get_vehicles(page=(page1["total"] // 10) + 2, page_size=10)
+        self.assertEqual(beyond["data"], [])
+        self.assertEqual(beyond["total"], page1["total"])
+
+        # Ascending order is the reverse ordering of the same values
+        asc = self._get_vehicles(page=1, page_size=10, sort_by="litres", sort_order="asc")
+        self.assertEqual([i["litres"] for i in asc["data"]], sorted(litres)[:10])
 
     def test_12_api_trend_efficiency_endpoint(self):
         """GET /api/fuel/analytics/efficiency/trend returns day and month periods."""

@@ -3,7 +3,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { compareKnownDesc, idleSecondsOf, sumKnown, tripDistanceOf } from "./knownTotals.js"
+import { PARTIAL_EVENTS_NOTE, compareKnownDesc, idleSecondsOf, partialEventsNote, sumKnown, tripDistanceOf } from "./knownTotals.js"
 
 test("sumKnown keeps known values (including a recorded 0) and reports unknown ones", () => {
     const units = [{ mileage: 12.5 }, { mileage: null }, { mileage: 0 }, { mileage: undefined }, { mileage: 7.5 }]
@@ -65,4 +65,32 @@ test("dashboard no longer coerces nullable idle/mileage with || 0 or ?? 0 fallba
     assert.match(dashboard, /sumKnown\(matchingVehicles, idleSecondsOf\)/)
     const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
     assert.doesNotMatch(drawer, /Number\(t\.distance_km \|\| 0\)/)
+})
+
+test("partialEventsNote flags incomplete idle events and stays silent when complete or absent", () => {
+    assert.equal(partialEventsNote({ events_complete: false }), PARTIAL_EVENTS_NOTE)
+    assert.equal(partialEventsNote({ events_complete: true }), null)
+    assert.equal(partialEventsNote({}), null)
+    assert.equal(partialEventsNote(null), null)
+})
+
+test("Idle analytics labels trend, hotspots and the event list when events are partial", () => {
+    const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
+    assert.match(page, /const eventsNote = partialEventsNote\(analytics\)/)
+    assert.match(page, /title="Idle duration trend"\s+subtitle=\{eventsNote \|\| undefined\}/)
+    assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : "Top 10 locations"\}/)
+    assert.equal((page.match(/\{eventsNote && </g) || []).length, 2, "event list and hotspot list notes")
+    assert.match(page, /value=\{kpis\.idle_event_count \?\? "—"\}/, "unknown event count renders as a dash")
+})
+
+test("Vehicle drawer marks partial or failed idle events instead of a definitive count", () => {
+    const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
+    assert.match(drawer, /setIdleEventsStatus\(res\?\.events_complete === false \? "partial" : "complete"\)/)
+    assert.match(drawer, /setIdleEventsStatus\(idleEventsComplete === false \? "partial" : "complete"\)/)
+    assert.match(drawer, /setIdleEventsStatus\("error"\)/)
+    assert.doesNotMatch(drawer, /if \(active\) setVehicleIdleEvents\(\[\]\)/, "a failed fetch is not 'no idle events'")
+    const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
+    assert.match(page, /idleEvents=\{rangePreset === "today" \? analytics\?\.events : null\}/, "only today's events are labelled today")
+    assert.match(page, /idleEventsComplete=\{drawerEventsComplete\}/)
+    assert.match(page, /vehicle=\{drawerVehicleWithLive\}/, "live status comes from by_vehicle, not the event row")
 })

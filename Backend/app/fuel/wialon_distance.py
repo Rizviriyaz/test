@@ -520,6 +520,11 @@ def get_vehicle_telematics_detail(
     total_engine_seconds = None if "engine_hours" in engine_incomplete else (engine_rep or {}).get("total_engine_seconds", 0)
     in_motion_seconds = (engine_rep or {}).get("total_in_motion_seconds")
     idle_events = (engine_rep or {}).get("idle_events", [])
+    # The event list is complete only when Wialon delivered every idle interval and the idle cell was read
+    # (an unreadable one parses as 0, so no intervals were fetched); otherwise the count is unknown (None)
+    idle_events_complete = engine_rep is not None and "idle_events" not in engine_incomplete and total_idle_seconds is not None
+    if engine_rep is not None and total_idle_seconds is not None and not idle_events_complete:
+        warnings.append("Some Wialon idle events could not be read; idle session count unavailable.")
     if engine_rep is not None and not engine_rep.get("rows_total"):
         warnings.append("Wialon engine report returned no rows for this unit in the selected period.")
     if in_motion_seconds is None:
@@ -541,7 +546,8 @@ def get_vehicle_telematics_detail(
         "idle_duration_hours": _hours(total_idle_seconds),
         "engine_hours": _hours(total_engine_seconds),
         "stopped_hours": _hours(stopped_seconds),
-        "idle_events_count": len(idle_events),
+        "idle_events_count": len(idle_events) if idle_events_complete else None,
+        "idle_events_complete": idle_events_complete,
         "idle_events": idle_events,
         "trips": trips,
         "has_data": (len(trips) > 0 or (total_engine_seconds or 0) > 0),

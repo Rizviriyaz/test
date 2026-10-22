@@ -100,6 +100,8 @@ def diff(expected, actual, path="$"):
 def main_entry():
     capture = "--capture" in sys.argv
     guard = OfflineGuard().start()
+    # Report executors discover the account's "All Unit" group; serve the fixture groups offline
+    patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS).start()
     try:
         outputs = collect_outputs()
     finally:

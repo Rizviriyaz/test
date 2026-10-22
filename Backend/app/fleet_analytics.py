@@ -586,9 +586,9 @@ def get_trips_mileage_analytics(
                 "vehicle_id": vid,
                 "vehicle_name": vname,
                 "group": v_record.get("group", "General Fleet"),
-                # The group trips report (template 5) has one summary row per unit and no trip count:
-                # unknown, never inferred from mileage. Real counts come from the unit trips report path.
-                "trip_count": None,
+                # Wialon's own trip count for the unit (its detailed sub-rows); unknown (None) when the row is
+                # missing, unattributable or its count unreadable, never inferred from mileage
+                "trip_count": rep_item.get("trip_count"),
                 "gps_mileage_km": None if mileage_unknown else round(raw_mileage, 2),
                 "hardware_mileage_km": None,
                 "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
@@ -977,6 +977,15 @@ def get_fleet_alerts_analytics() -> Dict[str, Any]:
         finally:
             _alerts_build_seq += 1
         return result
+
+
+def prewarm_fleet_alerts() -> bool:
+    """
+    Start the alerts build in the background (e.g. at startup) so the first visitor does not wait for the
+    cold scan (~30 s measured: 24 h of sensor-calculated messages for every unit). Same build, lock and
+    TTL as a refresh; a request arriving meanwhile waits for it, and a failure caches nothing.
+    """
+    return _start_alerts_background_refresh()
 
 
 def _start_alerts_background_refresh() -> bool:

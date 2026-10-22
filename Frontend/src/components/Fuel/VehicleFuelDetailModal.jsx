@@ -9,7 +9,7 @@ import {
 } from "lucide-react"
 import { getVehicleFuelDetail } from "../../api/fleetApi"
 import VehicleStatusBadge from "./VehicleStatusBadge"
-import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber } from "./telemetryFormat"
+import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber, idleSessionsLabel } from "./telemetryFormat"
 import ClassificationBadge from "./ClassificationBadge"
 import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels"
 
@@ -439,7 +439,7 @@ export default function VehicleFuelDetailModal({
                                                 {formatMeasurement(idleHours, 1, "hrs")}
                                             </span>
                                             <span className="mt-0.5 block text-xs text-slate-500">
-                                                {activity.idle_events_count ? `${activity.idle_events_count} idle sessions` : "Stationary ignition"}
+                                                {idleSessionsLabel(activity)}
                                             </span>
                                         </div>
 
@@ -459,6 +459,9 @@ export default function VehicleFuelDetailModal({
                                         <div className="rounded-lg border border-slate-200 bg-white p-4">
                                             <h4 className="mb-2 text-xs font-semibold text-slate-900">
                                                 Discrete Idling Events Log
+                                                {activity.idle_events_complete === false && (
+                                                    <span className="ml-1.5 font-normal text-amber-700">(partial)</span>
+                                                )}
                                             </h4>
                                             <div className="max-h-56 overflow-y-auto divide-y divide-slate-100 text-xs">
                                                 {activity.idle_events.map((ev, idx) => (
@@ -468,10 +471,11 @@ export default function VehicleFuelDetailModal({
                                                                 {ev.address || "Stationary Location"}
                                                             </span>
                                                             <span className="text-[10px] text-slate-400">
-                                                                {ev.start_time ? new Date(ev.start_time * 1000).toLocaleString("en-US", { timeZone: "Asia/Dubai" }) : "—"}
+                                                                Engine on {ev.start_time ? new Date(ev.start_time * 1000).toLocaleString("en-US", { timeZone: "Asia/Dubai" }) : "—"}
                                                             </span>
                                                         </div>
                                                         <div className="text-right">
+                                                            <span className="block text-[10px] text-slate-400">Idle time</span>
                                                             <span className="font-mono font-semibold text-amber-700">
                                                                 {isKnownNumber(ev.duration_minutes)
                                                                     ? formatMeasurement(ev.duration_minutes, 0, "mins")

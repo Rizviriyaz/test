@@ -153,6 +153,9 @@ class FakeReportEngine:
             return copy.deepcopy(subs[params["indexFrom"]:params["indexTo"] + 1])
         if svc == "report/cleanup_result":
             return {}
+        if svc == "core/batch":
+            # Like Wialon: one result per sub-request, in order; a failed sub-request is its error dict
+            return [self(item["svc"], item["params"], sid=sid) for item in params["params"]]
         raise AssertionError(f"Unexpected Wialon service in fake: {svc}")
 
     def count(self, svc):

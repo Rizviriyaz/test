@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from offline_guard import OfflineGuard  # noqa: E402
 from wialon_report_fixtures import (  # noqa: E402
-    BASE_TS, TEMPLATE_GROUP_ENGINE, TEMPLATE_UNIT_ENGINE, FakeReportEngine, default_tables, group_engine_row,
+    BASE_TS, GROUPS, TEMPLATE_GROUP_ENGINE, TEMPLATE_UNIT_ENGINE, FakeReportEngine, default_tables, group_engine_row,
     unit_engine_row,
 )
 
@@ -108,6 +108,8 @@ def test_report_totals():
 
 if __name__ == "__main__":
     guard = OfflineGuard().start()
+    # Report executors discover the account's "All Unit" group; serve the fixture groups offline
+    patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS).start()
     try:
         test_parsers()
         test_report_totals()

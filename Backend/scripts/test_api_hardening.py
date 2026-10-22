@@ -308,7 +308,7 @@ def test_rolling_timeframe_aliases():
 def test_report_ids_from_env():
     import importlib
     import app.wialon_reports as wr
-    assert wr.WIALON_RESOURCE_ID == 601814494 and wr.GROUP_ID_ALL_UNITS == 601817480  # defaults unchanged
+    assert wr.WIALON_RESOURCE_ID == 601814494 and wr.GROUP_ID_ALL_UNITS == 0  # group discovered by default
     with patch.dict(os.environ, {"WIALON_REPORT_RESOURCE_ID": "123", "WIALON_GROUP_ALL_UNITS": "456",
                                  "WIALON_TEMPLATE_GROUP_TRIPS": "9"}):
         importlib.reload(wr)
@@ -316,6 +316,24 @@ def test_report_ids_from_env():
     importlib.reload(wr)
     assert wr.WIALON_RESOURCE_ID == 601814494
     print("[PASS] M5: report resource/template/group IDs are overridable via environment.")
+
+
+def test_all_units_group_discovered_from_account():
+    import app.wialon_reports as wr
+    groups = [{"id": 11, "nm": "Delivery", "u": [1, 2]}, {"id": 22, "nm": " All Unit ", "u": [1, 2, 3]}]
+    with patch.object(wr, "GROUP_ID_ALL_UNITS", 0):
+        assert wr.resolve_all_units_group_id("sid", groups) == 22
+        with patch.object(wr, "get_vehicle_groups", return_value=groups) as fetch:
+            assert wr.resolve_all_units_group_id("sid") == 22
+            fetch.assert_called_once_with("sid")
+        try:
+            wr.resolve_all_units_group_id("sid", [{"id": 11, "nm": "Delivery", "u": [1]}])
+            raise AssertionError("missing 'All Unit' group must raise")
+        except wr.WialonAPIError:
+            pass
+    with patch.object(wr, "GROUP_ID_ALL_UNITS", 456):
+        assert wr.resolve_all_units_group_id("sid", groups) == 456
+    print("[PASS] M5b: 'All Unit' report group is discovered from the account unless overridden.")
 
 
 def _idle_msgs(start, end, step=60):
@@ -429,7 +447,7 @@ def test_duplicate_unit_names_not_attributed():
     rows = [{"vehicle_name": "TWIN", "mileage_km": 10.0}, {"vehicle_name": "SOLO", "mileage_km": 5.0}]
     with patch("app.main.authenticate_access_token", return_value=USER), \
             patch("app.main.login", return_value="sid"), \
-            patch("app.main.get_vehicle_groups", return_value=[]), \
+            patch("app.main.get_vehicle_groups", return_value=[{"id": 1, "nm": "All Unit", "u": []}]), \
             patch("app.main.get_all_vehicles", return_value=units), \
             patch("app.main.get_calculated_data", return_value=[]), \
             patch("app.main.execute_wialon_group_trips_report", return_value=rows):
@@ -490,7 +508,7 @@ def test_incomplete_reports_not_cached():
 
     units = [{"id": 3, "nm": "SOLO"}, {"id": 4, "nm": "OTHER"}]
     with patch("app.main.login", return_value="sid"), \
-            patch("app.main.get_vehicle_groups", return_value=[]), \
+            patch("app.main.get_vehicle_groups", return_value=[{"id": 1, "nm": "All Unit", "u": []}]), \
             patch("app.main.get_all_vehicles", return_value=units), \
             patch("app.main.get_calculated_data", return_value=[]), \
             patch("app.main.execute_wialon_unit_trips_report", side_effect=unit_trips), \
@@ -585,6 +603,7 @@ TESTS = [
     test_summary_uses_one_window,
     test_rolling_timeframe_aliases,
     test_report_ids_from_env,
+    test_all_units_group_discovered_from_account,
     test_null_lmsg_does_not_crash_health,
     test_brake_pedal_is_not_harsh_braking,
     test_docs_disabled_in_production,

@@ -21,14 +21,18 @@ Completeness contract (shared by fuel, idle analytics, dashboard and fleet analy
     `unlocated_fields`, so callers can report it as unknown instead of trusting the guessed column.
 """
 
+import json
 import logging
 import re
 import threading
-from typing import Dict, List, Any, Optional, Tuple
-from app.wialon import WialonAPIError, wialon_request  # imported first: it loads Backend/.env
+import time
+from contextlib import contextmanager
+from typing import Collection, Dict, List, Any, Optional, Tuple
+from app.wialon import WialonAPIError, wialon_request, get_vehicle_groups, session_name  # imported first: it loads Backend/.env
 from app.utils.config import get_env_int
+from app.performance_diagnostics import request_trace_id
 
-# Wialon resource holding the report templates, the template IDs, and the 'All Unit' group.
+# Wialon resource holding the report templates, and the template IDs.
 # The defaults are the ATS production account; override them per environment (e.g. a staging account).
 WIALON_RESOURCE_ID = get_env_int("WIALON_REPORT_RESOURCE_ID", 601814494)
 TEMPLATE_ID_UNIT_TRIPS = get_env_int("WIALON_TEMPLATE_UNIT_TRIPS", 4)
@@ -36,15 +40,70 @@ TEMPLATE_ID_UNIT_ENGINE = get_env_int("WIALON_TEMPLATE_UNIT_ENGINE", 1)
 TEMPLATE_ID_GROUP_TRIPS = get_env_int("WIALON_TEMPLATE_GROUP_TRIPS", 5)
 TEMPLATE_ID_GROUP_ENGINE = get_env_int("WIALON_TEMPLATE_GROUP_ENGINE", 2)
 
-GROUP_ID_ALL_UNITS = get_env_int("WIALON_GROUP_ALL_UNITS", 601817480)
+# Optional explicit 'All Unit' group ID. 0 (the default) means it is discovered from the
+# authenticated account by name (see resolve_all_units_group_id).
+GROUP_ID_ALL_UNITS = get_env_int("WIALON_GROUP_ALL_UNITS", 0)
+ALL_UNITS_GROUP_NAMES = ("all unit", "all units")
 
 # Rows requested per report/get_result_rows call, and sub-rows per report/get_result_subrows call
 REPORT_ROWS_CHUNK = 1000
 REPORT_SUBROWS_CHUNK = 200
 # Safety bound on sub-row pages for a single row (200 * 500 = 100k idle events)
 REPORT_SUBROWS_MAX_PAGES = 500
+# Rows whose first sub-row page is requested together in one core/batch call (see _fetch_rows_subrows)
+REPORT_SUBROWS_BATCH = 50
 
+# Wialon keeps one report result per session, so reports are serialized per session: `_report_lock` for
+# the shared session, and one lock per named secondary session (app.wialon.login(session=...)).
 _report_lock = threading.Lock()
+_session_report_locks: Dict[str, threading.Lock] = {}
+_session_report_locks_guard = threading.Lock()
+
+
+def _report_lock_for(sid: str):
+    session = session_name(sid)
+    if session is None:
+        return _report_lock
+    with _session_report_locks_guard:
+        return _session_report_locks.setdefault(session, threading.Lock())
+
+
+@contextmanager
+def _holding_report_lock(report: str, sid: str):
+    """Hold `sid`'s session report lock (one Wialon report result per session), logging PERF wait and hold times."""
+    wait_started = time.perf_counter()
+    with _report_lock_for(sid):
+        held_started = time.perf_counter()
+        try:
+            yield
+        finally:
+            logging.debug(
+                "PERF report_lock request_id=%s report=%s session=%s wait_ms=%.1f held_ms=%.1f",
+                request_trace_id.get(), report, session_name(sid) or "shared",
+                (held_started - wait_started) * 1000, (time.perf_counter() - held_started) * 1000,
+            )
+
+
+def resolve_all_units_group_id(sid: str, groups: Optional[List[Dict[str, Any]]] = None) -> int:
+    """
+    Return the fleet-wide 'All Unit' group ID of the authenticated Wialon account.
+    WIALON_GROUP_ALL_UNITS wins when set; otherwise the group is found by name among `groups`
+    (fetched from Wialon when not supplied). Raises WialonAPIError when the account has no such group.
+    """
+    if GROUP_ID_ALL_UNITS:
+        return GROUP_ID_ALL_UNITS
+    if groups is None:
+        groups = get_vehicle_groups(sid)
+    matches = [
+        g for g in groups
+        if g.get("id") and str(g.get("nm", "")).strip().lower() in ALL_UNITS_GROUP_NAMES
+    ]
+    if not matches:
+        raise WialonAPIError(
+            "No 'All Unit' group found in the Wialon account; create it or set WIALON_GROUP_ALL_UNITS"
+        )
+    # Several same-named groups: the one with the most members covers the fleet best
+    return int(max(matches, key=lambda g: len(g.get("u") or []))["id"])
 
 
 def extract_cell_value(cell: Any) -> Any:
@@ -207,14 +266,28 @@ def _fetch_all_rows(sid: str, total_rows: int, what: str, table_index: int = 0) 
     return rows
 
 
-def _fetch_all_subrows(sid: str, row_index: int, what: str, table_index: int = 0) -> Tuple[List[Dict[str, Any]], bool]:
+def _subrow_key(subrow: Any) -> str:
+    """Identity of one sub-row, used to recognise intervals Wialon has already returned."""
+    return json.dumps(subrow, sort_keys=True, default=str)
+
+
+def _fetch_all_subrows(
+    sid: str, row_index: int, what: str, table_index: int = 0, expected_count: Optional[int] = None
+) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Read every sub-row (e.g. discrete idle intervals) of one report row, page by page.
     Returns (subrows, complete). An error/unexpected sub-row response does not fail the whole report
     (historically such rows were skipped and existing pages rely on that); instead complete=False so
     the caller can flag the unit's event list as incomplete. Transport errors still propagate.
+
+    Wialon can ignore indexFrom/indexTo and return the row's whole sub-row list for every page (seen live:
+    the same 313 intervals for 0-199, 200-399 and 400-599), so a sub-row already read is never added again,
+    and paging stops at a page that brings nothing new or ignores the range. `expected_count` is the row's
+    sub-row count ("d"); when given, complete=True only if exactly that many distinct sub-rows were read.
+    Without it, only a short page proves the end of the list.
     """
     subrows: List[Dict[str, Any]] = []
+    seen = set()
     for page_no in range(REPORT_SUBROWS_MAX_PAGES):
         start = page_no * REPORT_SUBROWS_CHUNK
         page = wialon_request(
@@ -226,14 +299,76 @@ def _fetch_all_subrows(sid: str, row_index: int, what: str, table_index: int = 0
         if not isinstance(page, list):
             logging.warning("Wialon %s sub-rows unavailable for row %s: %s", what, row_index, page)
             return subrows, False
-        subrows.extend(page)
+        new_rows = 0
+        for s in page:
+            key = _subrow_key(s)
+            if key not in seen:
+                seen.add(key)
+                subrows.append(s)
+                new_rows += 1
+        if expected_count is not None and len(subrows) >= expected_count:
+            break
         if len(page) < REPORT_SUBROWS_CHUNK:
-            return subrows, True
-    logging.warning(
-        "Wialon %s row %s has more than %s sub-rows; event list truncated",
-        what, row_index, REPORT_SUBROWS_CHUNK * REPORT_SUBROWS_MAX_PAGES,
-    )
-    return subrows, False
+            if expected_count is None:
+                return subrows, True
+            break
+        if new_rows == 0 or len(page) > REPORT_SUBROWS_CHUNK:
+            # The requested range was ignored: further pages would only repeat sub-rows already read
+            logging.warning(
+                "Wialon %s row %s ignored sub-row range %s-%s (%s returned, %s new); stopped paging",
+                what, row_index, start, start + REPORT_SUBROWS_CHUNK - 1, len(page), new_rows,
+            )
+            break
+    else:
+        logging.warning(
+            "Wialon %s row %s has more than %s sub-rows; event list truncated",
+            what, row_index, REPORT_SUBROWS_CHUNK * REPORT_SUBROWS_MAX_PAGES,
+        )
+        return subrows, False
+    if expected_count is None or len(subrows) != expected_count:
+        logging.warning(
+            "Wialon %s row %s: read %s distinct sub-rows, expected %s; event list incomplete",
+            what, row_index, len(subrows), expected_count,
+        )
+        return subrows, False
+    return subrows, True
+
+
+def _fetch_rows_subrows(
+    sid: str, rows: List[Dict[str, Any]], what: str, table_index: int = 0
+) -> Dict[int, Tuple[List[Dict[str, Any]], bool]]:
+    """
+    Sub-rows of every row with sub-rows ("d" > 0), as {row_index: (subrows, complete)}.
+
+    The first sub-row page of up to REPORT_SUBROWS_BATCH rows goes out as one core/batch call instead of one
+    round trip per row (a multi-day trips report has one day row per active day). A batched page is accepted
+    only when it holds exactly the row's "d" distinct sub-rows; any other row, or a failed batch, is read by
+    _fetch_all_subrows exactly as before, so completeness is checked the same way.
+    """
+    wanted = [(idx, int(r["d"])) for idx, r in enumerate(rows) if r.get("d", 0) > 0]
+    out: Dict[int, Tuple[List[Dict[str, Any]], bool]] = {}
+    for start in range(0, len(wanted), REPORT_SUBROWS_BATCH):
+        chunk = wanted[start:start + REPORT_SUBROWS_BATCH]
+        pages = wialon_request(
+            "core/batch",
+            {"params": [
+                {"svc": "report/get_result_subrows",
+                 "params": {"tableIndex": table_index, "rowIndex": idx, "indexFrom": 0, "indexTo": REPORT_SUBROWS_CHUNK - 1}}
+                for idx, _ in chunk
+            ], "flags": 0},
+            sid=sid,
+        )
+        if not isinstance(pages, list) or len(pages) != len(chunk):
+            logging.debug("Wialon %s sub-row batch unavailable (%s); reading rows one by one", what, type(pages).__name__)
+            pages = [None] * len(chunk)
+        for (idx, expected), page in zip(chunk, pages):
+            if isinstance(page, list):
+                distinct = list({_subrow_key(s): s for s in page}.values())
+                if len(distinct) == expected:
+                    out[idx] = (distinct, True)
+                    continue
+            out[idx] = _fetch_all_subrows(sid, idx, what, table_index=table_index, expected_count=expected)
+    return out
 
 
 def execute_wialon_unit_trips_report(
@@ -248,7 +383,7 @@ def execute_wialon_unit_trips_report(
 
     Guarantees report cleanup inside finally block and thread-safe execution.
     """
-    with _report_lock:
+    with _holding_report_lock("unit_trips", sid):
         report_executed = False
         try:
             exec_params = {
@@ -291,7 +426,20 @@ def execute_wialon_unit_trips_report(
                 mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"trip report of vehicle {vehicle_id}")
-                    for r in row_res:
+                    # The template groups trips by day: a row with sub-rows ("d") is a day summary whose
+                    # sub-rows are its trips (verified live). Its trips replace it; a row without sub-rows is a trip.
+                    trip_rows = []
+                    day_trips = _fetch_rows_subrows(sid, row_res, f"trip report of vehicle {vehicle_id}")
+                    for row_idx, r in enumerate(row_res):
+                        if r.get("d", 0) > 0:
+                            sub, sub_complete = day_trips[row_idx]
+                            if not sub_complete:
+                                # A partial list would undercount trips and distance; fail like an unread report
+                                raise WialonAPIError(f"Wialon trips of vehicle {vehicle_id} could not be read completely")
+                            trip_rows.extend(sub)
+                        else:
+                            trip_rows.append(r)
+                    for r in trip_rows:
                         cols = r.get("c", [])
                         if len(cols) >= 10:
                             start_obj = cols[1] if isinstance(cols[1], dict) else {}
@@ -312,13 +460,14 @@ def execute_wialon_unit_trips_report(
                             dur_mins = parse_duration_to_minutes(dur_str)
 
                             trip = {
-                                "start_time": start_obj.get("v"),
-                                "start_time_str": start_obj.get("t"),
+                                # A start without a position comes as plain text; the row's t1/t2 still carry the times
+                                "start_time": start_obj.get("v") or r.get("t1"),
+                                "start_time_str": start_obj.get("t") or (extract_cell_text(cols[1]) or None),
                                 "start_location": start_loc_obj.get("t") or "Unknown",
                                 "start_latitude": start_loc_obj.get("y"),
                                 "start_longitude": start_loc_obj.get("x"),
-                                "end_time": end_obj.get("v"),
-                                "end_time_str": end_obj.get("t"),
+                                "end_time": end_obj.get("v") or r.get("t2"),
+                                "end_time_str": end_obj.get("t") or (extract_cell_text(cols[3]) or None),
                                 "end_location": end_loc_obj.get("t") or "Unknown",
                                 "end_latitude": end_loc_obj.get("y"),
                                 "end_longitude": end_loc_obj.get("x"),
@@ -375,7 +524,7 @@ def execute_wialon_unit_engine_report(
 
     `total_in_motion_seconds` is None when the "In motion" value could not be read for every row.
     """
-    with _report_lock:
+    with _holding_report_lock("unit_engine", sid):
         report_executed = False
         try:
             exec_params = {
@@ -439,7 +588,9 @@ def execute_wialon_unit_engine_report(
 
                             # Fetch subrows for discrete idle segments
                             if r.get("d", 0) > 0 and row_idle_sec > 0:
-                                sub, sub_complete = _fetch_all_subrows(sid, row_idx, f"engine report of vehicle {vehicle_id}")
+                                sub, sub_complete = _fetch_all_subrows(
+                                    sid, row_idx, f"engine report of vehicle {vehicle_id}", expected_count=int(r["d"])
+                                )
                                 if not sub_complete:
                                     incomplete_fields.add("idle_events")
                                 for s in sub:
@@ -498,16 +649,19 @@ def execute_wialon_unit_engine_report(
 
 
 def execute_wialon_group_trips_report(
-    sid: str, from_time_utc: int, to_time_utc: int, group_id: int = GROUP_ID_ALL_UNITS
+    sid: str, from_time_utc: int, to_time_utc: int, group_id: Optional[int] = None
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Execute Wialon's native Trips Report - All Unit template (ID 5) for a fleet unit group.
     Returns authoritative vehicle mileage and trip metrics for all units directly from Wialon.
     Rows whose mileage cell could not be read carry incomplete_fields=["mileage_km"].
+    A falsy group_id means the account's 'All Unit' group.
 
     Guarantees thread-safe execution and cleanup in finally block.
     """
-    with _report_lock:
+    if not group_id:
+        group_id = resolve_all_units_group_id(sid)
+    with _holding_report_lock("group_trips", sid):
         report_executed = False
         try:
             exec_params = {
@@ -539,6 +693,7 @@ def execute_wialon_group_trips_report(
                 column_warnings: List[str] = []
                 unlocated: List[str] = []
                 mileage_idx = _column_index(tables[0].get("header"), ("Mileage",), 5, column_warnings, unlocated)
+                beginning_idx = _column_index(tables[0].get("header"), ("Beginning",), 1, column_warnings, unlocated)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"group trips report of group {group_id}")
                     for r in row_res:
@@ -556,8 +711,21 @@ def execute_wialon_group_trips_report(
                             max_spd_str = extract_cell_text(cols[9]) if len(cols) > 9 else "0 km/h"
                             driver_col = extract_cell_text(cols[10]).strip() if len(cols) > 10 else ""
 
+                            # The template is detailed: each unit row's sub-rows ("d") are its trips, and a unit
+                            # without trips gets one "-----" placeholder sub-row (verified live against every
+                            # sub-row). A row with a trip start but no sub-rows means detail is off: unknown (None).
+                            beginning = extract_cell_text(cols[beginning_idx]).strip() if len(cols) > beginning_idx else ""
+                            sub_count = r.get("d")
+                            if "Beginning" in unlocated or not isinstance(sub_count, int):
+                                trip_count = None
+                            elif beginning in ("", "-----"):
+                                trip_count = 0
+                            else:
+                                trip_count = sub_count if sub_count > 0 else None
+
                             summary = {
                                 "vehicle_name": vehicle_name,
+                                "trip_count": trip_count,
                                 "mileage_km": round(dist_km, 2),
                                 "total_time": total_time_str,
                                 "engine_hours": engine_hours_str,
@@ -590,20 +758,29 @@ def execute_wialon_group_engine_idle_report(
     sid: str,
     from_time_utc: int,
     to_time_utc: int,
-    group_id: int = GROUP_ID_ALL_UNITS,
-    include_events: bool = True
+    group_id: Optional[int] = None,
+    include_events: bool = True,
+    event_vehicle_names: Optional[Collection[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Execute Wialon's native Engine Hours Report - All Unit template (ID 2) for a fleet group.
     Returns authoritative vehicle idling metrics, engine hours, moving durations, and discrete
     idle events across the entire fleet directly from Wialon.
+    A falsy group_id means the account's 'All Unit' group.
 
     Each vehicle row lists unreadable cells in `incomplete_fields` (the corresponding legacy integer
     keys stay 0 for existing callers) and carries a parsed `mileage_km` (None when unreadable).
 
+    `event_vehicle_names`, when given with include_events, limits discrete idle events to those units:
+    other rows keep their totals but are treated as if events were not requested (`idle_events` None).
+    Sub-row paging dominates report time (and holds the report lock), so callers that use only some
+    units' events should pass it.
+
     Guarantees thread-safe execution and cleanup in finally block.
     """
-    with _report_lock:
+    if not group_id:
+        group_id = resolve_all_units_group_id(sid)
+    with _holding_report_lock("group_engine", sid):
         report_executed = False
         try:
             exec_params = {
@@ -675,9 +852,14 @@ def execute_wialon_group_engine_idle_report(
                                 row_incomplete.append("mileage_km")
 
                             unit_events = []
+                            row_events = include_events and (
+                                event_vehicle_names is None or vehicle_name in event_vehicle_names
+                            )
                             # Fetch subrows for discrete idle segments if idling > 0
-                            if include_events and idling_sec > 0 and r.get("d", 0) > 0:
-                                sub, sub_complete = _fetch_all_subrows(sid, row_idx, f"group engine report of group {group_id}")
+                            if row_events and idling_sec > 0 and r.get("d", 0) > 0:
+                                sub, sub_complete = _fetch_all_subrows(
+                                    sid, row_idx, f"group engine report of group {group_id}", expected_count=int(r["d"])
+                                )
                                 if not sub_complete:
                                     row_incomplete.append("idle_events")
                                     events_incomplete.append(vehicle_name)
@@ -710,7 +892,7 @@ def execute_wialon_group_engine_idle_report(
                                             }
                                             unit_events.append(ev_item)
                                             all_idle_events.append(ev_item)
-                            elif include_events and idling_sec > 0 and r.get("d", 0) == 0:
+                            elif row_events and idling_sec > 0 and r.get("d", 0) == 0:
                                 # When a vehicle has idling recorded in a single non-nested interval
                                 st_obj = cols[1] if len(cols) > 1 and isinstance(cols[1], dict) else {}
                                 loc_obj = cols[2] if len(cols) > 2 and isinstance(cols[2], dict) else (cols[4] if len(cols) > 4 and isinstance(cols[4], dict) else {})
@@ -751,7 +933,7 @@ def execute_wialon_group_engine_idle_report(
                                 "total_idle_seconds": idling_sec,
                                 "idle_minutes": round(idling_sec / 60.0, 2),
                                 # Count only discrete events actually read; unknown (None) when they were not requested or incomplete
-                                "idle_events": len(unit_events) if include_events and "idle_events" not in row_incomplete else None,
+                                "idle_events": len(unit_events) if row_events and "idle_events" not in row_incomplete else None,
                                 "longest_idle_seconds": longest_idle,
                                 "mileage_str": mileage_str,
                                 "mileage_km": round(mileage_km, 2) if mileage_km is not None else None,

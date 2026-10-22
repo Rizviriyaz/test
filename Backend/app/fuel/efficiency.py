@@ -6,6 +6,7 @@ by uniting Supabase fuel transactions with Wialon native telematics and engine a
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -740,8 +741,10 @@ def paginate_and_sort_vehicle_efficiency(
     )
 
 
+@lru_cache(maxsize=4096)
 def period_key_for_date(day: date, group_by: str) -> str:
-    """Period key shared by fuel and distance: YYYY-MM-DD (day), Monday YYYY-MM-DD (week), YYYY-MM (month)."""
+    """Period key shared by fuel and distance: YYYY-MM-DD (day), Monday YYYY-MM-DD (week), YYYY-MM (month).
+    Memoized: trip bucketing calls this twice per trip over few distinct dates, and strftime dominated it."""
     if group_by == "month":
         return day.strftime("%Y-%m")
     if group_by == "week":

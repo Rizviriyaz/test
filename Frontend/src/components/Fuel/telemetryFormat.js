@@ -56,6 +56,13 @@ export function resolveActivityHours(summary, activity) {
     }
 }
 
+// Caption under idling time. `idle_events_count: null` (or idle_events_complete false) means Wialon's idle
+// event list was incomplete or unread: the count is unknown, never shown as 0 / "Stationary ignition".
+export function idleSessionsLabel(activity) {
+    if (activity?.idle_events_count === null || activity?.idle_events_complete === false) return "Idle sessions unavailable"
+    return activity?.idle_events_count ? `${activity.idle_events_count} idle sessions` : "Stationary ignition"
+}
+
 // Collects completeness status and warnings from the vehicle summary and activity breakdown.
 // Returns null when everything is complete and there is nothing to say.
 export function collectTelemetryNotice(summary, activity) {

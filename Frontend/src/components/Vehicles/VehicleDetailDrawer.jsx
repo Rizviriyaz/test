@@ -6,7 +6,7 @@ import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
 import LiveIdleTimer from "../Common/LiveIdleTimer"
 import { formatElapsedDuration } from "../../utils/datetime"
-import { sumKnown, tripDistanceOf } from "../../utils/knownTotals"
+import { isKnownNumber, sumKnown, tripDistanceOf } from "../../utils/knownTotals"
 
 import {
     MorphingDialog,
@@ -40,7 +40,8 @@ function Row({ label, children, hint }) {
     )
 }
 
-export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = null }) {
+// `idleEvents` must cover today (UAE); `idleEventsComplete` false marks that list as partial (Wialon events unread)
+export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = null, idleEventsComplete = true }) {
     // Keep activeVehicle cached so the exit animation runs smoothly even when vehicle prop transitions to null
     const [activeVehicle, setActiveVehicle] = useState(vehicle)
     const [isOpen, setIsOpen] = useState(Boolean(vehicle))
@@ -61,6 +62,8 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
     const [loadingTrips, setLoadingTrips] = useState(false)
     const [vehicleIdleEvents, setVehicleIdleEvents] = useState(null)
     const [loadingIdleEvents, setLoadingIdleEvents] = useState(false)
+    // "complete" | "partial" (some Wialon idle events unread, list is a lower bound) | "error" (list unavailable)
+    const [idleEventsStatus, setIdleEventsStatus] = useState("complete")
 
     useEffect(() => {
         if (!activeVehicle) return
@@ -88,6 +91,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
             if (!vid) return
             if (idleEvents && Array.isArray(idleEvents)) {
                 setVehicleIdleEvents(idleEvents.filter(e => String(e.vehicle_id) === String(vid)))
+                setIdleEventsStatus(idleEventsComplete === false ? "partial" : "complete")
                 return
             }
             try {
@@ -96,9 +100,14 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                 if (!active) return
                 const evs = (res?.events || []).filter(e => String(e.vehicle_id) === String(vid))
                 setVehicleIdleEvents(evs)
+                // Scoped to this vehicle, so events_complete describes its event list alone
+                setIdleEventsStatus(res?.events_complete === false ? "partial" : "complete")
             } catch (err) {
                 console.error("Failed to fetch vehicle idle events:", err)
-                if (active) setVehicleIdleEvents([])
+                if (active) {
+                    setVehicleIdleEvents(null)
+                    setIdleEventsStatus("error")
+                }
             } finally {
                 if (active) setLoadingIdleEvents(false)
             }
@@ -107,7 +116,7 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
         fetchVehicleTripsData()
         fetchVehicleIdleEvents()
         return () => { active = false }
-    }, [activeVehicle, idleEvents])
+    }, [activeVehicle, idleEvents, idleEventsComplete])
 
     const handleClose = useCallback(() => {
         setIsOpen(false)
@@ -264,7 +273,10 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                                         <span className="tabular-nums">
                                             {currentVehicle.idle_duration
                                                 ? formatElapsedDuration(currentVehicle.idle_duration)
-                                                : (currentVehicle.total_idle_seconds ? formatElapsedDuration(currentVehicle.total_idle_seconds) : "0s")}
+                                                : (currentVehicle.total_idle_seconds
+                                                    ? formatElapsedDuration(currentVehicle.total_idle_seconds)
+                                                    // Unknown idle time (null from an unreadable Wialon cell) is not 0s
+                                                    : (isKnownNumber(currentVehicle.idle_duration) || isKnownNumber(currentVehicle.total_idle_seconds) ? "0s" : "—"))}
                                         </span>
                                     )}
                                 </Row>
@@ -273,12 +285,20 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                             <div className="mt-3">
                                 <div className="mb-1 flex items-center justify-between">
                                     <span className="text-[11px] font-medium text-slate-600">
-                                        Idle events today ({vehicleIdleEvents ? vehicleIdleEvents.length : 0})
+                                        Idle events today ({idleEventsStatus === "error" ? "—" : `${vehicleIdleEvents ? vehicleIdleEvents.length : 0}${idleEventsStatus === "partial" ? "+" : ""}`})
                                     </span>
                                     {loadingIdleEvents && spinner}
                                 </div>
+                                {!loadingIdleEvents && idleEventsStatus === "partial" && (
+                                    <p className="mb-1 text-[11px] text-amber-700">Partial: some Wialon idle events could not be read</p>
+                                )}
 
-                                {loadingIdleEvents ? null : !vehicleIdleEvents || vehicleIdleEvents.length === 0 ? (
+                                {loadingIdleEvents ? null : idleEventsStatus === "error" ? (
+                                    <p className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                                        Idle events could not be loaded.
+                                    </p>
+                                ) : !vehicleIdleEvents || vehicleIdleEvents.length === 0 ? (
+                                    idleEventsStatus === "partial" ? null :
                                     <p className="rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-500">
                                         No idle events recorded for this vehicle today.
                                     </p>
@@ -287,13 +307,14 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                                         {vehicleIdleEvents.map((ev, idx) => (
                                             <li key={ev.id || idx} className="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
                                                 <div className="min-w-0">
-                                                    <p className="tabular-nums text-slate-800">
-                                                        {formatUAETime(ev.start_time)} → {ev.end_time ? formatUAETime(ev.end_time) : "ongoing"}
+                                                    {/* Start/end bound the engine-on period; the duration is the idling within it */}
+                                                    <p className="tabular-nums text-slate-800" title="Engine-on period">
+                                                        Engine on {formatUAETime(ev.start_time)} → {ev.end_time ? formatUAETime(ev.end_time) : "ongoing"}
                                                     </p>
                                                     {ev.address && <p className="truncate text-[11px] text-slate-500">{ev.address}</p>}
                                                 </div>
-                                                <span className="shrink-0 font-semibold tabular-nums text-amber-800">
-                                                    {formatElapsedDuration(Number(ev.duration || 0))}
+                                                <span className="shrink-0 font-semibold tabular-nums text-amber-800" title="Idle time within the engine-on period">
+                                                    {formatElapsedDuration(Number(ev.duration || 0))} idle
                                                 </span>
                                             </li>
                                         ))}

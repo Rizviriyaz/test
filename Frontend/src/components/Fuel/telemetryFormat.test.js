@@ -11,6 +11,7 @@ import {
     collectTelemetryNotice,
     formatTrendPoint,
     trendNotice,
+    idleSessionsLabel,
 } from "./telemetryFormat.js"
 
 const wialonActivity = (over = {}) => ({
@@ -122,4 +123,22 @@ test("components no longer coerce telemetry with || 0 / ?? 0", () => {
     assert.doesNotMatch(modal, /Hours\.toFixed/, "modal formats possibly-null hours with toFixed")
     assert.doesNotMatch(chart, /distance_km\s*(\|\||\?\?)\s*0/, "trend chart coerces distance to 0")
     assert.doesNotMatch(chart, /fuel_efficiency_l_per_100km\s*\?/, "trend chart drops efficiency by truthiness")
+})
+
+test("idle session caption: unknown count is unavailable, never 'Stationary ignition'", () => {
+    assert.equal(idleSessionsLabel(wialonActivity({ idle_events_count: 54, idle_events_complete: true })), "54 idle sessions")
+    assert.equal(idleSessionsLabel(wialonActivity({ idle_events_count: 0, idle_events_complete: true })), "Stationary ignition")
+    assert.equal(idleSessionsLabel(wialonActivity({ idle_events_count: null, idle_events_complete: false })), "Idle sessions unavailable")
+    assert.equal(idleSessionsLabel(wialonActivity({ idle_events_count: 12, idle_events_complete: false })), "Idle sessions unavailable")
+    assert.equal(idleSessionsLabel({ status: "unavailable", idle_events_count: null }), "Idle sessions unavailable")
+    // Older payloads without the flag keep their previous captions
+    assert.equal(idleSessionsLabel({ idle_events_count: 3 }), "3 idle sessions")
+    assert.equal(idleSessionsLabel({}), "Stationary ignition")
+})
+
+test("fuel detail modal uses the idle session caption and marks a partial event log", () => {
+    const modal = readFileSync(new URL("./VehicleFuelDetailModal.jsx", import.meta.url), "utf8")
+    assert.match(modal, /\{idleSessionsLabel\(activity\)\}/)
+    assert.doesNotMatch(modal, /idle_events_count \?/, "modal still tests the count by truthiness")
+    assert.match(modal, /activity\.idle_events_complete === false && \(/)
 })

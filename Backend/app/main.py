@@ -19,13 +19,13 @@ from app.performance_diagnostics import log_cache_state, log_data_window, new_tr
 from app.utils.status_config import CONN_DELAYED_SECONDS
 from app.utils.ttl_cache import TTLCache
 
-from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet
+from app.wialon import EVENTS_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
     execute_wialon_unit_engine_report,
     execute_wialon_group_engine_idle_report,
-    GROUP_ID_ALL_UNITS,
+    resolve_all_units_group_id,
 )
 from app.normalize import (
     normalize_wialon_messages,
@@ -65,6 +65,10 @@ async def lifespan(app):
         logging.info("Wialon session established at startup")
     except Exception as exc:
         logging.warning("Wialon login failed at startup; it will be retried on the next request: %s", exc)
+    else:
+        # The alerts scan is the slowest cold load; start it now in the background (never blocks startup)
+        from app.fleet_analytics import prewarm_fleet_alerts
+        prewarm_fleet_alerts()
     yield
 
 
@@ -514,6 +518,10 @@ def get_vehicle_idle(
     total_engine_sec = rep_res.get("total_engine_seconds", 0)
     longest_idle_sec = max((p["duration"] for p in idle_periods), default=0)
     avg_idle_sec = (total_idle_sec / len(idle_periods)) if idle_periods else 0
+    # The period list is complete only when Wialon delivered every interval and the idle cell was read (an
+    # unreadable one parses as 0, so no periods were fetched). Otherwise period-derived metrics are unknown
+    # (None), not a lower bound; `periods` keeps what was read.
+    events_complete = "idle_events" not in incomplete_fields and not idle_unknown
 
     result = {
         "vehicle_id": vehicle_id,
@@ -522,14 +530,15 @@ def get_vehicle_idle(
         "from_time": eff_from,
         "to_time": eff_to,
         "summary": {
-            "idle_periods": len(idle_periods),
+            "idle_periods": len(idle_periods) if events_complete else None,
             "total_idle_seconds": None if idle_unknown else total_idle_sec,
             "total_idle_minutes": None if idle_unknown else round(total_idle_sec / 60.0, 2),
             "total_engine_seconds": None if engine_unknown else total_engine_sec,
             "total_engine_hours": None if engine_unknown else round(total_engine_sec / 3600.0, 2),
-            "longest_idle_seconds": longest_idle_sec,
-            "average_idle_seconds": None if idle_unknown else round(avg_idle_sec, 2)
+            "longest_idle_seconds": longest_idle_sec if events_complete else None,
+            "average_idle_seconds": round(avg_idle_sec, 2) if events_complete else None
         },
+        "events_complete": events_complete,
         "periods": idle_periods,
         "incomplete_fields": incomplete_fields,
         "column_warnings": column_warnings,
@@ -987,7 +996,7 @@ def get_dashboard_mileage(
                     })
         else:
             # Authoritative source: Wialon Group Trips Report (Template 5)
-            report_group_id = int(group_id) if group_id else GROUP_ID_ALL_UNITS
+            report_group_id = int(group_id) if group_id else resolve_all_units_group_id(sid, raw_groups)
             group_report = execute_wialon_group_trips_report(
                 sid=sid,
                 from_time_utc=eff_from,
@@ -1269,6 +1278,65 @@ def get_dashboard_trends(hours: int = 24):
     return result
 
 
+def _build_idle_trend(events, eff_from, eff_to):
+    """Idle trend points for [eff_from, eff_to] (inclusive), labelled in UAE local time.
+
+    Spans over 48 h use one bucket per UAE calendar day: the first bucket starts at eff_from and every later one
+    at UAE midnight, so a range starting mid-day is not shifted into 24 h windows that straddle two dates.
+    Shorter spans keep hourly buckets stepped from eff_from.
+    """
+    use_daily_interval = (eff_to - eff_from) > (48 * 3600)
+    date_format = "%b %d" if use_daily_interval else "%H:%M"
+
+    if use_daily_interval:
+        def _day_start(ts):
+            local = datetime.fromtimestamp(ts, tz=UAE_TZ)
+            return int(local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
+        def bucket_key_for(ts):
+            return max(_day_start(ts), eff_from)
+
+        bucket_starts = []
+        day = _day_start(eff_from)
+        while day <= eff_to:
+            bucket_starts.append(max(day, eff_from))
+            day += 86400  # UAE observes no DST, so every local day is 24 h
+    else:
+        def bucket_key_for(ts):
+            return eff_from + ((ts - eff_from) // 3600) * 3600
+
+        bucket_starts = range(eff_from, eff_to + 1, 3600)
+
+    trend_buckets = {}
+    for start in bucket_starts:
+        trend_buckets[start] = {
+            "timestamp": start,
+            "label": datetime.fromtimestamp(start, tz=UAE_TZ).strftime(date_format),
+            "idle_seconds": 0,
+            "event_count": 0
+        }
+
+    for ev in events:
+        ev_start = ev.get("start_time", 0)
+        ev_dur = ev.get("duration", 0)
+        if eff_from <= ev_start <= eff_to:
+            bucket_key = bucket_key_for(ev_start)
+            if bucket_key in trend_buckets:
+                trend_buckets[bucket_key]["idle_seconds"] += ev_dur
+                trend_buckets[bucket_key]["event_count"] += 1
+
+    return [
+        {
+            "timestamp": b["timestamp"],
+            "label": b["label"],
+            "idle_seconds": b["idle_seconds"],
+            "idle_minutes": round(b["idle_seconds"] / 60.0, 2),
+            "event_count": b["event_count"]
+        }
+        for b in sorted(trend_buckets.values(), key=lambda x: x["timestamp"])
+    ]
+
+
 @app.get("/api/idle/fleet-analytics")
 @timed_calculation("/api/idle/fleet-analytics")
 def get_fleet_idle_analytics(
@@ -1355,13 +1423,36 @@ def get_fleet_idle_analytics(
 
     current_ts = now_timestamp()
 
-    # Execute authoritative Wialon Engine Hours Report (Template 2)
+    # Filter target vehicles based on query parameters
+    target_vehicles = live_vehicles
+    if vehicle_id:
+        target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") == vehicle_id]
+    elif group_id:
+        target_group = next((g for g in raw_groups if g.get("id") == group_id), None)
+        if target_group:
+            target_unit_ids = set(target_group.get("u", []))
+            target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") in target_unit_ids]
+
+    # Only target vehicles' events are used below; paging other units' sub-rows (one unit can have 100k+)
+    # would only hold the shared report lock longer
+    event_vehicle_names = None
+    if target_vehicles is not live_vehicles:
+        event_vehicle_names = {
+            v.get("vehicle_name") or v.get("nm") or f"Vehicle {v.get('vehicle_id') or v.get('id')}"
+            for v in target_vehicles
+        }
+
+    # Execute authoritative Wialon Engine Hours Report (Template 2). Paging every unit's idle events
+    # can hold a report lock for minutes, so it runs on a dedicated Wialon session with its own lock:
+    # Dashboard summary/mileage reports on the shared session never wait behind it.
+    report_sid = login(session=EVENTS_SESSION) if include_events else sid
     rep_res = execute_wialon_group_engine_idle_report(
-        sid,
+        report_sid,
         eff_from,
         eff_to,
-        group_id=GROUP_ID_ALL_UNITS,
-        include_events=include_events
+        group_id=resolve_all_units_group_id(sid, raw_groups),
+        include_events=include_events,
+        event_vehicle_names=event_vehicle_names,
     )
 
     if rep_res is None:
@@ -1387,16 +1478,6 @@ def get_fleet_idle_analytics(
         for ev in rep_res.get("events", []):
             if ev["vehicle_name"] not in ambiguous_names:
                 wialon_events_by_veh[ev["vehicle_name"]].append(ev)
-
-    # Filter target vehicles based on query parameters
-    target_vehicles = live_vehicles
-    if vehicle_id:
-        target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") == vehicle_id]
-    elif group_id:
-        target_group = next((g for g in raw_groups if g.get("id") == group_id), None)
-        if target_group:
-            target_unit_ids = set(target_group.get("u", []))
-            target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") in target_unit_ids]
 
     all_events = []
     by_vehicle = []
@@ -1494,7 +1575,9 @@ def get_fleet_idle_analytics(
             "longest_idle_seconds": v_longest_sec,
             "engine_hours_seconds": v_engine_sec,
             "total_time_seconds": v_total_sec,
-            "status": live_st
+            "status": live_st,
+            "idle_start": v_idle_st if live_st == "IDLING" else None,
+            "idle_duration": v_idle_dur,
         })
 
         if live_st == "IDLING":
@@ -1639,42 +1722,7 @@ def get_fleet_idle_analytics(
     by_location.sort(key=lambda x: x["total_idle_seconds"], reverse=True)
 
     # Trend timeline generation (using UAE local timezone for bucket labels)
-    span_seconds = eff_to - eff_from
-    use_daily_interval = span_seconds > (48 * 3600)
-    bucket_step = 86400 if use_daily_interval else 3600
-    date_format = "%b %d" if use_daily_interval else "%H:%M"
-
-    trend_buckets = {}
-    curr_b = eff_from
-    while curr_b <= eff_to:
-        b_dt = datetime.fromtimestamp(curr_b, tz=UAE_TZ)
-        trend_buckets[curr_b] = {
-            "timestamp": curr_b,
-            "label": b_dt.strftime(date_format),
-            "idle_seconds": 0,
-            "idle_minutes": 0,
-            "event_count": 0
-        }
-        curr_b += bucket_step
-
-    for ev in all_events:
-        ev_start = ev.get("start_time", 0)
-        ev_dur = ev.get("duration", 0)
-        if eff_from <= ev_start <= eff_to:
-            bucket_key = eff_from + ((ev_start - eff_from) // bucket_step) * bucket_step
-            if bucket_key in trend_buckets:
-                trend_buckets[bucket_key]["idle_seconds"] += ev_dur
-                trend_buckets[bucket_key]["event_count"] += 1
-
-    trend_points = []
-    for b in sorted(trend_buckets.values(), key=lambda x: x["timestamp"]):
-        trend_points.append({
-            "timestamp": b["timestamp"],
-            "label": b["label"],
-            "idle_seconds": b["idle_seconds"],
-            "idle_minutes": round(b["idle_seconds"] / 60.0, 2),
-            "event_count": b["event_count"]
-        })
+    trend_points = _build_idle_trend(all_events, eff_from, eff_to)
 
     # Sort all events chronologically newest first
     all_events.sort(key=lambda x: x["start_time"], reverse=True)
@@ -1711,6 +1759,9 @@ def get_fleet_idle_analytics(
         "by_location": by_location[:10],
         "trend": trend_points,
         "events": all_events,
+        # by_location, trend and events are built from discrete events: false when any vehicle's events were not
+        # requested or could not be read completely (see by_vehicle idle_events None), so those sections are partial
+        "events_complete": events_complete,
         "groups": valid_groups,
         "ambiguous_vehicle_names": ambiguous_names,
     }

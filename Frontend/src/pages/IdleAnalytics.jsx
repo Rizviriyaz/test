@@ -26,6 +26,7 @@ import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import { LocationName } from "../utils/reverseGeocode"
 
 import { formatUAEDateTime, formatUAETime } from "../utils/datetime"
+import { partialEventsNote } from "../utils/knownTotals"
 import { RANGE_PRESETS, resolvePreset, toUaeInputValue, validateRange } from "../utils/dateRange"
 
 // ─── Utilities ───────────────────────────────────────────────
@@ -45,8 +46,9 @@ const formatDateTime = (ts) => formatUAEDateTime(ts)
 const exportToCSV = (events) => {
     if (!events || events.length === 0) return
     const headers = [
-        "Vehicle Name", "Vehicle ID", "Group", "Idle Start", "Idle End",
-        "Duration (min)", "Duration (HH:MM:SS)", "Latitude", "Longitude",
+        // Start/end bound the Wialon engine-on period; the duration is the idling within it
+        "Vehicle Name", "Vehicle ID", "Group", "Engine-On Period Start", "Engine-On Period End",
+        "Idle Duration (min)", "Idle Duration (HH:MM:SS)", "Latitude", "Longitude",
     ]
     const rows = events.map((ev) => {
         const dur = Number(ev.duration || 0)
@@ -198,6 +200,21 @@ export default function IdleAnalytics() {
     const byGroup = useMemo(() => analytics?.by_group || [], [analytics])
     const byLocation = useMemo(() => analytics?.by_location || [], [analytics])
     const trend = useMemo(() => analytics?.trend || [], [analytics])
+    // Trend, hotspots and the event list come from discrete events; null when they are complete
+    const eventsNote = partialEventsNote(analytics)
+
+    // An idle event row has no live state: take status / idle start from the vehicle's by_vehicle row,
+    // memoized because the drawer resyncs whenever the vehicle object changes
+    const drawerVehicleRow = drawerVehicle
+        ? byVehicle.find((v) => String(v.vehicle_id) === String(drawerVehicle.vehicle_id))
+        : null
+    const drawerVehicleWithLive = useMemo(() => {
+        if (!drawerVehicle || !drawerVehicleRow) return drawerVehicle
+        const { status, idle_start, idle_duration } = drawerVehicleRow
+        return { ...drawerVehicle, status, idle_start, idle_duration }
+    }, [drawerVehicle, drawerVehicleRow])
+    // by_vehicle idle_events null = that vehicle's events were not read completely
+    const drawerEventsComplete = drawerVehicleRow ? drawerVehicleRow.idle_events !== null : analytics?.events_complete !== false
 
     // Filtered vehicle options for the vehicle dropdown
     const vehicleOptions = useMemo(() => {
@@ -397,8 +414,10 @@ export default function IdleAnalytics() {
                     {mapEvent && <IdleMapModal event={mapEvent} onClose={() => setMapEvent(null)} />}
                     {drawerVehicle && (
                         <VehicleDetailDrawer
-                            vehicle={drawerVehicle}
-                            idleEvents={analytics?.events}
+                            vehicle={drawerVehicleWithLive}
+                            // The drawer lists today's events: reuse the page's only when it shows today, else it fetches today
+                            idleEvents={rangePreset === "today" ? analytics?.events : null}
+                            idleEventsComplete={drawerEventsComplete}
                             onClose={() => setDrawerVehicle(null)}
                         />
                     )}
@@ -690,6 +709,7 @@ export default function IdleAnalytics() {
                         <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                             <AnalyticsChart
                                 title="Idle duration trend"
+                                subtitle={eventsNote || undefined}
                                 data={trendChartData}
                                 dataKey="value"
                                 nameKey="label"
@@ -733,7 +753,7 @@ export default function IdleAnalytics() {
                             {locationChartData.length > 0 && (
                                 <AnalyticsChart
                                     title="Idle location hotspots"
-                                    subtitle="Top 10 locations"
+                                    subtitle={eventsNote ? `Top 10 locations · ${eventsNote}` : "Top 10 locations"}
                                     data={locationChartData}
                                     dataKey="value"
                                     nameKey="label"
@@ -751,8 +771,12 @@ export default function IdleAnalytics() {
                                 <h2 className="type-section-title text-slate-900">Idle events</h2>
                                 <p className="text-xs tabular-nums text-slate-500">
                                     <span className="font-medium text-slate-800">{filteredEvents.length}</span> events
+                                    {eventsNote && <span className="ml-2 text-amber-700">{eventsNote}</span>}
                                 </p>
                             </div>
+                            <p className="border-b border-slate-200 px-4 py-2 text-[11px] text-slate-500">
+                                Each row is one Wialon engine-on period. Idle time is the idling within that period, so it can be shorter than the time between engine on and engine off.
+                            </p>
 
                             {activeSearchStats && (
                                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-brand-light/60 px-4 py-2 text-xs text-slate-600">
@@ -796,9 +820,9 @@ export default function IdleAnalytics() {
                                                 {[
                                                     ["vehicle_name", "Vehicle", "text-left"],
                                                     ["group_name", "Group", "text-left"],
-                                                    ["start_time", "Idle start", "text-left"],
-                                                    ["end_time", "Idle end", "text-left"],
-                                                    ["duration", "Duration", "text-right"],
+                                                    ["start_time", "Engine on", "text-left"],
+                                                    ["end_time", "Engine off", "text-left"],
+                                                    ["duration", "Idle time", "text-right"],
                                                     [null, "Location", "text-left"],
                                                 ].map(([col, label, align]) => (
                                                     <th
@@ -896,6 +920,7 @@ export default function IdleAnalytics() {
                             <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
                                 <div className="border-b border-slate-200 px-4 py-3">
                                     <h2 className="type-section-title text-slate-900">Location hotspots</h2>
+                                    {eventsNote && <p className="mt-0.5 text-xs text-amber-700">{eventsNote}</p>}
                                 </div>
                                 <ol className="divide-y divide-slate-100">
                                     {byLocation.map((loc, idx) => (

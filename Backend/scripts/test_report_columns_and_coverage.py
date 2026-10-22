@@ -50,7 +50,8 @@ def _tables(drop_group_rows=(), rename=None):
 
 
 def _run_parsers(engine):
-    with patch("app.wialon_reports.wialon_request", engine):
+    with patch("app.wialon_reports.wialon_request", engine), \
+            patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS):
         return {
             "unit_trips": wr.execute_wialon_unit_trips_report("sid", 101, FROM_TS, TO_TS),
             "unit_engine": wr.execute_wialon_unit_engine_report("sid", 101, FROM_TS, TO_TS),
@@ -99,6 +100,7 @@ def _main_patches(stack, engine, units=UNITS):
     main._cache.clear()
     fa._analytics_cache.clear()
     stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+    stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS))
     for target in ("app.main", "app.fleet_analytics"):
         stack.enter_context(patch(f"{target}.login", return_value="sid"))
         stack.enter_context(patch(f"{target}.get_vehicle_groups", return_value=GROUPS))

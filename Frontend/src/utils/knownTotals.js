@@ -47,3 +47,12 @@ export function compareKnownDesc(a, b) {
     if (kb) return 1
     return 0
 }
+
+// Note for idle-analytics sections built from discrete events (trend, hotspots, event list). The backend sends
+// `events_complete: false` when some vehicles' events were not read, so those sections are partial (a lower
+// bound). An absent flag (older payload) adds no note.
+export const PARTIAL_EVENTS_NOTE = "Partial: idle events for some vehicles could not be read"
+
+export function partialEventsNote(analytics) {
+    return analytics?.events_complete === false ? PARTIAL_EVENTS_NOTE : null
+}

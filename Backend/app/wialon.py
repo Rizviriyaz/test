@@ -26,6 +26,16 @@ TOKEN = os.getenv("WIALON_TOKEN")
 API_URL = os.getenv("WIALON_API")
 SID = None
 
+# Named secondary sessions (same token, separate Wialon session ids). Wialon keeps one report result
+# per session and caps concurrent requests per session, so long fleet-wide reads (idle event paging)
+# run on their own session and never queue behind, or block, the shared SID.
+EVENTS_SESSION = "events"
+_named_sids = {}
+# Every session id ever issued for a named session (bounded by the number of re-logins), so a stale id
+# that hits error 1 is refreshed as the session it belonged to, never as the shared SID.
+_sid_owner = {}
+_SID_OWNER_MAX = 64
+
 import threading
 
 _wialon_http_session = requests.Session()
@@ -93,7 +103,14 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
         # Handle Wialon Error 1 (Invalid session) automatically
         if isinstance(res_json, dict) and res_json.get("error") == 1 and not is_retry and svc != "token/login":
             with _login_lock:
-                if SID == current_sid or not SID:
+                session = _sid_owner.get(current_sid)
+                if session is not None:
+                    if _named_sids.get(session) == current_sid:
+                        logging.warning("Wialon %s session invalid (error 1). Refreshing session...", session)
+                        new_sid = login(force=True, session=session)
+                    else:
+                        new_sid = _named_sids.get(session) or login(session=session)
+                elif SID == current_sid or not SID:
                     logging.warning("Wialon session invalid (error 1). Refreshing session...")
                     new_sid = login(force=True)
                 else:
@@ -111,8 +128,20 @@ def current_sid():
     return SID
 
 
-def login(force=False):
+def session_name(sid):
+    """The named session `sid` was issued for (e.g. EVENTS_SESSION), or None for the shared SID."""
+    return _sid_owner.get(sid)
+
+
+def login(force=False, session=None):
+    """
+    Return the shared session id, logging in when there is none (or force=True).
+    `session` names a dedicated secondary session (e.g. EVENTS_SESSION) with its own session id.
+    """
     global SID
+
+    if session is not None:
+        return _login_named(session, force)
 
     with _login_lock:
         # Reuse existing session
@@ -137,6 +166,36 @@ def login(force=False):
         SID = login_data.get("eid")
 
         return SID
+
+
+def _login_named(session, force=False):
+    with _login_lock:
+        existing = _named_sids.get(session)
+        if existing and not force:
+            return existing
+
+        login_data = wialon_request(
+            "token/login",
+            {
+                "token": get_wialon_token()
+            },
+            sid=None,
+            is_retry=True
+        )
+
+        if not isinstance(login_data, dict) or "error" in login_data or not login_data.get("eid"):
+            _named_sids.pop(session, None)
+            raise WialonAPIError(
+                f"Wialon login failed for {session} session: {login_data}"
+            )
+
+        new_sid = login_data["eid"]
+        _named_sids[session] = new_sid
+        _sid_owner[new_sid] = session
+        # Stale ids only matter for requests already in flight; keep the most recent ones
+        while len(_sid_owner) > _SID_OWNER_MAX:
+            del _sid_owner[next(iter(_sid_owner))]
+        return new_sid
 
 
 if __name__ == "__main__":

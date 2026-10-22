@@ -13,6 +13,7 @@ from app.wialon import login, get_vehicle_history
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity
 from app.utils.datetime_helpers import UAE_TZ
+from app.wialon_reports import execute_wialon_unit_trips_report, parse_float_safe
 
 
 def _format_duration(seconds: int) -> str:
@@ -26,6 +27,16 @@ def _format_duration(seconds: int) -> str:
     if m > 0:
         return f"{m}m {sec}s"
     return f"{sec}s"
+
+
+def _resolve_unit(units: list, ref):
+    """
+    The raw Wialon unit whose ID equals `ref`, else whose name equals it exactly (case-insensitive), else None.
+    Fleet names are often numeric (e.g. "72796"), so the model can pass a name where an ID is expected.
+    """
+    ref_str = str(ref).strip().lower()
+    return (next((u for u in units if str(u.get("id")) == ref_str), None)
+            or next((u for u in units if str(u.get("nm", "")).strip().lower() == ref_str), None))
 
 
 def _format_ts(ts) -> str:
@@ -157,7 +168,8 @@ def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle
     vehicles = get_all_vehicles(sid)
 
     if vehicle_id:
-        target = [v for v in vehicles if v.get("id") == vehicle_id]
+        unit = _resolve_unit(vehicles, vehicle_id)
+        target = [unit] if unit else []
     else:
         target = vehicles
 
@@ -235,31 +247,39 @@ def tool_get_vehicle_trips(vehicle_id: int, hours: int = 24) -> dict:
     """Return trip summary for a specific vehicle."""
     sid = login()
     vehicles = get_all_vehicles(sid)
-    target = next((v for v in vehicles if v.get("id") == vehicle_id), None)
-    sens = (target.get("sens") or {}) if target else {}
-    vname = target.get("nm", f"Vehicle {vehicle_id}") if target else f"Vehicle {vehicle_id}"
+    target = _resolve_unit(vehicles, vehicle_id)
+    if not target:
+        return {"found": False, "vehicle_id": vehicle_id}
+    vehicle_id = target.get("id")
+    vname = target.get("nm", f"Vehicle {vehicle_id}")
 
-    raw = get_vehicle_history(sid, vehicle_id, hours=hours)
-    telemetry = normalize_wialon_messages(raw, configured_sensors=sens)
-    activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
+    # Wialon's trips report, the same authoritative source as the vehicle drawer and fleet trip KPI
+    # (segmenting raw messages here gave different trip counts than the dashboard)
+    window_to = int(time.time())
+    rep = execute_wialon_unit_trips_report(sid, vehicle_id, window_to - hours * 3600, window_to)
+    unknown_distance = "distance_km" in (rep.get("incomplete_fields") or []) + (rep.get("unlocated_fields") or [])
 
     trips = []
-    for t in activity.get("trips", []):
+    for t in rep.get("trips", []):
+        dur_min = t.get("duration_minutes")
         trips.append({
             "start_time": _format_ts(t.get("start_time")),
             "end_time": _format_ts(t.get("end_time")),
-            "duration": _format_duration(t.get("duration", 0)),
-            "distance_km": round(t.get("distance", 0), 2),
-            "max_speed_kmh": t.get("max_speed", 0),
+            "duration": _format_duration(dur_min * 60) if isinstance(dur_min, (int, float)) else "unknown",
+            "distance_km": None if "distance_km" in (t.get("incomplete_fields") or []) or unknown_distance else t.get("distance_km"),
+            "max_speed_kmh": parse_float_safe(t.get("max_speed"), default=None),
         })
 
-    return {
+    result = {
         "vehicle_id": vehicle_id,
         "vehicle_name": vname,
         "hours_window": hours,
         "trip_count": len(trips),
         "trips": trips,
     }
+    if unknown_distance:
+        result["note"] = "Some trip distances could not be read from Wialon (null); say they are unknown."
+    return result
 
 
 def tool_get_fleet_health() -> dict:
@@ -295,14 +315,12 @@ def tool_get_group_analytics() -> dict:
 def tool_get_vehicle_deep_analytics(vehicle_id, hours: int = 24) -> dict:
     """Return deep diagnostics, health, today's metrics, and trip count for a specific vehicle."""
     from app.fleet_analytics import get_single_vehicle_deep_analytics
-    try:
-        vid = int(vehicle_id)
-    except Exception:
-        # Search by name in fleet
-        sid = login()
-        v_list = get_all_vehicles(sid)
-        target = next((v for v in v_list if str(vehicle_id).lower() in str(v.get("nm", "")).lower()), None)
-        vid = target.get("id") if target else None
+    sid = login()
+    v_list = get_all_vehicles(sid)
+    # Exact ID or name first (numeric names are not IDs), then the previous partial-name search
+    target = _resolve_unit(v_list, vehicle_id) or next(
+        (v for v in v_list if str(vehicle_id).lower() in str(v.get("nm", "")).lower()), None)
+    vid = target.get("id") if target else None
     if not vid:
         return {"found": False, "vehicle_id": vehicle_id}
     return get_single_vehicle_deep_analytics(vehicle_id=vid, hours=hours)
@@ -458,6 +476,63 @@ TOOL_DEFINITIONS = [
 MAX_TOOL_HOURS = 168
 MAX_IDLE_MIN_DURATION_MINUTES = 1440
 
+# Tool results go back to Groq whole. The account's limit is 8000 tokens per request-minute and the prompt,
+# tool schemas and reply budget take ~4k (a ~7.5k-token alerts result requested 11.5k), so analytics results of
+# 20-60k chars were rejected (HTTP 413, measured live). Larger results keep every count/total field and get
+# their longest lists shortened to fit (~3k tokens).
+MAX_TOOL_RESULT_CHARS = 12000
+
+
+def _fit_for_model(result) -> str:
+    """JSON for the model, at most MAX_TOOL_RESULT_CHARS when possible: the longest lists are halved until it fits
+    (by item count, so per-group summaries outlast the listings inside them),
+    and `truncated_lists` says which were cut ("showing first k of n") so the model can say a list is partial."""
+    text = json.dumps(result)
+    if len(text) <= MAX_TOOL_RESULT_CHARS or not isinstance(result, dict):
+        return text
+    data = json.loads(text)  # deep copy: results can be cached dicts
+    originals: dict = {}
+
+    def lists(node, path):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from lists(v, f"{path}.{k}" if path else k)
+                if isinstance(v, list) and len(v) > 1:
+                    yield len(json.dumps(v)), (f"{path}.{k}" if path else k), node, k
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from lists(v, f"{path}[{i}]")
+
+    while len(text) > MAX_TOOL_RESULT_CHARS:
+        candidates = list(lists(data, ""))
+        if not candidates:
+            break
+        # Most items first: long lists are listings (alerts, vehicles), short ones summaries (groups) kept whole longest
+        _, path, parent, key = max(candidates, key=lambda c: (len(c[2][c[3]]), c[0]))
+        originals.setdefault(path, len(parent[key]))
+        parent[key] = parent[key][: len(parent[key]) // 2]
+        text = json.dumps(data)
+
+    kept = {p: _get_path(data, p) for p in originals}
+    data["truncated_lists"] = {p: f"showing first {len(kept[p])} of {n}" for p, n in originals.items() if kept[p] is not None}
+    data["truncation_note"] = ("Lists named in truncated_lists were shortened to fit; count and total fields are complete. "
+                               "Say a listing is partial when it matters.")
+    return json.dumps(data)
+
+
+def _get_path(data, path):
+    """Value at a dotted/indexed path built by _fit_for_model (None when an ancestor list was shortened past it)."""
+    node = data
+    for part in path.replace("[", ".[").split("."):
+        if part.startswith("["):
+            idx = int(part[1:-1])
+            node = node[idx] if isinstance(node, list) and idx < len(node) else None
+        else:
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is None:
+            return None
+    return node
+
 
 class ToolInputError(ValueError):
     """An invalid tool argument. Only these messages are shown to the model so it can correct its call;
@@ -571,7 +646,7 @@ def dispatch_tool(name: str, args: dict) -> str:
     if clamped and isinstance(result, dict):
         # Copy: analytics results can be cached dicts that must not be mutated.
         result = {**result, "time_range_note": "; ".join(clamped)}
-    return json.dumps(result)
+    return _fit_for_model(result)
 
 
 # ─── Fuel Intelligence Tool Implementations ───────────────────────────────────
