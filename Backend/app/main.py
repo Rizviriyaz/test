@@ -1,11 +1,12 @@
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ
 import logging
 import os
 import sys
+import threading
 import time
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -133,7 +134,8 @@ async def require_supabase_auth(request: Request, call_next):
         "/api/fleet/trips",
         "/api/fleet/groups",
         "/api/wialon/audit",
-    }
+        "/api/dashboard/summary",
+    } or request.url.path.startswith("/api/fuel/analytics/")
     trace_id = new_trace_id() if tracked_path else "-"
     trace_token = request_trace_id.set(trace_id)
     request_started = time.perf_counter()
@@ -233,6 +235,26 @@ def cached(key, ttl_seconds=300):
 
 def set_cache(key, data):
     _cache.set(key, {"data": data, "time": time.time()}, _CACHE_RETENTION_SECONDS)
+
+
+_flight_locks: Dict[str, list] = {}
+_flight_guard = threading.Lock()
+
+
+@contextmanager
+def _single_flight(key):
+    """Serialize work on one cache key; callers re-check the cache inside, so concurrent duplicates compute once."""
+    with _flight_guard:
+        entry = _flight_locks.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _flight_guard:
+            entry[1] -= 1
+            if entry[1] == 0 and _flight_locks.get(key) is entry:
+                del _flight_locks[key]
 
 
 @app.get("/")
@@ -1399,6 +1421,20 @@ def get_fleet_idle_analytics(
         if hit:
             return hit
 
+    # Overlapping identical requests (two tabs, a remount) wait for the one already running and reuse its cached
+    # result instead of each paging the same Wialon report; a refresh still recomputes after it.
+    with _single_flight(cache_key):
+        if not refresh and not skip_cache:
+            hit = cached(cache_key, ttl_seconds=180)
+            if hit:
+                return hit
+        return _compute_fleet_idle_analytics(
+            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key
+        )
+
+
+def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key):
+    """Build the /api/idle/fleet-analytics payload from Wialon and cache it under cache_key when complete."""
     sid = login()
 
     # Dynamic Customer Groups Discovery

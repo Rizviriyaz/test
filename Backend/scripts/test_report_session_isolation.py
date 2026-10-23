@@ -64,6 +64,10 @@ class SessionWialon:
 
     def post(self, url, data=None, timeout=None):
         svc, params, sid = data["svc"], json.loads(data["params"]), data.get("sid")
+        if svc == "core/batch":
+            # Like Wialon: each sub-request runs on the batch's session, results in order
+            return _Resp([self.post(url, {"svc": item["svc"], "params": json.dumps(item["params"]), "sid": sid}).json()
+                          for item in params["params"]])
         if svc == SUBROWS and self.subrow_gate is not None:
             self.subrows_waiting.set()
             self.subrow_gate.wait(timeout=WAIT)

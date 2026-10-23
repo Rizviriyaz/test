@@ -8,6 +8,7 @@ Cells are plain strings for durations/mileage and dicts for time/location, as pr
 """
 
 import copy
+import threading
 
 TEMPLATE_UNIT_ENGINE = 1
 TEMPLATE_GROUP_ENGINE = 2
@@ -123,8 +124,17 @@ class FakeReportEngine:
         self.fail_exec = set(fail_exec or [])
         self.empty_tables = set(empty_tables or [])
         self.subrow_error_rows = set(subrow_error_rows or [])  # row indexes whose sub-rows return an error
-        self.current = None
+        # Wialon keeps one report result per session; reports on different sessions run in different threads
+        self._local = threading.local()
         self.calls = []
+
+    @property
+    def current(self):
+        return getattr(self._local, "current", None)
+
+    @current.setter
+    def current(self, table):
+        self._local.current = table
 
     def __call__(self, svc, params, sid=None, timeout=None, **kwargs):
         self.calls.append((svc, copy.deepcopy(params)))

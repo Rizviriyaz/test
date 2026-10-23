@@ -132,7 +132,7 @@ def test_history_update_failure_is_warned():
     with patch("app.fuel.importer.create_fuel_import_record", return_value=77), \
          patch("app.fuel.importer.update_fuel_import_record", return_value=False), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=fake.insert), \
-         patch("app.fuel.db.requests.get", side_effect=fake.get):
+         patch("app.fuel.db._session.get", side_effect=fake.get):
         res = execute_fuel_import(make_xlsx([ROW]), "s.xlsx", MAPPING, FAKE_USER["id"])
     assert res.rows_imported == 1
     assert any("#77" in w and "processing" in w for w in res.warnings or []), res.warnings
@@ -157,7 +157,7 @@ def test_impossible_dates_are_400():
 
 
 def test_import_history_outage_is_503():
-    with patch("app.fuel.db.requests.get", return_value=FakeResponse(status=500)):
+    with patch("app.fuel.db._session.get", return_value=FakeResponse(status=500)):
         try:
             fuel_db.get_fuel_imports_list(10, 0)
             raise AssertionError("expected FuelDataFetchError")
@@ -165,10 +165,10 @@ def test_import_history_outage_is_503():
             pass
     client = TestClient(app)
     with patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
-         patch("app.fuel.db.requests.get", side_effect=fuel_db.requests.RequestException("down")):
+         patch("app.fuel.db._session.get", side_effect=fuel_db.requests.RequestException("down")):
         r = client.get("/api/fuel/imports?limit=10", headers=AUTH)
     assert r.status_code == 503 and "unavailable" in r.json()["detail"], r.text
-    with patch("app.fuel.db.requests.get",
+    with patch("app.fuel.db._session.get",
                return_value=FakeResponse([{"id": 1}], headers={"content-range": "0-0/1"})):
         records, total = fuel_db.get_fuel_imports_list(10, 0)
     assert records == [{"id": 1}] and total == 1

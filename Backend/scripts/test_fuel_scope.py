@@ -95,7 +95,7 @@ class Api:
         self.login = MagicMock(return_value="sid")
         self.units = MagicMock(return_value=units)
         self.bundle = MagicMock(return_value=BUNDLE)
-        self.trips = MagicMock(side_effect=lambda ids, f, t, sid: {
+        self.trips = MagicMock(side_effect=lambda ids, f, t, sid, units=None: {
             i: {"status": "complete", "error": None, "trips": [{"start_time": 1785744000, "end_time": 1785747600,
                                                                  "distance_km": {1: 500.0, 2: 200.0}.get(i, 0.0)}]} for i in ids})
         self.detail = MagicMock(return_value={
@@ -114,6 +114,7 @@ class Api:
             ("app.fuel.routes.get_all_vehicles", self.units),
             ("app.fuel.routes.get_fleet_telematics_bundle", self.bundle),
             ("app.fuel.routes.get_units_trips_for_range", self.trips),
+            ("app.fuel.routes.get_fleet_trips", MagicMock(return_value=None)),
             ("app.fuel.routes.get_vehicle_telematics_detail", self.detail),
         ]:
             self.stack.enter_context(patch(target, obj))

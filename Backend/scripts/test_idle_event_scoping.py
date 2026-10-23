@@ -154,6 +154,49 @@ def test_lock_wait_is_logged():
     check(wait_ms >= 200, f"logged wait_ms reflects time queued behind another report ({wait_ms:.0f} ms)")
 
 
+def test_concurrent_identical_requests_share_one_report():
+    import app.main as main
+
+    engine = FakeReportEngine()
+
+    def slow_engine(svc, *args, **kwargs):
+        if svc == "report/exec_report":
+            time.sleep(0.2)  # keep the first report running while the other requests arrive
+        return engine(svc, *args, **kwargs)
+
+    patches = [
+        patch("app.wialon_reports.wialon_request", slow_engine),
+        patch("app.main.login", return_value="sid"),
+        patch("app.main.get_vehicle_groups", return_value=GROUPS),
+        patch("app.main.get_all_vehicles", return_value=UNITS),
+        patch("app.main.get_calculated_data", return_value=CALCULATED),
+        patch("app.main.get_vehicle_live_data", side_effect=lambda *a, **k: live_records()),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        main._cache.clear()
+        results = [None] * 3
+
+        def call(i):
+            results[i] = main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True)
+
+        threads = [threading.Thread(target=call, args=(i,)) for i in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check(engine.count("report/exec_report") == 1, "3 overlapping identical requests run the Wialon report once")
+        check(results[0] is not None and results[0] == results[1] == results[2], "overlapping requests get the same payload")
+        main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True, refresh=True)
+        check(engine.count("report/exec_report") == 2, "a refresh still recomputes instead of reusing the cached result")
+        check(not main._flight_locks, "per-key request locks are released once no request is waiting")
+    finally:
+        for p in reversed(patches):
+            p.stop()
+        main._cache.clear()
+
+
 if __name__ == "__main__":
     guard = OfflineGuard().start()
     try:
@@ -161,6 +204,7 @@ if __name__ == "__main__":
         test_scoped_requests_match_previous_behaviour()
         test_report_scoping_keeps_totals()
         test_lock_wait_is_logged()
+        test_concurrent_identical_requests_share_one_report()
     finally:
         guard.stop()
     if guard.attempts:

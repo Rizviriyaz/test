@@ -1,9 +1,42 @@
-"""Small thread-safe TTL cache with per-key single-flight computation."""
+"""Small thread-safe TTL cache with per-key single-flight computation, and retention-free in-flight sharing."""
 
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from typing import Any, Callable, Dict, Hashable, Optional, Tuple
+
+
+class InFlight:
+    """
+    Concurrent calls for the same key share one running computation and its result (or exception).
+    Nothing is retained once it finishes, so a later call always computes afresh: no staleness window.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._calls: Dict[Hashable, Future] = {}
+
+    def run(self, key: Hashable, compute: Callable[[], Any]) -> Any:
+        with self._lock:
+            future = self._calls.get(key)
+            owner = future is None
+            if owner:
+                future = self._calls[key] = Future()
+        if not owner:
+            return future.result()
+        try:
+            value = compute()
+        except BaseException as exc:
+            future.set_exception(exc)
+            raise
+        else:
+            future.set_result(value)
+            return value
+        finally:
+            with self._lock:
+                if self._calls.get(key) is future:
+                    del self._calls[key]
 
 
 class _KeyState:

@@ -11,7 +11,7 @@ import {
     Calendar,
 } from "lucide-react"
 
-import { getFleetIdleAnalytics } from "../api/fleetApi"
+import { getCachedFleetIdleAnalytics, getFleetIdleAnalytics } from "../api/fleetApi"
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
@@ -124,6 +124,10 @@ export default function IdleAnalytics() {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState("")
     const [lastUpdated, setLastUpdated] = useState(null)
+    // `analytics` may be the events-free summary while the full response (discrete idle events) is loading
+    const [showingSummary, setShowingSummary] = useState(false)
+    const [eventsLoading, setEventsLoading] = useState(false)
+    const [eventsError, setEventsError] = useState("")
 
     // ── UI state ──
     const [selectedGroupId, setSelectedGroupId] = useState(null)
@@ -160,28 +164,54 @@ export default function IdleAnalytics() {
             opts.from_time = range.from
             opts.to_time = range.to
         }
-        try {
-            if (isManualRefresh) {
-                opts.skip_cache = true
-                opts.refresh = true
-            }
-            // Pass server-side group/vehicle filter only when drilling
-            if (filterGroupId) opts.group_id = Number(filterGroupId)
-            if (filterVehicleId) opts.vehicle_id = Number(filterVehicleId)
-            const data = await getFleetIdleAnalytics(opts)
-            if (currentReq === reqSeqRef.current) {
-                setAnalytics(data)
-                setLastUpdated(new Date())
-            }
-        } catch (err) {
-            if (currentReq === reqSeqRef.current) {
-                console.error(err)
-                setError(err.message || "Failed to load idle analytics. Please try again.")
-            }
-        } finally {
-            if (currentReq === reqSeqRef.current) {
-                setLoading(false)
-            }
+        if (isManualRefresh) {
+            opts.skip_cache = true
+            opts.refresh = true
+        }
+        // Pass server-side group/vehicle filter only when drilling
+        if (filterGroupId) opts.group_id = Number(filterGroupId)
+        if (filterVehicleId) opts.vehicle_id = Number(filterVehicleId)
+        setEventsError("")
+
+        const cachedFull = getCachedFleetIdleAnalytics(opts)
+        if (cachedFull) {
+            setAnalytics(cachedFull)
+            setShowingSummary(false)
+            setEventsLoading(false)
+            setLastUpdated(new Date())
+            setLoading(false)
+            return
+        }
+
+        // KPIs and per-vehicle/group totals come from a summary request that skips idle-event paging, so they show
+        // while the full request (discrete events: trend, hotspots, event list) is still paging Wialon sub-rows.
+        setEventsLoading(true)
+        let fullApplied = false
+        const isCurrent = () => currentReq === reqSeqRef.current
+        const summaryReq = getFleetIdleAnalytics({ ...opts, include_events: false }).then((data) => {
+            if (!isCurrent() || fullApplied) return
+            setAnalytics(data)
+            setShowingSummary(true)
+            setLastUpdated(new Date())
+            setLoading(false)
+        })
+        const fullReq = getFleetIdleAnalytics(opts).then((data) => {
+            if (!isCurrent()) return
+            fullApplied = true
+            setAnalytics(data)
+            setShowingSummary(false)
+            setLastUpdated(new Date())
+        })
+        const [summaryRes, fullRes] = await Promise.allSettled([summaryReq, fullReq])
+        if (!isCurrent()) return
+        setLoading(false)
+        setEventsLoading(false)
+        if (fullRes.status === "rejected") {
+            console.error(fullRes.reason)
+            const message = fullRes.reason?.message || "Failed to load idle analytics. Please try again."
+            // With the summary on screen, only the event-based sections are missing: say so instead of hiding the KPIs
+            if (summaryRes.status === "rejected") setError(message)
+            else setEventsError(`Idle events could not be loaded: ${message}`)
         }
     }, [rangePreset, rangeInputs, filterGroupId, filterVehicleId])
 
@@ -201,7 +231,8 @@ export default function IdleAnalytics() {
     const byLocation = useMemo(() => analytics?.by_location || [], [analytics])
     const trend = useMemo(() => analytics?.trend || [], [analytics])
     // Trend, hotspots and the event list come from discrete events; null when they are complete
-    const eventsNote = partialEventsNote(analytics)
+    const eventsPending = showingSummary && eventsLoading
+    const eventsNote = eventsPending ? "Loading idle events…" : partialEventsNote(analytics)
 
     // An idle event row has no live state: take status / idle start from the vehicle's by_vehicle row,
     // memoized because the drawer resyncs whenever the vehicle object changes
@@ -416,7 +447,7 @@ export default function IdleAnalytics() {
                         <VehicleDetailDrawer
                             vehicle={drawerVehicleWithLive}
                             // The drawer lists today's events: reuse the page's only when it shows today, else it fetches today
-                            idleEvents={rangePreset === "today" ? analytics?.events : null}
+                            idleEvents={rangePreset === "today" && !showingSummary ? analytics?.events : null}
                             idleEventsComplete={drawerEventsComplete}
                             onClose={() => setDrawerVehicle(null)}
                         />
@@ -428,7 +459,7 @@ export default function IdleAnalytics() {
                 title="Idle Analytics"
                 subtitle="Idling by vehicle, group and location"
                 onRefresh={refresh}
-                loading={loading}
+                loading={loading || eventsLoading}
                 lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
             />
 
@@ -553,6 +584,7 @@ export default function IdleAnalytics() {
                 </section>
 
                 {error && analytics && <ErrorBanner message={error} onRetry={refresh} />}
+                {!error && eventsError && analytics && <ErrorBanner message={eventsError} onRetry={refresh} />}
 
                 {loading && !analytics ? (
                     <LoadingState label="Analyzing fleet idle history…" />
@@ -569,7 +601,7 @@ export default function IdleAnalytics() {
                                 value={kpis.currently_idling_vehicles ?? 0}
                                 sub={kpis.idling_fleet_ratio != null ? `${kpis.idling_fleet_ratio}% of fleet` : undefined}
                             />
-                            <KpiCard label="Idle events" value={kpis.idle_event_count ?? "—"} />
+                            <KpiCard label="Idle events" value={eventsPending ? "…" : kpis.idle_event_count ?? "—"} sub={eventsPending ? "Loading idle events…" : undefined} />
                             <KpiCard
                                 label="Total idle time"
                                 value={formatDuration(kpis.total_idle_seconds)}
@@ -577,16 +609,18 @@ export default function IdleAnalytics() {
                             />
                             <KpiCard
                                 label="Avg idle duration"
-                                value={kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
+                                value={eventsPending ? "…" : kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
                             />
                             <KpiCard
                                 label="Longest idle"
-                                value={kpis.longest_idle_seconds == null ? "—" : formatDuration(kpis.longest_idle_seconds)}
+                                value={eventsPending ? "…" : kpis.longest_idle_seconds == null ? "—" : formatDuration(kpis.longest_idle_seconds)}
                                 valueColor={highestIdleEvent ? "text-amber-800" : "text-slate-900"}
                                 sub={
                                     highestIdleEvent
                                         ? `${highestIdleEvent.vehicle_name} · view on map`
-                                        : kpis.longest_idle_seconds == null
+                                        : eventsPending
+                                            ? "Loading idle events…"
+                                            : kpis.longest_idle_seconds == null
                                             ? "Idle events incomplete"
                                             : "No idling in period"
                                 }
@@ -801,7 +835,9 @@ export default function IdleAnalytics() {
                                 </div>
                             )}
 
-                            {filteredEvents.length === 0 ? (
+                            {eventsPending ? (
+                                <LoadingState label="Loading idle events…" />
+                            ) : filteredEvents.length === 0 ? (
                                 <EmptyState
                                     icon={CheckCircle2}
                                     title={allEvents.length === 0 ? "No idle events in this period" : "No idle events match your filters"}

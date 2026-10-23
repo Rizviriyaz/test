@@ -2,16 +2,32 @@
 
 import logging
 import os
+import random
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import requests
+from requests.adapters import HTTPAdapter
 
+from app.performance_diagnostics import request_trace_id
+from app.utils.config import get_env_float, get_env_int
 from app.utils.datetime_helpers import parse_tx_wallclock
 
 logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 1000
+
+# One pooled session for every PostgREST read. The Supabase edge is ~230 ms RTT away, so a fresh TCP + TLS
+# connection per page cost 0.6-0.9 s before the request was even sent, and every page restarted TCP slow start.
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=16))
+
+# Page reads are idempotent, so transport failures and gateway errors are retried a bounded number of times with
+# jitter. Other errors (e.g. 500 from a bad query, 4xx) fail at once. Measured: the server answers in ~10-35 ms,
+# but single responses occasionally stall for 15-60 s on the network path; a fresh attempt is the fix for those.
+_RETRYABLE_STATUS = frozenset({408, 429, 502, 503, 504, 520, 522, 524, 544})
+_RETRYABLE_ERRORS = (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError)
 
 
 class FuelDataFetchError(RuntimeError):
@@ -96,7 +112,7 @@ def find_import_by_sha256(file_sha256: str, bearer_token: Optional[str] = None) 
     url = get_supabase_rest_url("fuel_imports")
     params = {"select": "id", "file_sha256": f"eq.{file_sha256}", "order": "id.asc", "limit": "1"}
     try:
-        response = requests.get(url, params=params, headers=_read_headers(bearer_token), timeout=15)
+        response = _session.get(url, params=params, headers=_read_headers(bearer_token), timeout=15)
     except requests.RequestException as exc:
         raise FuelDataFetchError(f"Network failure checking file hash: {exc}") from None
     if not response.ok:
@@ -245,6 +261,62 @@ def _parse_content_range_total(value: Optional[str]) -> Optional[int]:
     return int(total) if total.isdigit() else None
 
 
+def _retry_delay(attempt: int) -> float:
+    """Jittered backoff before retry number `attempt` (1-based): 0.25-0.5 s, then 0.5-1 s, ..."""
+    cap = 0.5 * 2 ** (attempt - 1)
+    return cap / 2 + random.uniform(0, cap / 2)
+
+
+def _get_page(url: str, params: Dict[str, str], headers: Dict[str, str], what: str, page: int,
+              read_started: float) -> requests.Response:
+    """
+    GET one page, retrying transient failures (bounded attempts, jittered backoff, overall read deadline).
+    Returns the response (possibly a non-retryable error status) or raises FuelDataFetchError.
+    """
+    attempts = max(1, get_env_int("FUEL_SUPABASE_READ_ATTEMPTS", 3))
+    timeout = (get_env_float("FUEL_SUPABASE_CONNECT_TIMEOUT_SECONDS", 5.0),
+               get_env_float("FUEL_SUPABASE_READ_TIMEOUT_SECONDS", 10.0))
+    deadline = get_env_float("FUEL_SUPABASE_READ_DEADLINE_SECONDS", 45.0)
+    for attempt in range(1, attempts + 1):
+        started = time.perf_counter()
+        try:
+            response = _session.get(url, params=params, headers=headers, timeout=timeout)
+        except _RETRYABLE_ERRORS as exc:
+            failure = type(exc).__name__
+        except requests.RequestException as exc:
+            logger.error("Network failure reading %s: %s", what, exc)
+            raise FuelDataFetchError(f"Could not read {what} completely.") from None
+        else:
+            if response.ok or response.status_code not in _RETRYABLE_STATUS:
+                total_ms = (time.perf_counter() - started) * 1000
+                elapsed = getattr(response, "elapsed", None)
+                # wait_ms: request sent -> headers parsed (connection setup + network + server_ms);
+                # body_ms: body download + decompression. server_ms is Supabase's own upstream time.
+                wait_ms = elapsed.total_seconds() * 1000 if elapsed is not None else total_ms
+                logger.debug(
+                    "PERF supabase_read page request_id=%s what=%s page=%d attempt=%d status=%s server_ms=%s "
+                    "wait_ms=%.0f body_ms=%.0f",
+                    request_trace_id.get(), what, page, attempt, response.status_code,
+                    (getattr(response, "headers", None) or {}).get("x-envoy-upstream-service-time"),
+                    wait_ms, max(0.0, total_ms - wait_ms),
+                )
+                return response
+            failure = f"HTTP {response.status_code}"
+        delay = _retry_delay(attempt)
+        if attempt == attempts or time.perf_counter() - read_started + delay >= deadline:
+            logger.error(
+                "Supabase read of %s failed: page=%d %s after %d attempt(s), %.1fs into the read",
+                what, page, failure, attempt, time.perf_counter() - read_started,
+            )
+            raise FuelDataFetchError(f"Could not read {what} completely ({failure} after {attempt} attempt(s)).")
+        logger.warning(
+            "PERF supabase_read retry request_id=%s what=%s page=%d attempt=%d failure=%s duration_ms=%.0f backoff_ms=%.0f",
+            request_trace_id.get(), what, page, attempt, failure, (time.perf_counter() - started) * 1000, delay * 1000,
+        )
+        time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def _fetch_all_pages(
     url: str,
     params: Dict[str, str],
@@ -262,19 +334,21 @@ def _fetch_all_pages(
     page_params = dict(params)
     rows: List[Dict[str, Any]] = []
     total: Optional[int] = None
+    read_started = time.perf_counter()
+    parse_s = 0.0
+    page = 0
 
     while True:
+        page += 1
         page_params["offset"] = str(len(rows))
-        try:
-            response = requests.get(url, params=page_params, headers=page_headers, timeout=20)
-        except requests.RequestException as exc:
-            logger.error("Network failure reading %s: %s", what, exc)
-            raise FuelDataFetchError(f"Could not read {what} completely.") from None
+        response = _get_page(url, page_params, page_headers, what, page, read_started)
         if not response.ok:
             logger.error("Error reading %s: HTTP %s", what, response.status_code)
             raise FuelDataFetchError(f"Could not read {what} completely (HTTP {response.status_code}).")
         try:
+            parse_started = time.perf_counter()
             chunk = response.json()
+            parse_s += time.perf_counter() - parse_started
         except ValueError:
             raise FuelDataFetchError(f"Invalid response while reading {what}.") from None
         if not isinstance(chunk, list):
@@ -294,6 +368,12 @@ def _fetch_all_pages(
         if total is not None and len(rows) >= total:
             break
 
+    total_s = time.perf_counter() - read_started
+    logger.log(
+        logging.INFO if total_s >= 5 else logging.DEBUG,
+        "PERF supabase_read done request_id=%s what=%s pages=%d rows=%d total_ms=%.0f parse_ms=%.0f",
+        request_trace_id.get(), what, page, len(rows), total_s * 1000, parse_s * 1000,
+    )
     return rows
 
 
@@ -390,7 +470,7 @@ def get_fuel_imports_list(
     }
 
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response = _session.get(url, params=params, headers=headers, timeout=15)
         if response.ok:
             total_count = 0
             content_range = response.headers.get("content-range", "")
@@ -466,7 +546,7 @@ def get_fuel_transactions_list(
         params["import_id"] = f"eq.{filters['import_id']}"
 
     try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        response = _session.get(url, params=params, headers=headers, timeout=15)
         if response.ok:
             total_count = 0
             content_range = response.headers.get("content-range", "")

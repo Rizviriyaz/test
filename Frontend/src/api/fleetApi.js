@@ -1,5 +1,5 @@
 import { supabase } from "../lib/supabase"
-import { clearClientCache, deduplicatedFetch as dedupeRequest } from "./requestCache"
+import { clearClientCache, deduplicatedFetch as dedupeRequest, getFromClientCache } from "./requestCache"
 
 export const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "")
 
@@ -178,7 +178,9 @@ export async function getVehicleSafety(vehicleId, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/vehicles/${vehicleId}/safety`, options, 30000)
 }
 
-export async function getFleetIdleAnalytics(options = {}) {
+const FLEET_IDLE_TTL_MS = 30000
+
+function fleetIdleAnalyticsUrl(options = {}) {
     const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id, include_events, skip_cache, refresh, skipCache } = options
     let url = `${API_URL}/api/idle/fleet-analytics`
     const params = new URLSearchParams()
@@ -218,7 +220,18 @@ export async function getFleetIdleAnalytics(options = {}) {
         url += `?${queryString}`
     }
 
-    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass }, 30000)
+    return { url, shouldBypass }
+}
+
+export async function getFleetIdleAnalytics(options = {}) {
+    const { url, shouldBypass } = fleetIdleAnalyticsUrl(options)
+    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass }, FLEET_IDLE_TTL_MS)
+}
+
+// The still-fresh client-cached response for these options, or null (never fetches)
+export function getCachedFleetIdleAnalytics(options = {}) {
+    const { url, shouldBypass } = fleetIdleAnalyticsUrl(options)
+    return shouldBypass ? null : getFromClientCache(url, FLEET_IDLE_TTL_MS)
 }
 
 export async function sendAiChatMessage(messages) {

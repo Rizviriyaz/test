@@ -136,7 +136,9 @@ def test_whole_report_failure_retries_then_502_and_is_not_cached():
                 raise AssertionError("expected WialonAPIError")
             except WialonAPIError:
                 pass
-        assert env.login.call_count == 2 and all(c.kwargs == {"force": True} for c in env.login.call_args_list)
+        # the engine report runs on the fuel session (login(session=...)); each failing call re-logs in once
+        forced = [c for c in env.login.call_args_list if c.kwargs.get("force")]
+        assert len(forced) == 2, env.login.call_args_list
         # failure not cached: second call executed the reports again
         assert env.execs() == 2 * (1 + 2), env.execs()  # per call: trips once, engine twice (retry)
 
@@ -190,7 +192,8 @@ def test_paging_reads_past_old_caps():
     # U0: 450 sub-row events; the other 1,202 rows idle without sub-rows -> one single-interval event each
     assert len(g["vehicles"][0]["events"]) == 450 and len(g["events"]) == 450 + 1202
     sub_windows = [(p["indexFrom"], p["indexTo"]) for s, p in engine.calls if s == "report/get_result_subrows"]
-    assert sub_windows == [(0, 199), (200, 399), (400, 599)], sub_windows
+    # the batched first page (0-199) holds fewer than the row's 450 sub-rows, so the row is then paged in full
+    assert sub_windows == [(0, 199), (0, 199), (200, 399), (400, 599)], sub_windows
     assert u["total_idle_seconds"] == 150 * 120 and u["total_engine_seconds"] == 150 * 600  # old cap: 101 rows
     assert u["total_in_motion_seconds"] == 150 * 480
     print("[PASS] 1,203 group rows, 150 unit-engine rows and 450 idle sub-rows all read (old caps 501/101/201 gone).")
@@ -492,7 +495,7 @@ def test_cache_shares_failure_with_queued_waiters_and_cleans_state():
 def test_forced_relogin_happens_under_report_lock():
     seen = []
     with Env(engine=FakeReportEngine(fail_exec={TEMPLATE_GROUP_ENGINE})) as env:
-        env.login.side_effect = lambda force=False: seen.append(wr._report_lock.locked()) or "fresh-sid"
+        env.login.side_effect = lambda force=False, session=None: (force and seen.append(wr._report_lock.locked())) or "fresh-sid"
         try:
             wd.get_fleet_telematics_bundle(CLOSED_FROM, CLOSED_TO, sid="s")
         except WialonAPIError:

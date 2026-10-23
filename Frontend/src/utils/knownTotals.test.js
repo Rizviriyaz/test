@@ -76,11 +76,12 @@ test("partialEventsNote flags incomplete idle events and stays silent when compl
 
 test("Idle analytics labels trend, hotspots and the event list when events are partial", () => {
     const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
-    assert.match(page, /const eventsNote = partialEventsNote\(analytics\)/)
+    assert.match(page, /const eventsNote = eventsPending \? "Loading idle events…" : partialEventsNote\(analytics\)/)
     assert.match(page, /title="Idle duration trend"\s+subtitle=\{eventsNote \|\| undefined\}/)
     assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : "Top 10 locations"\}/)
     assert.equal((page.match(/\{eventsNote && </g) || []).length, 2, "event list and hotspot list notes")
-    assert.match(page, /value=\{kpis\.idle_event_count \?\? "—"\}/, "unknown event count renders as a dash")
+    assert.match(page, /value=\{eventsPending \? "…" : kpis\.idle_event_count \?\? "—"\}/,
+        "unknown event count renders as a dash (and as loading while the full response is pending)")
 })
 
 test("Vehicle drawer marks partial or failed idle events instead of a definitive count", () => {
@@ -90,7 +91,8 @@ test("Vehicle drawer marks partial or failed idle events instead of a definitive
     assert.match(drawer, /setIdleEventsStatus\("error"\)/)
     assert.doesNotMatch(drawer, /if \(active\) setVehicleIdleEvents\(\[\]\)/, "a failed fetch is not 'no idle events'")
     const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
-    assert.match(page, /idleEvents=\{rangePreset === "today" \? analytics\?\.events : null\}/, "only today's events are labelled today")
+    assert.match(page, /idleEvents=\{rangePreset === "today" && !showingSummary \? analytics\?\.events : null\}/,
+        "only today's full event list is handed to the drawer (never the events-free summary)")
     assert.match(page, /idleEventsComplete=\{drawerEventsComplete\}/)
     assert.match(page, /vehicle=\{drawerVehicleWithLive\}/, "live status comes from by_vehicle, not the event row")
 })

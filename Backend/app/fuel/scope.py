@@ -20,7 +20,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.fuel.db import build_fingerprint
-from app.fuel.wialon_distance import match_fuel_vehicle_to_wialon, normalize_alphanumeric
+from app.fuel.wialon_distance import match_fuel_vehicle_to_wialon, normalize_alphanumeric, unit_match_keys
 from app.utils.datetime_helpers import parse_tx_wallclock
 
 REASON_UNMATCHED = "unmatched"
@@ -59,6 +59,7 @@ class UnitResolver:
         self.units = wialon_units or []
         self._match = match_fn or match_fuel_vehicle_to_wialon
         self._memo: Dict[str, Dict[str, Any]] = {}
+        self._match_keys = None  # the units' plate/name keys, computed once for the default matcher
 
     def resolve(self, identifier: str) -> Dict[str, Any]:
         """{"status": matched|unmatched|ambiguous, "unit_id", "unit_name", "unit", "candidates"}."""
@@ -66,7 +67,14 @@ class UnitResolver:
         if key in self._memo:
             return self._memo[key]
         res: Dict[str, Any] = {"status": REASON_UNMATCHED, "unit_id": None, "unit_name": None, "unit": None, "candidates": []}
-        m = self._match(key, self.units) if key and self.units else None
+        m = None
+        if key and self.units:
+            if self._match is match_fuel_vehicle_to_wialon:
+                if self._match_keys is None:
+                    self._match_keys = unit_match_keys(self.units)
+                m = self._match(key, self.units, match_keys=self._match_keys)
+            else:
+                m = self._match(key, self.units)
         if m and m.get("ambiguous"):
             res["status"] = REASON_AMBIGUOUS
             res["candidates"] = sorted({str(c.get("nm", "")).strip() for c in m.get("candidates") or [] if c})

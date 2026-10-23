@@ -30,6 +30,11 @@ SID = None
 # per session and caps concurrent requests per session, so long fleet-wide reads (idle event paging)
 # run on their own session and never queue behind, or block, the shared SID.
 EVENTS_SESSION = "events"
+# Fuel fleet reports (trips, engine, and the per-trip trips report of the fuel trend) each run on their own
+# session: they run at the same time, and Dashboard reports on the shared SID never queue behind them.
+FUEL_SESSION = "fuel"
+FUEL_ENGINE_SESSION = "fuel_engine"
+FUEL_TRIPS_SESSION = "fuel_trips"
 _named_sids = {}
 # Every session id ever issued for a named session (bounded by the number of re-logins), so a stale id
 # that hits error 1 is refreshed as the session it belonged to, never as the shared SID.

@@ -9,18 +9,21 @@ Data-completeness rules:
   - Fleet telematics are cached with a TTL (short for ranges that include today) and fetched once per
     key even under concurrent requests. Partial results are cached only briefly.
 """
+import contextvars
 import logging
 import re
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.utils.config import get_env_int
 from app.utils.datetime_helpers import get_uae_now, now_timestamp, parse_date_to_uae_bounds
 from app.utils.ttl_cache import TTLCache
 from app.vehicles import extract_registration_plate, get_all_vehicles
-from app.wialon import WialonAPIError, current_sid, login
+from app.wialon import FUEL_ENGINE_SESSION, FUEL_SESSION, FUEL_TRIPS_SESSION, WialonAPIError, current_sid, login, session_name
 from app.wialon_reports import (
     GROUP_ID_ALL_UNITS,
-    _report_lock,
+    _report_lock_for,
     execute_wialon_group_engine_idle_report,
     execute_wialon_group_trips_report,
     execute_wialon_unit_engine_report,
@@ -37,12 +40,15 @@ TELEMATICS_TTL_PARTIAL_S = 30    # incomplete bundles: retry soon
 _TELEMATICS_CACHE = TTLCache(max_entries=128)
 # Per-unit trip lists keyed by (unit_id, date_from, date_to), for actual per-period trend distance
 _UNIT_TRIPS_CACHE = TTLCache(max_entries=2048)
+# Every unit's trips from one fleet trips report, keyed by (date_from, date_to)
+_FLEET_TRIPS_CACHE = TTLCache(max_entries=32)
 
 
 def clear_distance_cache() -> None:
     """Clear in-memory distance and telematics cache."""
     _TELEMATICS_CACHE.clear()
     _UNIT_TRIPS_CACHE.clear()
+    _FLEET_TRIPS_CACHE.clear()
 
 
 def normalize_alphanumeric(val: Any) -> str:
@@ -67,9 +73,28 @@ def extract_plate_tokens(val: Any) -> List[str]:
     return list(dict.fromkeys(tokens))  # preserve order, unique
 
 
+def unit_match_keys(wialon_units: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Optional[str], str, str, str]]:
+    """
+    Per-unit (unit, plate_lower, plate_norm, name_lower, name_norm) used by match_fuel_vehicle_to_wialon.
+    They depend only on the unit, so a caller matching many identifiers against one unit list computes them once.
+    """
+    keys = []
+    for u in wialon_units or []:
+        plate = extract_registration_plate(u)
+        keys.append((
+            u,
+            str(plate).strip().lower() if plate else None,
+            normalize_alphanumeric(plate) if plate else "",
+            str(u.get("nm", "")).strip().lower(),
+            normalize_alphanumeric(u.get("nm", "")),
+        ))
+    return keys
+
+
 def match_fuel_vehicle_to_wialon(
     vehicle_identifier: str,
-    wialon_units: List[Dict[str, Any]]
+    wialon_units: List[Dict[str, Any]],
+    match_keys: Optional[List[Tuple[Dict[str, Any], Optional[str], str, str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Dynamically matches a fuel vehicle identifier (e.g. 'T-DXB-15770', '13-AUH-30561')
@@ -91,14 +116,12 @@ def match_fuel_vehicle_to_wialon(
     fuel_lower = fuel_raw.lower()
     fuel_norm = normalize_alphanumeric(fuel_raw)
     fuel_tokens = extract_plate_tokens(fuel_raw)
+    keys = match_keys if match_keys is not None else unit_match_keys(wialon_units)
 
     # 1. Primary: Exact match against verified Wialon Profile Registration Plate
     candidates_primary: List[Dict[str, Any]] = []
-    for u in wialon_units:
-        u_plate = extract_registration_plate(u)
-        if u_plate:
-            u_plate_lower = str(u_plate).strip().lower()
-            u_plate_norm = normalize_alphanumeric(u_plate)
+    for u, u_plate_lower, u_plate_norm, _, _ in keys:
+        if u_plate_lower is not None:
             if u_plate_lower == fuel_lower or (u_plate_norm and u_plate_norm == fuel_norm):
                 if u not in candidates_primary:
                     candidates_primary.append(u)
@@ -111,11 +134,8 @@ def match_fuel_vehicle_to_wialon(
             return {"ambiguous": True, "candidates": candidates_primary, "id": None, "nm": None}
 
     # 2. Primary: Match against fuel tokens using verified Profile Registration Plate
-    for u in wialon_units:
-        u_plate = extract_registration_plate(u)
-        if u_plate:
-            u_plate_lower = str(u_plate).strip().lower()
-            u_plate_norm = normalize_alphanumeric(u_plate)
+    for u, u_plate_lower, u_plate_norm, _, _ in keys:
+        if u_plate_lower is not None:
             if u_plate_lower in fuel_tokens or (u_plate_norm and u_plate_norm in fuel_tokens):
                 if u not in candidates_primary:
                     candidates_primary.append(u)
@@ -129,8 +149,7 @@ def match_fuel_vehicle_to_wialon(
 
     # 3. Explicit Fallback: Exact match against Wialon unit name (General -> Name) for backward compatibility
     candidates_fallback: List[Dict[str, Any]] = []
-    for u in wialon_units:
-        u_nm = str(u.get("nm", "")).strip().lower()
+    for u, _, _, u_nm, _ in keys:
         if u_nm and (u_nm == fuel_lower or u_nm == fuel_norm):
             if u not in candidates_fallback:
                 candidates_fallback.append(u)
@@ -143,9 +162,7 @@ def match_fuel_vehicle_to_wialon(
             return {"ambiguous": True, "candidates": candidates_fallback, "id": None, "nm": None}
 
     # 4. Explicit Fallback: Match against fuel tokens using unit name
-    for u in wialon_units:
-        u_nm = str(u.get("nm", "")).strip().lower()
-        u_nm_norm = normalize_alphanumeric(u.get("nm", ""))
+    for u, _, _, u_nm, u_nm_norm in keys:
         if u_nm in fuel_tokens or (u_nm_norm and u_nm_norm in fuel_tokens):
             if u not in candidates_fallback:
                 candidates_fallback.append(u)
@@ -167,10 +184,10 @@ def _run_report_with_retry(report_fn: Callable[..., Any], sid: str, *args, **kwa
     try:
         return report_fn(sid, *args, **kwargs), sid
     except WialonAPIError:
-        # Re-login while holding the report lock so no other thread's in-flight report (which reads
-        # its result rows from the current session) has its session replaced mid-report.
-        with _report_lock:
-            fresh_sid = login(force=True)
+        # Re-login (the same named session, or the shared one) while holding that session's report lock so
+        # no other thread's in-flight report (which reads its result rows from the session) has it replaced mid-report.
+        with _report_lock_for(sid):
+            fresh_sid = login(force=True, session=session_name(sid))
         return report_fn(fresh_sid, *args, **kwargs), fresh_sid
 
 
@@ -210,8 +227,8 @@ def _empty_entry(name: str) -> Dict[str, Any]:
 
 
 def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[str]) -> Dict[str, Any]:
+    # `sid` (the caller's shared session) is not used for these reports: they run on the fuel sessions below
     from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
-    current_sid = sid or login()
     errors: List[str] = []
     warnings: List[str] = []
     duplicate_names = set()
@@ -225,8 +242,25 @@ def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[s
             if m not in column_fallbacks:
                 column_fallbacks.append(m)
 
+    # 1-2. The two fleet reports are independent: they run at the same time, each on its own fuel session (under
+    # that session's report lock), so neither waits for the other and the shared session stays free for Dashboard.
+    trips_sid = login(session=FUEL_SESSION)
+    engine_sid = login(session=FUEL_ENGINE_SESSION)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        engine_job = pool.submit(
+            contextvars.copy_context().run,  # keeps the request's PERF trace id in the engine report's logs
+            _run_report_with_retry,
+            execute_wialon_group_engine_idle_report,
+            engine_sid,
+            from_ts,
+            to_ts,
+            group_id=GROUP_ID_ALL_UNITS,
+            include_events=False,
+        )
+        group_trips, _ = _run_report_with_retry(execute_wialon_group_trips_report, trips_sid, from_ts, to_ts)
+        group_engine, _ = engine_job.result()
+
     # 1. Group Trips report: authoritative distance
-    group_trips, current_sid = _run_report_with_retry(execute_wialon_group_trips_report, current_sid, from_ts, to_ts)
     if not group_trips:
         errors.append("group_trips_empty")
     for row in group_trips or []:
@@ -247,14 +281,6 @@ def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[s
         by_name[name] = entry
 
     # 2. Group Engine & Idling report: authoritative engine / in-motion / idle durations
-    group_engine, current_sid = _run_report_with_retry(
-        execute_wialon_group_engine_idle_report,
-        current_sid,
-        from_ts,
-        to_ts,
-        group_id=GROUP_ID_ALL_UNITS,
-        include_events=False,
-    )
     engine_rows = (group_engine or {}).get("vehicles") or []
     if not engine_rows:
         errors.append("group_engine_empty")
@@ -381,23 +407,107 @@ def _ttl_for_unit_trips(date_to: str, result: Dict[str, Any]) -> float:
     return _ttl_for_bundle(date_to, {})
 
 
+def _fetch_fleet_trips(date_from: str, date_to: str) -> Dict[str, Any]:
+    """
+    Every unit's trips from ONE fleet trips report (template 5 with its per-trip sub-rows), run on the fuel trips
+    session: {"by_name": {unit_name: {"trips", "trip_unit_ids", "complete"}}, "duplicate_names": [...]}.
+    A row is complete only when its sub-rows were all read and parsed and its trip distances add up to the
+    row's own Mileage total. Raises WialonAPIError when the report fails after one re-login retry.
+    """
+    from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
+    rows, _ = _run_report_with_retry(
+        execute_wialon_group_trips_report, login(session=FUEL_TRIPS_SESSION), from_ts, to_ts, include_trips=True
+    )
+    by_name: Dict[str, Dict[str, Any]] = {}
+    duplicates = set()
+    for row in rows or []:
+        name = str(row.get("vehicle_name", "")).strip()
+        if not name:
+            continue
+        if name in by_name:
+            duplicates.add(name)
+            continue
+        trips = row.get("trips") or []
+        complete = bool(row.get("trips_complete")) and "mileage_km" not in (row.get("incomplete_fields") or [])
+        if complete:
+            # Trip cells are rounded to 0.01 km each, so allow that much per trip (plus the total's own rounding)
+            total = sum(t["distance_km"] for t in trips)
+            complete = abs(total - float(row.get("mileage_km") or 0.0)) <= 0.01 * (len(trips) + 1)
+        by_name[name] = {"trips": trips, "trip_unit_ids": row.get("trip_unit_ids") or [], "complete": complete}
+    for name in duplicates:
+        by_name.pop(name, None)
+    return {"by_name": by_name, "duplicate_names": sorted(duplicates)}
+
+
+def fleet_trips_enabled() -> bool:
+    """FUEL_TREND_FLEET_TRIPS=0 restores one trips report per unit for the fuel trend."""
+    return get_env_int("FUEL_TREND_FLEET_TRIPS", 1) != 0
+
+
+def get_fleet_trips(date_from: str, date_to: str) -> Optional[Dict[str, Any]]:
+    """The cached fleet trips report for the range, or None when disabled or it failed (callers fall back per unit)."""
+    if not fleet_trips_enabled():
+        return None
+    try:
+        return _FLEET_TRIPS_CACHE.get_or_compute(
+            (date_from, date_to),
+            lambda: _fetch_fleet_trips(date_from, date_to),
+            lambda r: _ttl_for_bundle(date_to, {}),
+        )
+    except WialonAPIError as exc:
+        logger.warning("Fleet trips report failed for %s..%s; falling back to per-unit trips reports: %s",
+                       date_from, date_to, exc)
+        return None
+
+
+def _fleet_unit_trips(fleet: Optional[Dict[str, Any]], uid: int, name: Optional[str]) -> Optional[Dict[str, Any]]:
+    """
+    A unit's trips from the fleet report, shaped like _fetch_unit_trips, or None when the fleet report cannot
+    attribute them with certainty (unit absent, name not unique, row incomplete, or trip cells naming another
+    unit) - the caller then runs that unit's own trips report.
+    """
+    if fleet is None or not name:
+        return None
+    row = fleet["by_name"].get(name)
+    if row is None or not row["complete"] or any(u != uid for u in row["trip_unit_ids"]):
+        return None
+    return {"status": "complete", "trips": [dict(t) for t in row["trips"]], "error": None}
+
+
 def get_units_trips_for_range(
-    unit_ids: List[int], date_from: str, date_to: str, sid: Optional[str] = None
+    unit_ids: List[int], date_from: str, date_to: str, sid: Optional[str] = None,
+    units: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Trips per Wialon unit id over [date_from, date_to] (UAE days), fetched once per unit and cached, so day,
-    week and month groupings reuse the same reports. Reports run serially under the shared report lock.
-    A unit whose report fails is returned as status 'failed' - callers must not count it as 0 km.
-    Each unit uses the gateway's current session, so a session refreshed mid-batch (Wialon error 1 or a forced
-    re-login) is picked up by the remaining units instead of each of their calls first failing on the stale one.
+    Trips per Wialon unit id over [date_from, date_to] (UAE days), cached, so day, week and month groupings
+    reuse the same reports. A unit whose report fails is returned as status 'failed' - callers must not count it as 0 km.
+
+    With `units` (the Wialon unit list, for id -> name), every unit is first taken from one fleet trips report
+    (get_fleet_trips); a unit it cannot cover with certainty, or every unit when it failed, gets its own trips
+    report exactly as without `units`. Per-unit reports run serially under the shared report lock, each on the
+    gateway's current session, so a session refreshed mid-batch (Wialon error 1 or a forced re-login) is picked
+    up by the remaining units instead of each of their calls first failing on the stale one.
     """
+    wanted = sorted({int(u) for u in unit_ids})
+    fleet = get_fleet_trips(date_from, date_to) if units is not None and wanted else None
+    names = {int(u["id"]): str(u.get("nm", "")).strip() for u in units or [] if u.get("id") is not None}
+    name_counts = Counter(names.values())
     out: Dict[int, Dict[str, Any]] = {}
-    for uid in sorted({int(u) for u in unit_ids}):
-        out[uid] = _UNIT_TRIPS_CACHE.get_or_compute(
-            (uid, date_from, date_to),
-            lambda uid=uid: _fetch_unit_trips(uid, date_from, date_to, current_sid() or sid),
-            lambda r: _ttl_for_unit_trips(date_to, r),
-        )
+    per_unit = 0
+    for uid in wanted:
+        name = names.get(uid)
+        res = _fleet_unit_trips(fleet, uid, name if name and name_counts[name] == 1 else None)
+        if res is None:
+            per_unit += 1
+            res = _UNIT_TRIPS_CACHE.get_or_compute(
+                (uid, date_from, date_to),
+                lambda uid=uid: _fetch_unit_trips(uid, date_from, date_to, current_sid() or sid),
+                lambda r: _ttl_for_unit_trips(date_to, r),
+            )
+        out[uid] = res
+    if units is not None:
+        logger.info("PERF fuel_unit_trips range=%s..%s units=%s fleet_report=%s per_unit_fallback=%s",
+                    date_from, date_to, len(wanted), "ok" if fleet is not None else "unavailable", per_unit)
     return out
 
 

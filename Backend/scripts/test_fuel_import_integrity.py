@@ -175,7 +175,7 @@ def run_import(fake, rows, mapping=MAPPING, headers=HEADERS):
          patch("app.fuel.importer.update_fuel_import_record", return_value=True), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=fake.insert), \
          patch("app.fuel.importer.resolve_fleet_vehicles", side_effect=AssertionError("must not be called")) as resolve, \
-         patch("app.fuel.db.requests.get", side_effect=fake.get):
+         patch("app.fuel.db._session.get", side_effect=fake.get):
         res = execute_fuel_import(make_xlsx(rows, headers), "statement.xlsx", mapping, FAKE_USER["id"])
     assert not resolve.called, "resolve_fleet_vehicles (Wialon login) must no longer run during import"
     return res, create
@@ -340,7 +340,7 @@ def test_fingerprint_fetch_paginates_with_bounds():
     for i in range(2335):
         fake.rows.append({"id": i + 1, "transaction_date": "2026-08-10T10:00:00", "vehicle_identifier": f"V{i}",
                           "litres": 10, "total_cost": 30})
-    with patch("app.fuel.db.requests.get", side_effect=fake.get):
+    with patch("app.fuel.db._session.get", side_effect=fake.get):
         fps = fetch_existing_transaction_fingerprints(date_from="2026-08-01", date_to="2026-08-31")
     assert len(fps) == 2335 and isinstance(fps, set)
     assert [c["offset"] for c in fake.get_calls] == ["0", "1000", "2000"]
@@ -356,7 +356,7 @@ def test_pagination_not_fooled_by_server_row_cap():
         fake = FakePostgrest("timestamp", max_rows=500, send_count=send_count)
         fake.rows = [{"id": i + 1, "transaction_date": "2026-08-10T10:00:00", "vehicle_identifier": f"V{i}",
                       "litres": 1, "total_cost": 3} for i in range(1234)]
-        with patch("app.fuel.db.requests.get", side_effect=fake.get):
+        with patch("app.fuel.db._session.get", side_effect=fake.get):
             fps = fetch_existing_transaction_fingerprints(date_from="2026-08-01", date_to="2026-08-31")
             rows = fetch_fuel_transactions_for_analytics({})
         assert len(fps) == 1234 and fps.rows_scanned == 1234, (send_count, len(fps))
@@ -378,7 +378,7 @@ def test_rows_vanishing_mid_read_raises():
         resp.headers["content-range"] = resp.headers["content-range"].split("/")[0] + "/1500"
         return resp
 
-    with patch("app.fuel.db.requests.get", side_effect=shrinking_get):
+    with patch("app.fuel.db._session.get", side_effect=shrinking_get):
         try:
             fetch_fuel_transactions_for_analytics({})
             raise AssertionError("expected FuelDataFetchError")
@@ -390,13 +390,13 @@ def test_rows_vanishing_mid_read_raises():
 def test_full_table_reads_use_service_role_when_configured():
     fake = FakePostgrest("timestamp")
     with patch.dict(os.environ, {"SUPABASE_SERVICE_ROLE_KEY": "service-key", "SUPABASE_ANON_KEY": "anon-key"}), \
-         patch("app.fuel.db.requests.get", side_effect=fake.get):
+         patch("app.fuel.db._session.get", side_effect=fake.get):
         fetch_existing_transaction_fingerprints(date_from="2026-08-01", date_to="2026-08-31", bearer_token="user-jwt")
         fetch_fuel_transactions_for_analytics({}, bearer_token="user-jwt")
     assert [h["Authorization"] for h in fake.get_headers] == ["Bearer service-key", "Bearer service-key"]
     fake2 = FakePostgrest("timestamp")
     env = {k: v for k, v in os.environ.items() if k != "SUPABASE_SERVICE_ROLE_KEY"}
-    with patch.dict(os.environ, env, clear=True), patch("app.fuel.db.requests.get", side_effect=fake2.get):
+    with patch.dict(os.environ, env, clear=True), patch("app.fuel.db._session.get", side_effect=fake2.get):
         fetch_existing_transaction_fingerprints(date_from="2026-08-01", date_to="2026-08-31", bearer_token="user-jwt")
     assert fake2.get_headers[0]["Authorization"] == "Bearer user-jwt"
     print("[PASS] Duplicate-check and analytics reads use the same credentials (service role when configured).")
@@ -407,7 +407,7 @@ def test_fingerprint_fetch_raises_on_failure():
         fake = FakePostgrest("timestamp")
         fake.rows = [{"id": i + 1, "transaction_date": "2026-08-10", "vehicle_identifier": "V", "litres": i + 1} for i in range(1500)]
         fake.fail_get_on_call, fake.fail_mode = 2, mode
-        with patch("app.fuel.db.requests.get", side_effect=fake.get):
+        with patch("app.fuel.db._session.get", side_effect=fake.get):
             try:
                 fetch_existing_transaction_fingerprints(date_from="2026-08-01", date_to="2026-08-31")
                 raise AssertionError("expected FuelDataFetchError")
@@ -424,7 +424,7 @@ def test_import_refused_when_duplicate_check_unavailable():
     with patch("app.fuel.importer.create_fuel_import_record", create), \
          patch("app.fuel.importer.update_fuel_import_record", return_value=True), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", inserted), \
-         patch("app.fuel.db.requests.get", side_effect=fake.get):
+         patch("app.fuel.db._session.get", side_effect=fake.get):
         try:
             execute_fuel_import(make_xlsx([["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, None, None]]),
                                 "x.xlsx", MAPPING, FAKE_USER["id"])
@@ -439,7 +439,7 @@ def test_import_refused_when_duplicate_check_unavailable():
     fake2.fail_get_on_call = 1
     with patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
          patch("app.fuel.importer.create_fuel_import_record", create), \
-         patch("app.fuel.db.requests.get", side_effect=fake2.get):
+         patch("app.fuel.db._session.get", side_effect=fake2.get):
         r = client.post("/api/fuel/import", headers=AUTH, data={"mapping": json.dumps(MAPPING)},
                         files={"file": ("x.xlsx", make_xlsx([["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, None, None]]))})
     assert r.status_code == 503, r.text
@@ -540,11 +540,11 @@ def test_analytics_fetch_complete_or_raise():
     fake = FakePostgrest("timestamp")
     fake.rows = [{"id": i + 1, "transaction_date": "2026-08-10T10:00:00", "vehicle_identifier": "V", "litres": 1,
                   "total_cost": 3} for i in range(1005)]
-    with patch("app.fuel.db.requests.get", side_effect=fake.get):
+    with patch("app.fuel.db._session.get", side_effect=fake.get):
         assert len(fetch_fuel_transactions_for_analytics({})) == 1005
     for mode in ["http", "network"]:
         fake.get_calls, fake.fail_get_on_call, fake.fail_mode = [], 2, mode
-        with patch("app.fuel.db.requests.get", side_effect=fake.get):
+        with patch("app.fuel.db._session.get", side_effect=fake.get):
             try:
                 fetch_fuel_transactions_for_analytics({})
                 raise AssertionError("expected FuelDataFetchError")
@@ -556,7 +556,7 @@ def test_analytics_fetch_complete_or_raise():
 def test_routes_return_503_instead_of_partial_kpis():
     client = TestClient(app)
     with patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
-         patch("app.fuel.db.requests.get", return_value=FakeResponse(status=500)):
+         patch("app.fuel.db._session.get", return_value=FakeResponse(status=500)):
         r = client.get("/api/fuel/analytics/summary", headers=AUTH)
         assert r.status_code == 503 and "withheld" in r.json()["detail"], r.text
         with patch("app.fuel.routes.login", return_value="sid"), \

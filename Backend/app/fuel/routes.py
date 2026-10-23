@@ -1,6 +1,9 @@
+import asyncio
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -68,11 +71,14 @@ from app.fuel.wialon_distance import (
     get_fleet_distances_map,
     get_fleet_telematics_bundle,
     get_fleet_telematics_map,
+    get_fleet_trips,
     get_units_trips_for_range,
     get_vehicle_telematics_detail,
     match_fuel_vehicle_to_wialon,
 )
+from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_int
+from app.utils.ttl_cache import InFlight
 from app.wialon import WialonAPIError
 from app.vehicles import get_all_vehicles, extract_registration_plate
 from app.wialon import login
@@ -121,7 +127,12 @@ def _get_bearer_token(request: Request) -> Optional[str]:
     return token.strip() if scheme.lower() == "bearer" and token.strip() else None
 
 
-FUEL_DATA_UNAVAILABLE_DETAIL = "Fuel data source unavailable; results withheld to avoid partial KPIs."
+FUEL_DATA_UNAVAILABLE_DETAIL = (
+    "Fuel data source unavailable; results withheld to avoid partial KPIs. The read was retried and still failed; "
+    "try again in a moment."
+)
+
+_shared_reads = InFlight()
 
 
 async def _fetch_transactions(filters: Dict[str, Any], bearer_token: Optional[str]) -> List[Dict[str, Any]]:
@@ -313,19 +324,45 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
     Shared KPI scope for every analytics endpoint: fetch -> exact vehicle filter -> partition -> fuel type.
     Fuel read failures are 503 (no partial KPIs). Wialon is contacted only when there are transactions.
     """
-    def fetch(f: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return fetch_fuel_transactions_for_analytics(f, bearer_token)
+    # One Fuel Performance load fires ~8 analytics requests at once with mostly identical filters: concurrent identical
+    # reads share one Supabase read / Wialon unit search. Nothing is retained, so no request sees older data than before.
+    # Reads with the caller's token (no service-role key) are keyed by token, since row-level security may differ.
+    read_ms = [0.0]
 
+    def fetch(f: Dict[str, Any]) -> List[Dict[str, Any]]:
+        auth_key = None if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else bearer_token
+        started = time.perf_counter()
+        try:
+            rows = _shared_reads.run(
+                ("transactions", auth_key, tuple(sorted(f.items()))),
+                lambda: fetch_fuel_transactions_for_analytics(f, bearer_token),
+            )
+        finally:
+            read_ms[0] = (time.perf_counter() - started) * 1000
+        return [dict(r) for r in rows or []]
+
+    def units(sid: str) -> List[Dict[str, Any]]:
+        return list(_shared_reads.run(("units", sid), lambda: get_all_vehicles(sid)) or [])
+
+    started = time.perf_counter()
     try:
-        return await run_in_threadpool(
+        scope = await run_in_threadpool(
             build_scope,
             filters,
             fetch,
             login_fn or (lambda: login()),
-            units_fn or (lambda sid: get_all_vehicles(sid)),
+            units_fn or units,
         )
-    except FuelDataFetchError:
+    except FuelDataFetchError as exc:
+        # The cause (which page, which failure, how many attempts) is logged by the read itself
+        logger.warning("Fuel scope unavailable request_id=%s read_ms=%.0f: %s", request_trace_id.get(), read_ms[0], exc)
         raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+    # read_ms includes waiting on a shared read another request started; scope_ms adds Wialon units + classification
+    logger.debug(
+        "PERF fuel_scope request_id=%s read_ms=%.0f scope_ms=%.0f rows=%d",
+        request_trace_id.get(), read_ms[0], (time.perf_counter() - started) * 1000, scope.fetched_count,
+    )
+    return scope
 
 
 def _validate_range(date_from: Optional[str], date_to: Optional[str]) -> None:
@@ -978,19 +1015,32 @@ async def get_fuel_efficiency_trend(
         trend_warnings: List[str] = []
         bundle = None
         unit_trips = None
-        try:
-            bundle = await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
-        except WialonAPIError:
-            # Fuel and cost per period need no telematics: keep them, mark distance unavailable.
-            trend_warnings.append("Wialon reports unavailable; distance and efficiency withheld for this request.")
         unit_ids = sorted({int(r["_unit_id"]) for r in scope.matched})
         max_units = get_env_int("FUEL_TREND_MAX_UNITS", 200)
-        if bundle is not None and len(unit_ids) > max_units:
+
+        async def fetch_bundle():
+            try:
+                return await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
+            except WialonAPIError:
+                return None
+
+        if len(unit_ids) <= max_units:
+            # The fleet trips report (own session) runs while the bundle's reports do; its result is cached and
+            # read by get_units_trips_for_range below. A failure there only means per-unit reports instead.
+            bundle, _ = await asyncio.gather(fetch_bundle(), run_in_threadpool(get_fleet_trips, dates[0], dates[1]))
+        else:
+            bundle = await fetch_bundle()
+        if bundle is None:
+            # Fuel and cost per period need no telematics: keep them, mark distance unavailable.
+            trend_warnings.append("Wialon reports unavailable; distance and efficiency withheld for this request.")
+        elif len(unit_ids) > max_units:
             trend_warnings.append(
                 f"{len(unit_ids)} units exceed FUEL_TREND_MAX_UNITS={max_units}; per-period distance withheld (never partial)."
             )
-        elif bundle is not None:
-            unit_trips = await run_in_threadpool(get_units_trips_for_range, unit_ids, dates[0], dates[1], scope.sid)
+        else:
+            unit_trips = await run_in_threadpool(
+                get_units_trips_for_range, unit_ids, dates[0], dates[1], scope.sid, scope.units
+            )
         result = await run_in_threadpool(
             calculate_efficiency_trend,
             scope.matched,
