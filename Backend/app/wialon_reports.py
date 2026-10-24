@@ -23,6 +23,7 @@ Completeness contract (shared by fuel, idle analytics, dashboard and fleet analy
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -152,6 +153,47 @@ def parse_float_safe(val: Any, default: float = 0.0) -> float:
         return float(clean_str)
     except (ValueError, TypeError):
         return default
+
+
+_COMMA_GROUPED_RE = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?")  # 1,234,567 / 1,234.5
+_DOT_GROUPED_RE = re.compile(r"\d{1,3}(?:\.\d{3})+(?:,\d+)?")  # 1.234.567 / 1.234,5
+_COMMA_DECIMAL_RE = re.compile(r"\d+,\d+")
+_DOT_DECIMAL_RE = re.compile(r"\d+(?:\.\d+)?")
+_AMBIGUOUS_COMMA_RE = re.compile(r"[1-9]\d{0,2},\d{3}")  # 1,234: 1234 or 1.234?
+
+
+def parse_mileage_km(val: Any) -> Optional[float]:
+    """
+    Strictly parse a Trips Report mileage cell (number, dict cell, or text such as '12.34 km'); None when unknown.
+    Unlike parse_float_safe, a text whose separators can be read two ways is unknown rather than guessed:
+    '1,234' (1234 or 1.234?) is None, as is any text that is not a single well-formed number. Separators are
+    read only when the digit grouping leaves one reading: '1,234.5' and '1.234,5' are 1234.5, '12,5' is 12.5,
+    '0,500' is 0.5 (no grouped number starts with 0). A lone dot is a decimal point ('1.234' is 1.234), Wialon's
+    own format. One leading '-' is a sign ('-12.5'); a repeated one ('--12') is malformed.
+    """
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val) if math.isfinite(val) else None
+    if isinstance(val, dict):
+        return parse_mileage_km(val.get("v") if val.get("v") is not None else val.get("t"))
+
+    s = str(val).replace("\u00a0", " ").strip()
+    if s.lower().endswith("km"):
+        s = s[:-2].strip()
+    s = re.sub(r"(?<=\d) (?=\d{3}(?!\d))", "", s)  # a space between digit groups: '1 234.5'
+    sign = -1.0 if s.startswith("-") else 1.0
+    s = s[1:] if s.startswith("-") else s  # one sign only: '--12' is malformed
+    # A grouped thousands number never starts with a 0 group, so '0,500' has one reading (0.5)
+    if _COMMA_GROUPED_RE.fullmatch(s) and not s.startswith("0") and not _AMBIGUOUS_COMMA_RE.fullmatch(s):
+        s = s.replace(",", "")
+    elif _DOT_GROUPED_RE.fullmatch(s) and "," in s or re.fullmatch(r"\d{1,3}(?:\.\d{3}){2,}", s):
+        s = s.replace(".", "").replace(",", ".")
+    elif _COMMA_DECIMAL_RE.fullmatch(s) and not _AMBIGUOUS_COMMA_RE.fullmatch(s):
+        s = s.replace(",", ".")
+    elif not _DOT_DECIMAL_RE.fullmatch(s):
+        return None
+    return sign * float(s)
 
 
 _DAY_PREFIX_RE = re.compile(r"^(\d+)\s*days?\b\s*(.*)$", re.IGNORECASE)
@@ -454,7 +496,7 @@ def execute_wialon_unit_trips_report(
 
                             trip_incomplete = []
                             raw_mileage = extract_cell_value(cols[mileage_idx]) if len(cols) > mileage_idx else None
-                            dist_strict = parse_float_safe(raw_mileage, default=None)
+                            dist_strict = parse_mileage_km(raw_mileage)
                             if dist_strict is None:
                                 trip_incomplete.append("distance_km")
                             dist_km = dist_strict if dist_strict is not None else 0.0
@@ -494,7 +536,8 @@ def execute_wialon_unit_trips_report(
                                 incomplete_fields.update(trip_incomplete)
                             trips.append(trip)
                         else:
-                            incomplete_fields.add("row_shape")
+                            # A dropped trip row leaves the distance sum (and trip list) short: never a complete total
+                            incomplete_fields.update(("row_shape", "distance_km"))
 
             return {
                 "stats": stats,
@@ -676,7 +719,7 @@ def _group_row_trips(
             continue
         start_obj = cols[beginning_idx] if isinstance(cols[beginning_idx], dict) else {}
         end_obj = cols[end_idx] if isinstance(cols[end_idx], dict) else {}
-        dist = parse_float_safe(extract_cell_value(cols[mileage_idx]), default=None)
+        dist = parse_mileage_km(extract_cell_value(cols[mileage_idx]))
         start = start_obj.get("v") or s.get("t1")
         if dist is None or not start:
             complete = False
@@ -752,7 +795,7 @@ def execute_wialon_group_trips_report(
                         if len(cols) >= 6:
                             vehicle_name = extract_cell_text(cols[0]).strip()
                             raw_mileage = extract_cell_value(cols[mileage_idx]) if len(cols) > mileage_idx else None
-                            dist_strict = parse_float_safe(raw_mileage, default=None)
+                            dist_strict = parse_mileage_km(raw_mileage)
                             dist_km = dist_strict if dist_strict is not None else 0.0
 
                             total_time_str = extract_cell_text(cols[6]) if len(cols) > 6 else "0:00:00"

@@ -504,7 +504,7 @@ def get_trips_mileage_analytics(
     from_date: str = None,
     to_date: str = None
 ) -> Dict[str, Any]:
-    from app.utils.datetime_helpers import get_timeframe_timestamps
+    from app.utils.datetime_helpers import get_timeframe_timestamps, ROLLING_TIMEFRAMES
     if timeframe or from_date or from_time is not None:
         eff_from, eff_to = get_timeframe_timestamps(
             timeframe=timeframe,
@@ -520,12 +520,15 @@ def get_trips_mileage_analytics(
     eff_hours = max(1, int((eff_to - eff_from) / 3600))
     log_data_window("/api/fleet/trips", eff_from, eff_to)
 
-    if from_date:
+    # Same precedence as get_timeframe_timestamps: explicit bounds, then dates, then timeframe (default 'today')
+    if from_time is not None and to_time is not None:
+        window_spec = f"exact-{eff_from}-{eff_to}"
+    elif from_date:
         window_spec = f"dates-{from_date}-{to_date or from_date}"
-    elif timeframe:
-        window_spec = f"tf-{timeframe.lower().strip()}"
-    elif from_time is not None and to_time is not None:
-        window_spec = f"exact-{from_time}-{to_time}"
+    elif timeframe or from_time is not None:
+        tf = (timeframe or "today").lower().strip()
+        # A calendar window's start moves at UAE midnight: a result cached before it never answers after it
+        window_spec = f"tf-{tf}" if tf in ROLLING_TIMEFRAMES else f"tf-{tf}-{eff_from}"
     else:
         window_spec = f"hours-{hours or 24}"
 
@@ -556,13 +559,21 @@ def get_trips_mileage_analytics(
         group_report = None
 
     report_incomplete = False
+    unmatched_rows: List[str] = []
     if group_report is not None:
         rep_by_name = {item["vehicle_name"]: item for item in group_report}
         # Report rows carry only the unit name: a name shared by several units (or rows) cannot be attributed
         ambiguous_names = _ambiguous_report_names(fleet, group_report)
-        report_incomplete = any(
+        # A row naming no fleet unit is left out of the totals and listed, so the total is flagged partial
+        fleet_names = {v["vehicle_name"] for v in fleet}
+        unmatched_rows = sorted({item["vehicle_name"] for item in group_report if item["vehicle_name"] not in fleet_names})
+        report_incomplete = bool(unmatched_rows) or any(
             item.get("incomplete_fields") or item.get("column_warnings") or item.get("unlocated_fields")
             for item in group_report
+        ) or any(
+            # A fleet unit with no report row, or one whose name cannot be attributed, is unknown: not cached either
+            v["vehicle_name"] in ambiguous_names or v["vehicle_name"] not in rep_by_name
+            for v in fleet
         )
         vehicle_trips = []
         for v_record in fleet:
@@ -599,131 +610,89 @@ def get_trips_mileage_analytics(
     else:
         def _process_trips(v_record):
             vid = v_record["vehicle_id"]
-            sens = next((u.get("sens") or {} for u in vehicles if u.get("id") == vid), {})
             calc = calc_map.get(vid, {})
             curr_hw_mileage = (calc.get("mileage") or {}).get("value")
-            fallback_started = None
-            fallback_reason = "native_report_empty_or_missing"
 
             try:
-                try:
-                    native_rep = execute_wialon_unit_trips_report(sid, vid, eff_from, eff_to)
-                except WialonAPIError:
-                    fallback_reason = "native_report_error"
-                    native_rep = None
-                if native_rep and "trips" in native_rep:
-                    w_trips = native_rep["trips"]
-                    # Unknown when any trip distance is unreadable or the Mileage column was not identified
-                    dist_unknown = "distance_km" in (
-                        (native_rep.get("unlocated_fields") or []) + (native_rep.get("incomplete_fields") or [])
-                    )
-                    gps_dist = None if dist_unknown else round(sum(t.get("distance_km", 0.0) for t in w_trips), 2)
-                    max_spd = 0.0
-                    for t in w_trips:
-                        ms_str = str(t.get("max_speed", "")).replace("km/h", "").strip()
-                        try:
-                            ms_val = float(ms_str)
-                            if ms_val > max_spd:
-                                max_spd = ms_val
-                        except ValueError:
-                            pass
-
-                    speed_samples = []
-                    for trip in w_trips:
-                        trip_speed = _parse_speed_kmh(trip.get("average_speed"))
-                        if trip_speed is not None:
-                            moving_seconds = parse_duration_to_seconds(trip.get("moving_duration"))
-                            speed_samples.append((trip_speed, moving_seconds))
-                    weighted_seconds = sum(seconds for _, seconds in speed_samples)
-                    avg_spd = (
-                        round(sum(speed * seconds for speed, seconds in speed_samples) / weighted_seconds, 1)
-                        if weighted_seconds > 0
-                        else round(sum(speed for speed, _ in speed_samples) / len(speed_samples), 1)
-                        if speed_samples
-                        else None
-                    )
-
-                    return {
-                        "vehicle_id": vid,
-                        "vehicle_name": v_record["vehicle_name"],
-                        "group": v_record.get("group", "General Fleet"),
-                        "trip_count": len(w_trips),
-                        "gps_mileage_km": gps_dist,
-                        "hardware_mileage_km": None,
-                        "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
-                        "max_speed_kmh": round(max_spd, 1),
-                        "avg_speed_kmh": avg_spd,
-                        "trips": [
-                            {
-                                "start_time": t.get("start_time"),
-                                "end_time": t.get("end_time"),
-                                "duration_minutes": t.get("duration_minutes"),
-                                "moving_duration": t.get("moving_duration_str"),
-                                "distance_km": t.get("distance_km"),
-                                "max_speed": t.get("max_speed"),
-                                "average_speed": t.get("average_speed"),
-                                "start_location": t.get("start_location"),
-                                "end_location": t.get("end_location"),
-                            }
-                            for t in w_trips
-                        ]
-                    }
-
-                fallback_started = time.perf_counter()
-                logging.debug(
-                    "PERF trips fallback start request_id=%s reason=%s",
-                    request_trace_id.get(), fallback_reason,
-                )
-                raw_msgs = get_vehicle_history(sid, vid, hours=eff_hours, from_time=eff_from, to_time=eff_to)
-                telemetry = normalize_wialon_messages(raw_msgs, configured_sensors=sens)
-                activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
-
-                trips = activity.get("trips", [])
-                gps_dist = round(sum(t.get("distance", 0) for t in trips), 2)
-
-                max_spd = max((t.get("max_speed", 0) for t in trips), default=0)
-                trip_duration_seconds = sum(t.get("duration", 0) for t in trips)
-                avg_spd = round(gps_dist * 3600 / trip_duration_seconds, 1) if trip_duration_seconds > 0 else None
-
-                logging.debug(
-                    "PERF trips fallback end request_id=%s duration_ms=%.1f history_messages=%s",
-                    request_trace_id.get(), (time.perf_counter() - fallback_started) * 1000, len(raw_msgs),
-                )
-
+                native_rep = execute_wialon_unit_trips_report(sid, vid, eff_from, eff_to)
+            except WialonAPIError as exc:
+                # The Trips Report is the only mileage source: without it mileage and trip count are unknown
+                # (None), never re-derived from raw messages, which measure differently
+                logging.warning("Wialon trips report failed for vehicle %s; mileage unknown: %s", vid, exc)
                 return {
                     "vehicle_id": vid,
                     "vehicle_name": v_record["vehicle_name"],
                     "group": v_record.get("group", "General Fleet"),
-                    "trip_count": len(trips),
-                    "gps_mileage_km": gps_dist,
+                    "trip_count": None,
+                    "gps_mileage_km": None,
                     "hardware_mileage_km": None,
                     "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
-                    "max_speed_kmh": max_spd,
-                    "avg_speed_kmh": avg_spd,
-                    "trips": [
-                        {
-                            "start_time": t.get("start_time"),
-                            "end_time": t.get("end_time"),
-                            "duration_minutes": round(t.get("duration", 0) / 60, 1),
-                            "distance_km": round(t.get("distance", 0), 2),
-                            "max_speed": t.get("max_speed"),
-                            "start_location": t.get("start_location"),
-                            "end_location": t.get("end_location"),
-                        }
-                        for t in trips
-                    ]
+                    "max_speed_kmh": 0.0,
+                    "avg_speed_kmh": None,
+                    "trips": [],
                 }
-            except Exception as exc:
-                if fallback_started is not None:
-                    logging.debug(
-                        "PERF trips fallback failed request_id=%s duration_ms=%.1f",
-                        request_trace_id.get(), (time.perf_counter() - fallback_started) * 1000,
-                    )
-                logging.error("Wialon trip data failed for vehicle %s: %s", vid, exc)
-                raise
+
+            w_trips = native_rep["trips"]
+            # Unknown when any trip distance is unreadable or the Mileage column was not identified
+            dist_unknown = "distance_km" in (
+                (native_rep.get("unlocated_fields") or []) + (native_rep.get("incomplete_fields") or [])
+            )
+            gps_dist = None if dist_unknown else round(sum(t.get("distance_km", 0.0) for t in w_trips), 2)
+            max_spd = 0.0
+            for t in w_trips:
+                ms_str = str(t.get("max_speed", "")).replace("km/h", "").strip()
+                try:
+                    ms_val = float(ms_str)
+                    if ms_val > max_spd:
+                        max_spd = ms_val
+                except ValueError:
+                    pass
+
+            speed_samples = []
+            for trip in w_trips:
+                trip_speed = _parse_speed_kmh(trip.get("average_speed"))
+                if trip_speed is not None:
+                    moving_seconds = parse_duration_to_seconds(trip.get("moving_duration"))
+                    speed_samples.append((trip_speed, moving_seconds))
+            weighted_seconds = sum(seconds for _, seconds in speed_samples)
+            avg_spd = (
+                round(sum(speed * seconds for speed, seconds in speed_samples) / weighted_seconds, 1)
+                if weighted_seconds > 0
+                else round(sum(speed for speed, _ in speed_samples) / len(speed_samples), 1)
+                if speed_samples
+                else None
+            )
+
+            return {
+                "vehicle_id": vid,
+                "vehicle_name": v_record["vehicle_name"],
+                "group": v_record.get("group", "General Fleet"),
+                "trip_count": len(w_trips),
+                "gps_mileage_km": gps_dist,
+                "hardware_mileage_km": None,
+                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
+                "max_speed_kmh": round(max_spd, 1),
+                "avg_speed_kmh": avg_spd,
+                "trips": [
+                    {
+                        "start_time": t.get("start_time"),
+                        "end_time": t.get("end_time"),
+                        "duration_minutes": t.get("duration_minutes"),
+                        "moving_duration": t.get("moving_duration_str"),
+                        "distance_km": t.get("distance_km"),
+                        "max_speed": t.get("max_speed"),
+                        "average_speed": t.get("average_speed"),
+                        "start_location": t.get("start_location"),
+                        "end_location": t.get("end_location"),
+                    }
+                    for t in w_trips
+                ]
+            }
 
         with ThreadPoolExecutor(max_workers=3) as executor:
             vehicle_trips = list(map_with_request_context(executor, _process_trips, fleet))
+        # A failed or partial unit report leaves that unit unknown: not cached, so the next request re-reads it
+        report_incomplete = any(v["gps_mileage_km"] is None or v["trip_count"] is None for v in vehicle_trips)
 
     # Trip metrics need every vehicle's real trip list; one unknown count makes the fleet totals unknown.
     trips_known = all(v["trip_count"] is not None for v in vehicle_trips)
@@ -731,7 +700,8 @@ def get_trips_mileage_analytics(
     # Unknown (None) distances are left out of the total and listed, never counted as 0 km
     known_dists = [v["gps_mileage_km"] for v in vehicle_trips if v["gps_mileage_km"] is not None]
     distance_unknown_vehicles = sorted(v["vehicle_name"] for v in vehicle_trips if v["gps_mileage_km"] is None)
-    total_gps_dist = round(sum(known_dists), 2)
+    # No known vehicle distance at all (reports failed or gave no usable mileage) is unknown, not 0 km
+    total_gps_dist = round(sum(known_dists), 2) if known_dists or not vehicle_trips else None
     available_hw_distances = [v["hardware_mileage_km"] for v in vehicle_trips if v.get("hardware_mileage_km") is not None]
     total_hw_dist = round(sum(available_hw_distances), 2) if available_hw_distances else None
 
@@ -768,8 +738,9 @@ def get_trips_mileage_analytics(
         "summary": {
             "total_trips": total_trips,
             "total_distance_km": total_gps_dist,
-            "total_distance_partial": bool(distance_unknown_vehicles),
+            "total_distance_partial": bool(distance_unknown_vehicles or unmatched_rows),
             "distance_unknown_vehicles": distance_unknown_vehicles,
+            "unmatched_report_rows": unmatched_rows,
             "total_hardware_distance_km": total_hw_dist,
             "average_trip_distance_km": avg_trip_dist,
             "average_trip_duration_minutes": avg_trip_dur,
@@ -1324,7 +1295,9 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
         "location": v_record.get("location", {}),
         "health": health,
         "metrics_24h": {
+            # Segmented from raw messages for the route view; not the Wialon Trips Report mileage used elsewhere
             "distance_km": round(total_dist, 2),
+            "distance_source": "raw_message_segmentation",
             "driving_minutes": round(total_drive_sec / 60, 1),
             "idle_minutes": round(total_idle_sec / 60, 1),
             "trips_count": len(trips),

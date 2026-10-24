@@ -2,7 +2,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
-from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ
+from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES
 import logging
 import os
 import sys
@@ -975,8 +975,11 @@ def get_dashboard_mileage(
         window_spec = f"exact-{from_time}-{to_time}"
     elif from_date:
         window_spec = f"dates-{from_date}-{to_date or from_date}"
-    else:
+    elif timeframe_norm in ROLLING_TIMEFRAMES:
         window_spec = f"tf-{timeframe_norm}"
+    else:
+        # A calendar window's start moves at UAE midnight: a result cached before it never answers after it
+        window_spec = f"tf-{timeframe_norm}-{eff_from}"
 
     cache_key = f"dashboard-mileage-v3-{window_spec}-{group_id}-uae"
     hit = cached(cache_key, ttl_seconds=60)
@@ -1002,11 +1005,11 @@ def get_dashboard_mileage(
         name_counts = Counter(str(v.get("nm", "")).strip() for v in vehicles)
         # Report rows carry only the unit name: a name shared by several units cannot be attributed
         ambiguous_names = sorted(n for n, c in name_counts.items() if c > 1)
-        vehicles_by_name = {str(v.get("nm", "")).strip(): v for v in vehicles if name_counts[str(v.get("nm", "")).strip()] == 1}
         calculated_data = get_calculated_data(sid, vehicles)
         calculated_by_vehicle = {item.get("i"): item for item in calculated_data}
 
         mileage_units = []
+        unmatched_rows = []
         report_incomplete = False
 
         if timeframe_norm in ["all", "all_time", "odometer"]:
@@ -1036,9 +1039,54 @@ def get_dashboard_mileage(
                 group_id=report_group_id
             )
 
+            # The report covers the group's members only, so when membership is known a name is ambiguous only if
+            # several members share it. A row naming no member, or a group with unknown membership, is matched
+            # against the whole fleet.
+            report_group = next((g for g in raw_groups if g.get("id") == report_group_id), None)
+            member_ids = set(report_group.get("u") or []) if report_group is not None else None
+            covered_names = {rep_item["vehicle_name"] for rep_item in group_report}
+            fleet_by_name = defaultdict(list)
+            for vehicle in vehicles:
+                fleet_by_name[str(vehicle.get("nm", "")).strip()].append(vehicle)
+
+            def name_candidates(name):
+                same_name = fleet_by_name.get(name, [])
+                in_group = [v for v in same_name if v.get("id") in member_ids] if member_ids else []
+                return in_group or same_name
+
+            if member_ids:
+                scoped_names = {str(v.get("nm", "")).strip() for v in vehicles if v.get("id") in member_ids}
+            else:
+                scoped_names = set(fleet_by_name)
+            scoped_names |= covered_names
+            # The group report has one summary row per unit, so a name on several rows is ambiguous too: summing
+            # them could count the same unit twice, and picking one could drop a real unit's mileage
+            row_counts = Counter(rep_item["vehicle_name"] for rep_item in group_report)
+            ambiguous_names = sorted(n for n in scoped_names if len(name_candidates(n)) > 1 or row_counts[n] > 1)
+            vehicles_by_name = {n: name_candidates(n)[0] for n in scoped_names if len(name_candidates(n)) == 1}
+
             # The report returns its rows or raises WialonAPIError (mapped to 502); it never returns None.
             for rep_item in group_report:
                 v_name = rep_item["vehicle_name"]
+                if not fleet_by_name.get(v_name):
+                    # Same as /api/fleet/trips: a row naming no fleet unit is not added to the fleet total. It is
+                    # listed with unknown mileage so the report shows as incomplete instead of silently shrinking.
+                    report_incomplete = True
+                    if v_name not in unmatched_rows:
+                        unmatched_rows.append(v_name)
+                        mileage_units.append({
+                            "vehicle_id": None,
+                            "vehicle_name": v_name,
+                            "group": "General Fleet",
+                            "groups": ["General Fleet"],
+                            "mileage": None,
+                            "source": "unmatched_report_row"
+                        })
+                    continue
+                if v_name in ambiguous_names:
+                    # The row cannot be attributed to one unit; each unit with that name is listed below as unknown
+                    report_incomplete = True
+                    continue
                 v_obj = vehicles_by_name.get(v_name)
                 vid = v_obj.get("id") if v_obj else None
                 v_groups = unit_groups_map.get(vid, ["General Fleet"]) if vid else ["General Fleet"]
@@ -1074,31 +1122,36 @@ def get_dashboard_mileage(
                 })
 
             # The group report emits a row ("0.00 km") for every member even without activity, so a member
-            # with no row was not covered by the report: its mileage is unknown, never 0 km
-            report_group = next((g for g in raw_groups if g.get("id") == report_group_id), None)
-            if report_group is not None:
-                member_ids = set(report_group.get("u") or [])
-                covered_names = {rep_item["vehicle_name"] for rep_item in group_report}
-                for vehicle in vehicles:
-                    vid = vehicle.get("id")
-                    v_name = str(vehicle.get("nm", "")).strip()
-                    if vid not in member_ids or v_name in covered_names:
+            # with no row was not covered by the report: its mileage is unknown, never 0 km.
+            # A unit sharing its name with another unit is unknown too: report rows carry only the name.
+            for vehicle in vehicles:
+                vid = vehicle.get("id")
+                v_name = str(vehicle.get("nm", "")).strip()
+                if v_name in ambiguous_names:
+                    # Group membership decides when known; otherwise the report naming the unit does
+                    if not (vid in member_ids if member_ids else v_name in covered_names):
                         continue
-                    report_incomplete = True
-                    v_groups = unit_groups_map.get(vid, ["General Fleet"])
-                    mileage_units.append({
-                        "vehicle_id": vid,
-                        "vehicle_name": vehicle.get("nm", f"Vehicle {vid}"),
-                        "group": v_groups[0] if v_groups else "General Fleet",
-                        "groups": v_groups,
-                        "mileage": None,
-                        "source": "missing_from_report"
-                    })
+                    source = "ambiguous_vehicle_name" if len(name_candidates(v_name)) > 1 else "duplicate_report_rows"
+                elif member_ids is not None and vid in member_ids and v_name not in covered_names:
+                    source = "missing_from_report"
+                else:
+                    continue
+                report_incomplete = True
+                v_groups = unit_groups_map.get(vid, ["General Fleet"])
+                mileage_units.append({
+                    "vehicle_id": vid,
+                    "vehicle_name": vehicle.get("nm", f"Vehicle {vid}"),
+                    "group": v_groups[0] if v_groups else "General Fleet",
+                    "groups": v_groups,
+                    "mileage": None,
+                    "source": source
+                })
 
         mileage_units.sort(key=lambda item: (item["mileage"] is not None, item["mileage"] or 0), reverse=True)
         known_mileage = [item["mileage"] for item in mileage_units if item["mileage"] is not None]
-        total_km = sum(known_mileage)
-        avg_km = round(total_km / len(known_mileage), 2) if known_mileage else 0
+        # No known mileage at all is unknown (null), never 0 km; a partial total and average cover the known units
+        total_km = round(sum(known_mileage), 2) if known_mileage else None
+        avg_km = round(sum(known_mileage) / len(known_mileage), 2) if known_mileage else None
         incomplete_units = sorted(item["vehicle_name"] for item in mileage_units if item["mileage"] is None)
 
         result = {
@@ -1106,13 +1159,14 @@ def get_dashboard_mileage(
             "timezone": "Asia/Dubai",
             "effective_from": eff_from,
             "effective_to": eff_to,
-            "total_km": round(total_km, 2),
+            "total_km": total_km,
             "average_km": avg_km,
             "available_units": len(mileage_units),
             "top_units": mileage_units[:5],
             "all_units": mileage_units,
             "ambiguous_vehicle_names": ambiguous_names,
             "incomplete_units": incomplete_units,
+            "unmatched_report_rows": sorted(unmatched_rows),
         }
 
         # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
@@ -1925,9 +1979,11 @@ def api_fleet_trips(
                 to_date=to_date
             )
             _require_window_within(eff_from, eff_to, MAX_REPORT_HOURS)
+            # The caller's own bounds, not the resolved ones: the analytics cache key mirrors the resolver's
+            # precedence, so resolved bounds would key every rolling timeframe to a unique, uncacheable window
             return get_trips_mileage_analytics(
-                from_time=eff_from,
-                to_time=eff_to,
+                from_time=from_time,
+                to_time=to_time,
                 timeframe=timeframe,
                 from_date=from_date,
                 to_date=to_date

@@ -33,7 +33,8 @@ import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
-import { ErrorBanner, LoadingState } from "../components/Common/StateViews"
+import { ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
+import { createLatestRequest } from "../utils/latestRequest"
 import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import {
@@ -47,7 +48,7 @@ import {
     categoricalColor,
 } from "../components/Common/chartTheme"
 import LiveIdleTimer from "../components/Common/LiveIdleTimer"
-import { compareKnownDesc, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
+import { compareKnownDesc, formatKm, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
 
 const TIMEFRAME_OPTIONS = [
     { id: "today", label: "Today", unit: "km today" },
@@ -86,6 +87,7 @@ function Dashboard() {
     const [mileageLimit, setMileageLimit] = useState("5")
     const [mileageData, setMileageData] = useState(null)
     const [mileageLoading, setMileageLoading] = useState(false)
+    const [mileageError, setMileageError] = useState(null)
 
     // Chart type selectors
     const [utilizationChartType, setUtilizationChartType] = useState("bar") // "bar" | "horizontal" | "donut"
@@ -171,6 +173,7 @@ function Dashboard() {
                         setTodayMileageData(res)
                         if (mileageTimeframeRef.current === "today") {
                             setMileageData(res)
+                            setMileageError(null)
                         }
                     }),
                 ])
@@ -198,23 +201,33 @@ function Dashboard() {
     }, [])
 
     // ─── 3. Load Mileage Rankings by Timeframe ──────────────────────────────
+    // A timeframe's mileage is cleared when it starts loading and when it fails, so the previous
+    // timeframe's figures are never shown under the new label; a late older response is dropped.
+    const [mileageRequest] = useState(() => createLatestRequest(getDashboardMileage, {
+        onStart: () => {
+            setMileageData(null)
+            setMileageError(null)
+            setMileageLoading(true)
+        },
+        onData: (data) => setMileageData(data),
+        onError: (err) => {
+            console.error("Mileage ranking error:", err)
+            setMileageData(null)
+            setMileageError(err?.message || "Failed to load mileage")
+        },
+        onSettled: () => setMileageLoading(false),
+    }))
+
+    const selectMileageTimeframe = (timeframe) => {
+        // Updated before the next render so a "today" poll resolving meanwhile cannot write under the new timeframe
+        mileageTimeframeRef.current = timeframe
+        setMileageTimeframe(timeframe)
+    }
+
     useEffect(() => {
-        let active = true
-        async function fetchMileage() {
-            try {
-                setMileageLoading(true)
-                const data = await getDashboardMileage(mileageTimeframe)
-                if (!active) return
-                setMileageData(data)
-            } catch (err) {
-                console.error("Mileage ranking error:", err)
-            } finally {
-                if (active) setMileageLoading(false)
-            }
-        }
-        fetchMileage()
-        return () => { active = false }
-    }, [mileageTimeframe])
+        mileageRequest.load(mileageTimeframe)
+        return () => mileageRequest.cancel()
+    }, [mileageRequest, mileageTimeframe])
 
     // ─── 4. Dynamic Group Discovery from Actual Wialon Data ─────────────────
     const availableGroups = useMemo(() => {
@@ -495,7 +508,8 @@ function Dashboard() {
         return units.map(u => ({
             vehicle_id: u.vehicle_id,
             vehicle: u.vehicle_name || `Vehicle #${u.vehicle_id}`,
-            mileage: isKnownNumber(u.mileage) ? Math.round(Number(u.mileage)) : null,
+            // The backend's value as is: rounding here made the tooltip disagree with the drawer
+            mileage: isKnownNumber(u.mileage) ? Number(u.mileage) : null,
             group: u.group || "General Fleet",
         }))
     }, [mileageUnitsSource, selectedGroup, mileageLimit])
@@ -853,7 +867,7 @@ function Dashboard() {
                                     )}
                                     <FilterSelect
                                         value={mileageTimeframe}
-                                        onChange={setMileageTimeframe}
+                                        onChange={selectMileageTimeframe}
                                         ariaLabel="Select mileage timeframe"
                                     >
                                         {TIMEFRAME_OPTIONS.map(tf => (
@@ -873,7 +887,16 @@ function Dashboard() {
                                 </>
                             }
                         >
-                            {filteredMileageList.length === 0 ? (
+                            {mileageError ? (
+                                <ErrorState
+                                    className="h-[220px] border-0"
+                                    title="Unable to load mileage"
+                                    message={mileageError}
+                                    onRetry={() => mileageRequest.load(mileageTimeframe)}
+                                />
+                            ) : filteredMileageList.length === 0 && mileageLoading ? (
+                                <LoadingState className="h-[220px] border-0" label="Loading mileage…" />
+                            ) : filteredMileageList.length === 0 ? (
                                 <div className="h-[220px]">{emptyChart("No mileage data for this selection.")}</div>
                             ) : (
                                 <div className="max-h-[360px] overflow-y-auto">
@@ -897,7 +920,7 @@ function Dashboard() {
                                                 />
                                                 <Tooltip
                                                     cursor={TOOLTIP_CURSOR}
-                                                    formatter={(val) => [isKnownNumber(val) ? `${Number(val).toLocaleString()} km` : "Unknown (unreadable)", "Mileage"]}
+                                                    formatter={(val) => [formatKm(val) ?? "Unknown (unreadable)", "Mileage"]}
                                                     contentStyle={TOOLTIP_STYLE}
                                                 />
                                                 <Bar

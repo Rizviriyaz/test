@@ -455,8 +455,11 @@ def test_duplicate_unit_names_not_attributed():
     main._cache.clear()
     assert res.status_code == 200, res.text
     body = res.json()
-    by_name = {u["vehicle_name"]: u["vehicle_id"] for u in body["all_units"]}
-    assert by_name == {"TWIN": None, "SOLO": 3} and body["ambiguous_vehicle_names"] == ["TWIN"], body
+    units_out = sorted((u["vehicle_id"], u["vehicle_name"], u["mileage"]) for u in body["all_units"])
+    # Each same-named unit is listed by id with unknown mileage; the TWIN row's 10 km goes to neither
+    assert units_out == [(1, "TWIN", None), (2, "TWIN", None), (3, "SOLO", 5.0)], body
+    assert body["ambiguous_vehicle_names"] == ["TWIN"] and body["incomplete_units"] == ["TWIN", "TWIN"], body
+    assert body["total_km"] == 5.0, body
     print("[PASS] L4: a report row whose name is shared by two units is not attributed to either (flagged instead).")
 
 

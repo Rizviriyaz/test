@@ -6,7 +6,7 @@ import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
 import LiveIdleTimer from "../Common/LiveIdleTimer"
 import { formatElapsedDuration } from "../../utils/datetime"
-import { isKnownNumber, sumKnown, tripDistanceOf } from "../../utils/knownTotals"
+import { formatKm, isKnownNumber, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "../../utils/knownTotals"
 
 import {
     MorphingDialog,
@@ -156,11 +156,15 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
     const tripCount = tripsData?.trip_count ?? (tripsData?.trips ? tripsData.trips.length : (currentVehicle.trip_count ?? currentVehicle.trips_count ?? null))
     // Trips whose distance cell was unreadable are left out of the sum and marked, never counted as 0 km
     const tripsDistanceSum = tripsData?.trips && tripsData.trips.length > 0 ? sumKnown(tripsData.trips, tripDistanceOf) : null
-    const tripsDistance = tripsDistanceSum
-        ? (tripsDistanceSum.allUnknown ? null : tripsDistanceSum.total)
-        : (tripsData?.summary?.total_distance_km ?? (tripsData ? 0 : null))
+    const tripsDistance = tripsDistanceKm(tripsData)
     const todayDistance = currentVehicle.today_mileage ?? tripsDistance
     const distanceUnknownTrips = currentVehicle.today_mileage == null && tripsDistanceSum ? tripsDistanceSum.unknown : 0
+    // A trip row Wialon sent malformed was dropped: the distance sum (and trip count) misses it
+    const distanceIncomplete = currentVehicle.today_mileage == null && tripsDistanceIncomplete(tripsData)
+    const tripRowsDropped = (tripsData?.incomplete_fields || []).includes("row_shape")
+    const distanceHint = distanceUnknownTrips > 0
+        ? `Partial: ${distanceUnknownTrips} trip(s) unknown`
+        : (distanceIncomplete ? "Partial: some Wialon trip rows could not be read" : null)
 
     const spinner = <Loader2 className="inline h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Loading" />
     const isIdling = statusStr === "IDLING"
@@ -237,13 +241,13 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                         <Section title="Today">
                             <Row
                                 label="Distance"
-                                hint={!loadingTrips && distanceUnknownTrips > 0 ? `Partial: ${distanceUnknownTrips} trip(s) unknown` : null}
+                                hint={!loadingTrips ? distanceHint : null}
                             >
                                 <span className="tabular-nums">
-                                    {loadingTrips ? spinner : (todayDistance !== null ? `${Number(todayDistance).toFixed(1)} km` : "—")}
+                                    {loadingTrips ? spinner : (formatKm(todayDistance) ?? "—")}
                                 </span>
                             </Row>
-                            <Row label="Trips">
+                            <Row label="Trips" hint={!loadingTrips && tripRowsDropped ? "Partial: some Wialon trip rows could not be read" : null}>
                                 <span className="tabular-nums">{loadingTrips ? spinner : (tripCount !== null ? tripCount : "—")}</span>
                             </Row>
                         </Section>

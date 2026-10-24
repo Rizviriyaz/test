@@ -12,6 +12,11 @@ Non-fuel consumers:
     cache them
   - a group member with no row in the group report (Wialon emits a zero row for every member without
     activity, verified live) is unknown, not 0 km / 0 s
+  - /api/dashboard/mileage: units sharing a name are listed by id with mileage unknown and not cached
+  - /api/dashboard/mileage: a name shared only with a unit outside the requested group is not ambiguous
+  - 'today' / 'yesterday' caches (/api/dashboard/mileage, /api/fleet/trips) are never served after UAE
+    midnight; rolling windows keep their cache
+  - /api/fleet/trips cache key: explicit bounds > from_date > timeframe, as the resolver
 
 Wialon is replaced by FakeReportEngine; every outbound HTTP call is blocked by OfflineGuard. Run from Backend/:
     python scripts/test_report_columns_and_coverage.py
@@ -114,9 +119,14 @@ def test_dashboard_mileage_guessed_column_and_missing_member():
         _main_patches(stack, FakeReportEngine(include_header=False))
         res = main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
                                          to_date=None, group_id=None)
-        assert all(u["mileage"] is None for u in res["all_units"]) and res["total_km"] == 0, res["all_units"]
+        assert all(u["mileage"] is None for u in res["all_units"]) and res["total_km"] is None, res["all_units"]
+        assert res["average_km"] is None, res  # no known mileage: unknown, not 0 km
         assert sorted(res["incomplete_units"]) == ["UNIT-A", "UNIT-B", "UNIT-C"], res
-        assert main.cached("dashboard-mileage-v3-tf-today-None-uae", ttl_seconds=60) is None, "not cached"
+        engine = FakeReportEngine(include_header=False)
+        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+        main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                   to_date=None, group_id=None)
+        assert engine.count("report/exec_report") == 1, "a guessed-column result must not be served from cache"
     # Group 7 (Logistics) = units 101 and 102; the report has no row for UNIT-B
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-B",))))
@@ -126,7 +136,11 @@ def test_dashboard_mileage_guessed_column_and_missing_member():
         assert units["UNIT-B"]["mileage"] is None and units["UNIT-B"]["source"] == "missing_from_report", units
         assert units["UNIT-A"]["mileage"] == 250.75, units
         assert "UNIT-B" in res["incomplete_units"] and res["total_km"] == 250.75 + 0.0, res
-        assert main.cached("dashboard-mileage-v3-tf-today-7-uae", ttl_seconds=60) is None, "not cached"
+        engine = FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-B",)))
+        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+        main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                   to_date=None, group_id=7)
+        assert engine.count("report/exec_report") == 1, "a result with a missing member must not be served from cache"
     print("[PASS] Dashboard mileage: guessed Mileage column -> unknown (not cached); group member missing "
           "from the report -> unknown, listed in incomplete_units.")
 
@@ -214,6 +228,189 @@ def test_unit_routes_guessed_columns():
           "located columns unchanged.")
 
 
+def _duplicate_name_setup():
+    """Units 101 and 102 are both named UNIT-A; the report has two UNIT-A rows (250.75 km and 1234.5 km)."""
+    units = [{"id": 101, "nm": "UNIT-A", "sens": {}}, {"id": 102, "nm": "UNIT-A", "sens": {}},
+             {"id": 103, "nm": "UNIT-C", "sens": {}}]
+    tables = _tables()
+    for row in tables[TEMPLATE_GROUP_TRIPS]["rows"]:
+        if row["c"][0] == "UNIT-B":
+            row["c"][0] = "UNIT-A"
+    return units, tables
+
+
+def test_dashboard_mileage_duplicate_names_unknown():
+    units, tables = _duplicate_name_setup()
+    for group_id in (None, 7):
+        with ExitStack() as stack:
+            _main_patches(stack, FakeReportEngine(tables=tables), units=units)
+            res = main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                             to_date=None, group_id=group_id)
+            by_id = {u["vehicle_id"]: u for u in res["all_units"]}
+            # No row is emitted without a unit id, and neither same-named unit gets a row's mileage
+            # (the fake engine returns every fixture row whatever the group, so UNIT-C's row is always there)
+            assert None not in by_id and len(res["all_units"]) == 3, res["all_units"]
+            for vid in (101, 102):
+                assert by_id[vid]["mileage"] is None and by_id[vid]["source"] == "ambiguous_vehicle_name", by_id[vid]
+            assert res["incomplete_units"] == ["UNIT-A", "UNIT-A"], res["incomplete_units"]
+            assert res["ambiguous_vehicle_names"] == ["UNIT-A"], res
+            assert res["total_km"] == 0.0, "neither 250.75 nor 1234.5 km may be counted for an unattributable row"
+            assert by_id[103]["mileage"] == 0.0 and by_id[103]["source"] == "wialon_native_report", by_id[103]
+            engine = FakeReportEngine(tables=tables)
+            stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+            main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                       to_date=None, group_id=group_id)
+            assert engine.count("report/exec_report") == 1, "a result with ambiguous units must not be cached"
+    print("[PASS] Dashboard mileage: two units sharing a name -> each listed by id with mileage unknown, in "
+          "incomplete_units, not counted in total_km, not cached.")
+
+
+def test_dashboard_mileage_duplicate_name_outside_group():
+    """UNIT-A names unit 101 (in group 7) and unit 103 (outside it); group 7 = 101, 102."""
+    units = [{"id": 101, "nm": "UNIT-A", "sens": {}}, {"id": 102, "nm": "UNIT-B", "sens": {}},
+             {"id": 103, "nm": "UNIT-A", "sens": {}}]
+    tables = _tables(drop_group_rows=("UNIT-C",))
+    call = lambda gid: main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                                  to_date=None, group_id=gid)
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine(tables=tables), units=units)
+        res = call(7)
+        by_id = {u["vehicle_id"]: u for u in res["all_units"]}
+        assert set(by_id) == {101, 102}, res["all_units"]
+        assert by_id[101]["mileage"] == 250.75 and by_id[101]["source"] == "wialon_native_report", by_id[101]
+        assert by_id[102]["mileage"] == 1234.5, by_id[102]
+        assert res["ambiguous_vehicle_names"] == [] and res["incomplete_units"] == [], res
+        engine = FakeReportEngine(tables=tables)
+        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+        call(7)
+        assert engine.count("report/exec_report") == 0, "a complete in-group result is cached as before"
+    # Fleet-wide (All Unit holds both) and unknown group membership (fallback to whole-fleet matching): ambiguous
+    for gid in (None, 99):
+        with ExitStack() as stack:
+            _main_patches(stack, FakeReportEngine(tables=tables), units=units)
+            res = call(gid)
+            by_id = {u["vehicle_id"]: u for u in res["all_units"]}
+            assert set(by_id) == {101, 102, 103}, (gid, res["all_units"])
+            for vid in (101, 103):
+                assert by_id[vid]["mileage"] is None and by_id[vid]["source"] == "ambiguous_vehicle_name", (gid, by_id[vid])
+            assert by_id[102]["mileage"] == 1234.5, (gid, by_id[102])
+            assert res["ambiguous_vehicle_names"] == ["UNIT-A"] and res["total_km"] == 1234.5, (gid, res)
+    print("[PASS] Dashboard mileage: a name shared with a unit outside the requested group keeps the in-group "
+          "unit's mileage; fleet-wide or with unknown membership it stays ambiguous.")
+
+
+def test_dashboard_mileage_unique_names_still_cached():
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine())
+        res = main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                         to_date=None, group_id=None)
+        units = {u["vehicle_id"]: u["mileage"] for u in res["all_units"]}
+        assert units == {101: 250.75, 102: 1234.5, 103: 0.0} and res["incomplete_units"] == [], res
+        engine = FakeReportEngine()
+        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+        main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                   to_date=None, group_id=None)
+        assert engine.count("report/exec_report") == 0, "a complete result is still served from cache"
+    print("[PASS] Dashboard mileage: unique names -> unchanged values, complete result cached.")
+
+
+def _uae(y, mo, d, h, mi, s):
+    from app.utils.datetime_helpers import UAE_TZ
+    from datetime import datetime
+    return datetime(y, mo, d, h, mi, s, tzinfo=UAE_TZ)
+
+
+def _call_at(stack, when, call):
+    """Run `call` with the UAE clock at `when`; returns (result, exec_report count for that call)."""
+    engine = FakeReportEngine()
+    stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+    stack.enter_context(patch("app.utils.datetime_helpers.get_uae_now", return_value=when))
+    return call(), engine.count("report/exec_report")
+
+
+def test_calendar_cache_rolls_over_at_uae_midnight():
+    before, also_before, after = _uae(2026, 10, 24, 23, 59, 50), _uae(2026, 10, 24, 23, 59, 55), _uae(2026, 10, 25, 0, 0, 10)
+    # (window before midnight, window after midnight) as UAE wall clocks; 'today' ends at the call time
+    expected = {
+        "today": (((2026, 10, 24, 0, 0, 0), None), ((2026, 10, 25, 0, 0, 0), None)),
+        "yesterday": (((2026, 10, 23, 0, 0, 0), (2026, 10, 23, 23, 59, 59)),
+                      ((2026, 10, 24, 0, 0, 0), (2026, 10, 24, 23, 59, 59))),
+    }
+    for timeframe, ((lo1, hi1), (lo3, hi3)) in expected.items():
+        calls = {
+            "/api/dashboard/mileage": lambda: main.get_dashboard_mileage(
+                timeframe=timeframe, from_time=None, to_time=None, from_date=None, to_date=None, group_id=None),
+            "/api/fleet/trips (analytics)": lambda: fa.get_trips_mileage_analytics(timeframe=timeframe),
+            "/api/fleet/trips (route)": lambda: main.api_fleet_trips(
+                hours=24, from_time=None, to_time=None, timeframe=timeframe, from_date=None, to_date=None),
+        }
+        for name, call in calls.items():
+            lo, hi = ("effective_from", "effective_to") if name == "/api/dashboard/mileage" else ("from_time", "to_time")
+            with ExitStack() as stack:
+                _main_patches(stack, FakeReportEngine())
+                first, n1 = _call_at(stack, before, call)
+                second, n2 = _call_at(stack, also_before, call)
+                third, n3 = _call_at(stack, after, call)
+            label = f"{name} {timeframe}"
+            assert (n1, n2, n3) == (1, 0, 1), f"{label}: exec counts {(n1, n2, n3)}"
+            assert first[lo] == int(_uae(*lo1).timestamp()), (label, first[lo])
+            assert first[hi] == (int(_uae(*hi1).timestamp()) if hi1 else int(before.timestamp())), (label, first[hi])
+            assert second == first, f"{label}: the second call before midnight must be the cached result"
+            assert third[lo] == int(_uae(*lo3).timestamp()), f"{label} served the previous day's window"
+            assert third[hi] == (int(_uae(*hi3).timestamp()) if hi3 else int(after.timestamp())), (label, third[hi])
+    print("[PASS] 'today' and 'yesterday' caches: reused within the UAE day with exact window bounds, never served "
+          "after UAE midnight (/api/dashboard/mileage, /api/fleet/trips analytics and route).")
+
+
+def test_fleet_trips_cache_key_follows_resolver_precedence():
+    t0, t1 = _uae(2026, 10, 24, 12, 0, 0), _uae(2026, 10, 24, 12, 0, 20)
+    x, y = int(_uae(2026, 10, 20, 6, 0, 0).timestamp()), int(_uae(2026, 10, 20, 18, 0, 0).timestamp())
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine())
+        today, n_today = _call_at(stack, t0, lambda: fa.get_trips_mileage_analytics(timeframe="today"))
+        # Explicit bounds win over timeframe and from_date (as in get_timeframe_timestamps): never today's entry
+        exact, n_exact = _call_at(stack, t0, lambda: fa.get_trips_mileage_analytics(from_time=x, to_time=y, timeframe="today"))
+        other, n_other = _call_at(stack, t0, lambda: fa.get_trips_mileage_analytics(from_time=x, to_time=y + 3600, timeframe="today"))
+        with_date, n_with_date = _call_at(stack, t0, lambda: fa.get_trips_mileage_analytics(
+            from_time=x, to_time=y, from_date="2026-10-21"))
+        dates, n_dates = _call_at(stack, t0, lambda: fa.get_trips_mileage_analytics(from_date="2026-10-21", timeframe="today"))
+        _, n_today_again = _call_at(stack, t1, lambda: fa.get_trips_mileage_analytics(timeframe="today"))
+        _, n_dates_again = _call_at(stack, t1, lambda: fa.get_trips_mileage_analytics(from_date="2026-10-21"))
+    assert (today["from_time"], today["to_time"]) == (int(_uae(2026, 10, 24, 0, 0, 0).timestamp()), int(t0.timestamp()))
+    assert (exact["from_time"], exact["to_time"]) == (x, y), "explicit bounds must not be answered by the 'today' entry"
+    assert (other["from_time"], other["to_time"]) == (x, y + 3600), "a different explicit window must not collide"
+    assert (with_date["from_time"], with_date["to_time"]) == (x, y), "explicit bounds win over from_date"
+    assert dates["from_time"] == int(_uae(2026, 10, 21, 0, 0, 0).timestamp()), "from_date wins over timeframe"
+    assert (n_today, n_exact, n_other, n_with_date, n_dates) == (1, 1, 1, 0, 1), \
+        (n_today, n_exact, n_other, n_with_date, n_dates)
+    assert (n_today_again, n_dates_again) == (0, 0), "each window is still served from its own cache entry"
+
+    # Route: rolling timeframes keep their cache (the route passes the caller's bounds, not resolved ones)
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine())
+        route = lambda **kw: main.api_fleet_trips(**{**dict(hours=24, from_time=None, to_time=None, timeframe=None,
+                                                             from_date=None, to_date=None), **kw})
+        _, n1 = _call_at(stack, t0, lambda: route(timeframe="24h"))
+        _, n2 = _call_at(stack, t1, lambda: route(timeframe="24h"))
+        res, n3 = _call_at(stack, t1, lambda: route(timeframe="24h", from_time=x, to_time=y))
+    assert (n1, n2, n3) == (1, 0, 1), (n1, n2, n3)
+    assert (res["from_time"], res["to_time"]) == (x, y)
+    print("[PASS] /api/fleet/trips cache key: explicit bounds > from_date > timeframe, as the resolver; distinct "
+          "windows never collide; rolling '24h' still cached through the route.")
+
+
+def test_rolling_timeframe_cache_unchanged():
+    t0, t1 = _uae(2026, 10, 24, 12, 0, 0), _uae(2026, 10, 24, 12, 0, 20)
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine())
+        call = lambda: main.get_dashboard_mileage(timeframe="24h", from_time=None, to_time=None, from_date=None,
+                                                  to_date=None, group_id=None)
+        _, n1 = _call_at(stack, t0, call)
+        _, n2 = _call_at(stack, t1, call)
+    assert (n1, n2) == (1, 0), (n1, n2)
+    print("[PASS] Rolling '24h' window: still served from cache within its TTL (key not tied to a moving start).")
+
+
 def main_() -> int:
     guard = OfflineGuard().start()
     tests = [
@@ -226,6 +423,12 @@ def main_() -> int:
         test_utilization_guessed_column_and_missing_row,
         test_idle_guessed_column_and_missing_row,
         test_unit_routes_guessed_columns,
+        test_dashboard_mileage_duplicate_names_unknown,
+        test_dashboard_mileage_duplicate_name_outside_group,
+        test_dashboard_mileage_unique_names_still_cached,
+        test_calendar_cache_rolls_over_at_uae_midnight,
+        test_fleet_trips_cache_key_follows_resolver_precedence,
+        test_rolling_timeframe_cache_unchanged,
     ]
     passed = 0
     try:

@@ -32,6 +32,15 @@ SUPPORTED_TIMEFRAMES = {
     "odometer",
 }
 
+# Timeframes whose window rolls back from the current time. Every other timeframe starts at a UAE calendar
+# boundary (midnight, Monday, the 1st, Jan 1st), which moves only when that boundary passes.
+ROLLING_TIMEFRAMES = {
+    "7d", "last_1_week", "1w",
+    "30d", "last_1_month", "1m",
+    "365d", "last_1_year", "1y",
+    "24h", "last_24_hours", "24_hours",
+}
+
 
 def get_uae_now() -> datetime:
     """Return current timezone-aware datetime in UAE time (Asia/Dubai)."""

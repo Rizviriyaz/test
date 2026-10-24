@@ -98,7 +98,9 @@ export async function getDashboardMileage(timeframe = "today", options = {}) {
     if (options.group_id) params.append("group_id", options.group_id)
 
     const url = `${API_URL}/api/dashboard/mileage?${params.toString()}`
-    return deduplicatedFetch(url, options, 30000)
+    // No client cache: the URL ("timeframe=today") does not change at UAE midnight, so a cached response could
+    // answer for the previous day. Concurrent callers still share one request; the backend caches per window.
+    return deduplicatedFetch(url, options, 0)
 }
 
 export async function getDashboardTrends(hours = 24, options = {}) {

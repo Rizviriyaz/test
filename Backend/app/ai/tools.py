@@ -9,7 +9,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from app.wialon import login, get_vehicle_history
+from app.wialon import WialonAPIError, login, get_vehicle_history
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity
 from app.utils.datetime_helpers import UAE_TZ
@@ -279,6 +279,10 @@ def tool_get_vehicle_trips(vehicle_id: int, hours: int = 24) -> dict:
     }
     if unknown_distance:
         result["note"] = "Some trip distances could not be read from Wialon (null); say they are unknown."
+    if "row_shape" in (rep.get("incomplete_fields") or []):
+        # A malformed trip row Wialon sent was dropped: it is in neither the trips list nor trip_count
+        result["note"] = (result.get("note", "") + " Some Wialon trip rows could not be read and were dropped, so "
+                          "trip_count may be incomplete (a lower bound); say so.").strip()
     return result
 
 
@@ -323,7 +327,38 @@ def tool_get_vehicle_deep_analytics(vehicle_id, hours: int = 24) -> dict:
     vid = target.get("id") if target else None
     if not vid:
         return {"found": False, "vehicle_id": vehicle_id}
-    return get_single_vehicle_deep_analytics(vehicle_id=vid, hours=hours)
+    result = get_single_vehicle_deep_analytics(vehicle_id=vid, hours=hours)
+    if not result.get("found"):
+        return result
+    # The analytics' distance is segmented from raw messages, a different measurement from the Wialon Trips Report
+    # every other mileage figure uses: it is renamed so it cannot be read as that mileage, and the Trips Report
+    # distance is added. A copy: the analytics result is cached and shared.
+    metrics = dict(result.get("metrics_24h") or {})
+    metrics.pop("distance_source", None)
+    metrics["message_segmented_distance_km"] = metrics.pop("distance_km", None)
+    metrics["trips_report_distance_km"] = _trips_report_distance_km(sid, vid, hours)
+    return dict(
+        result,
+        metrics_24h=metrics,
+        note=(
+            "Quote trips_report_distance_km as the vehicle's distance (Wialon Trips Report); null means unknown, "
+            "say so. message_segmented_distance_km, trips_count and trips[] are segmented from raw GPS messages "
+            "and can differ from the Trips Report: never present them as the vehicle's mileage."
+        ),
+    )
+
+
+def _trips_report_distance_km(sid: str, vehicle_id: int, hours: int):
+    """Wialon Trips Report distance over the last `hours`; None when the report failed or any distance is unknown."""
+    window_to = int(time.time())
+    try:
+        rep = execute_wialon_unit_trips_report(sid, vehicle_id, window_to - hours * 3600, window_to)
+    except WialonAPIError as exc:
+        logging.warning("Trips report failed for vehicle %s; AI distance unknown: %s", vehicle_id, exc)
+        return None
+    if "distance_km" in (rep.get("incomplete_fields") or []) + (rep.get("unlocated_fields") or []):
+        return None
+    return round(sum(t.get("distance_km") or 0.0 for t in rep.get("trips", [])), 2)
 
 
 # ─── Groq Tool Schemas (JSON Schema) ──────────────────────────────────────────
@@ -428,7 +463,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicle_deep_analytics",
-            "description": "Get deep analytics for a vehicle: health score, battery, GPS quality, 24h distance, trips, and engine hours.",
+            "description": "Get deep analytics for a vehicle: health score, battery, GPS quality, 24h distance (trips_report_distance_km, from the Wialon Trips Report), trips, and engine hours.",
             "parameters": {
                 "type": "object",
                 "properties": {

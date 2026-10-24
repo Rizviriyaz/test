@@ -3,7 +3,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { PARTIAL_EVENTS_NOTE, compareKnownDesc, idleSecondsOf, partialEventsNote, sumKnown, tripDistanceOf } from "./knownTotals.js"
+import { PARTIAL_EVENTS_NOTE, compareKnownDesc, formatKm, idleSecondsOf, partialEventsNote, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "./knownTotals.js"
 
 test("sumKnown keeps known values (including a recorded 0) and reports unknown ones", () => {
     const units = [{ mileage: 12.5 }, { mileage: null }, { mileage: 0 }, { mileage: undefined }, { mileage: 7.5 }]
@@ -67,6 +67,24 @@ test("dashboard no longer coerces nullable idle/mileage with || 0 or ?? 0 fallba
     assert.doesNotMatch(drawer, /Number\(t\.distance_km \|\| 0\)/)
 })
 
+test("formatKm: one shared display for a mileage value; unknown stays unknown", () => {
+    assert.equal(formatKm(268.6), "268.6 km")
+    assert.equal(formatKm(268.64), "268.6 km")
+    assert.equal(formatKm(1234.56), "1,234.6 km")
+    assert.equal(formatKm(0), "0.0 km")
+    assert.equal(formatKm(null), null)
+    assert.equal(formatKm(undefined), null)
+})
+
+test("mileage chart and vehicle drawer show the same Wialon value the same way", () => {
+    const dashboard = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
+    // A whole-km chart value (269) disagreed with the drawer (268.6) for the same unit and day
+    assert.doesNotMatch(dashboard, /mileage: isKnownNumber\(u\.mileage\) \? Math\.round/)
+    assert.match(dashboard, /formatter=\{\(val\) => \[formatKm\(val\) \?\? "Unknown \(unreadable\)", "Mileage"\]\}/)
+    const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
+    assert.match(drawer, /formatKm\(todayDistance\) \?\? "—"/)
+})
+
 test("partialEventsNote flags incomplete idle events and stays silent when complete or absent", () => {
     assert.equal(partialEventsNote({ events_complete: false }), PARTIAL_EVENTS_NOTE)
     assert.equal(partialEventsNote({ events_complete: true }), null)
@@ -95,4 +113,40 @@ test("Vehicle drawer marks partial or failed idle events instead of a definitive
         "only today's full event list is handed to the drawer (never the events-free summary)")
     assert.match(page, /idleEventsComplete=\{drawerEventsComplete\}/)
     assert.match(page, /vehicle=\{drawerVehicleWithLive\}/, "live status comes from by_vehicle, not the event row")
+})
+
+test("tripsDistanceIncomplete: a dropped malformed trip row makes the listed trips' sum partial", () => {
+    // Every listed trip is readable, but the backend dropped a malformed row: the sum alone looks complete
+    const tripsData = { trips: [{ distance_km: 10 }, { distance_km: 5 }], incomplete_fields: ["distance_km", "row_shape"] }
+    assert.equal(sumKnown(tripsData.trips, tripDistanceOf).partial, false)
+    assert.equal(tripsDistanceIncomplete(tripsData), true)
+    assert.equal(tripsDistanceIncomplete({ trips: [], incomplete_fields: [] }), false)
+    assert.equal(tripsDistanceIncomplete({ trips: [] }), false)
+    assert.equal(tripsDistanceIncomplete(null), false)
+})
+
+test("Vehicle drawer shows the partial note when the trips response flags distance_km incomplete", () => {
+    const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
+    assert.match(drawer, /const distanceIncomplete = currentVehicle\.today_mileage == null && tripsDistanceIncomplete\(tripsData\)/)
+    assert.match(drawer, /\(distanceIncomplete \? "Partial: some Wialon trip rows could not be read" : null\)/)
+    assert.match(drawer, /hint=\{!loadingTrips \? distanceHint : null\}/)
+})
+
+test("tripsDistanceKm: no readable trip distance is unknown (null), never 0 km", () => {
+    // Every Wialon trip row was malformed and dropped: an empty list flagged incomplete is unknown, not 0.0 km
+    assert.equal(tripsDistanceKm({ trips: [], trip_count: 0, incomplete_fields: ["row_shape", "distance_km"] }), null)
+    // Every listed trip's distance unreadable
+    assert.equal(tripsDistanceKm({ trips: [{ distance_km: null, incomplete_fields: ["distance_km"] }], incomplete_fields: ["distance_km"] }), null)
+    // Some rows dropped, others readable: the known sum is kept (the drawer marks it partial)
+    assert.equal(tripsDistanceKm({ trips: [{ distance_km: 10 }, { distance_km: 5 }], incomplete_fields: ["distance_km", "row_shape"] }), 15)
+    // Complete data: a legitimate zero stays 0 km
+    assert.equal(tripsDistanceKm({ trips: [], trip_count: 0, incomplete_fields: [] }), 0)
+    assert.equal(tripsDistanceKm({ trips: [{ distance_km: 0 }], incomplete_fields: [] }), 0)
+    assert.equal(tripsDistanceKm(null), null)
+})
+
+test("Vehicle drawer takes its trips distance from tripsDistanceKm and shows — for unknown", () => {
+    const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
+    assert.match(drawer, /const tripsDistance = tripsDistanceKm\(tripsData\)/)
+    assert.doesNotMatch(drawer, /total_distance_km \?\? \(tripsData \? 0 : null\)/)
 })

@@ -38,6 +38,32 @@ export function tripDistanceOf(trip) {
     return isKnownNumber(trip.distance_km) ? Number(trip.distance_km) : null
 }
 
+// True when a vehicle trips response flags its distance incomplete as a whole (top-level `incomplete_fields`), e.g.
+// a malformed trip row Wialon sent was dropped: the listed trips' sum is then partial even if every trip is known
+export function tripsDistanceIncomplete(tripsData) {
+    return (tripsData?.incomplete_fields || []).includes("distance_km")
+}
+
+// Distance in km of a vehicle trips response, or null when unknown: no readable trip distance at all (every listed
+// trip unreadable, or every row dropped as malformed) is unknown, never 0 km. A complete empty trip list is 0 km.
+export function tripsDistanceKm(tripsData) {
+    if (!tripsData) return null
+    const trips = tripsData.trips || []
+    if (trips.length > 0) {
+        const sum = sumKnown(trips, tripDistanceOf)
+        return sum.allUnknown ? null : sum.total
+    }
+    if (tripsDistanceIncomplete(tripsData)) return null
+    return tripsData.summary?.total_distance_km ?? 0
+}
+
+// Distance for display ("268.6 km"), or null when unknown. The mileage chart and the vehicle drawer both use it,
+// so the same Wialon value never reads differently (e.g. 269 vs 268.6) between them.
+export function formatKm(value) {
+    if (!isKnownNumber(value)) return null
+    return `${Number(value).toLocaleString("en-US", { minimumFractionDigits: 1, maximumFractionDigits: 1 })} km`
+}
+
 // Sort comparator: known values descending, unknown values last
 export function compareKnownDesc(a, b) {
     const ka = isKnownNumber(a)
