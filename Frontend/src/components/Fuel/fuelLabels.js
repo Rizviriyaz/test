@@ -76,3 +76,16 @@ export const TREND_STATUS_LABELS = {
     non_positive_net_fuel: "Refunds exceed purchases",
     unavailable: "Distance unavailable",
 }
+
+// Skipped rows of an import result, preview or history record. Older history records have null counts
+// (not recorded): returns "" rather than claiming 0 skipped rows.
+export function skippedRowsLabel(record) {
+    const ignored = record?.rows_ignored
+    if (ignored === null || ignored === undefined || !(Number(ignored) > 0)) return ""
+    const nonFuel = Number(record?.rows_non_fuel) || 0
+    const other = Number(ignored) - nonFuel
+    const parts = []
+    if (other > 0) parts.push(`${other} blank/summary`)
+    if (nonFuel > 0) parts.push(`${nonFuel} non-fuel payments/charges`)
+    return `${parts.join(", ")} skipped`
+}

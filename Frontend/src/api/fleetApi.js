@@ -389,6 +389,16 @@ export async function getFuelImports(limit = 50, offset = 0) {
     return response.json()
 }
 
+// Recounts one import from its stored transactions and fixes its history record (inserts/deletes nothing)
+export async function reconcileFuelImport(importId) {
+    const response = await apiFetch(`${API_URL}/api/fuel/imports/${encodeURIComponent(importId)}/reconcile`, {
+        method: "POST",
+    })
+    const result = await response.json()
+    clearClientCache("/api/fuel/")
+    return result
+}
+
 export async function getFuelWaste(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/waste${buildFuelQueryString(params)}`, options, 30000)
 }

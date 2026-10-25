@@ -119,6 +119,13 @@ CANONICAL_FIELDS: Dict[str, Dict[str, any]] = {
             "description", "memo"
         ],
     },
+    "transaction_type": {
+        "required": False,
+        "description": "Statement entry type (e.g. Purchase, Payment, ServiceCharge); used to skip non-fuel entries, not stored",
+        "aliases": [
+            "transaction type", "txn type", "trans type", "entry type", "transaction category"
+        ],
+    },
 }
 
 REQUIRED_FIELDS = [k for k, v in CANONICAL_FIELDS.items() if v["required"]]

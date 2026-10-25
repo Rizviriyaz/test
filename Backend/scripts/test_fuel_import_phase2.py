@@ -58,7 +58,7 @@ def run_phase2_tests():
     mock_db_transactions = []
     mock_import_counter = [100]
 
-    def mock_create_import_record(file_name, imported_by, rows_found, bearer_token=None):
+    def mock_create_import_record(file_name, imported_by, rows_found, bearer_token=None, **_kwargs):
         mock_import_counter[0] += 1
         new_id = mock_import_counter[0]
         mock_db_imports[new_id] = {
@@ -74,13 +74,13 @@ def run_phase2_tests():
         }
         return new_id
 
-    def mock_update_import_record(import_id, updates, bearer_token=None):
+    def mock_update_import_record(import_id, updates, bearer_token=None, **_kwargs):
         if import_id in mock_db_imports:
             mock_db_imports[import_id].update(updates)
             return True
         return False
 
-    def mock_fetch_existing_fingerprints(date_from=None, date_to=None, bearer_token=None):
+    def mock_fetch_existing_fingerprints(date_from=None, date_to=None, bearer_token=None, **_kwargs):
         fps = set()
         for t in mock_db_transactions:
             fps.add(build_fingerprint(
@@ -93,7 +93,7 @@ def run_phase2_tests():
             ))
         return fps
 
-    def mock_insert_transactions_batch(transactions, batch_size=100, bearer_token=None):
+    def mock_insert_transactions_batch(transactions, batch_size=100, bearer_token=None, **_kwargs):
         start_id = len(mock_db_transactions) + 1
         for idx, t in enumerate(transactions, start=start_id):
             record = dict(t)
@@ -149,7 +149,7 @@ def run_phase2_tests():
         "invoice_number": "Invoice",
     }
 
-    with patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=mock_insert_transactions_batch), \
@@ -208,7 +208,7 @@ def run_phase2_tests():
             ["2026-03-07", "AUH 44120", "-15.0"],      # Negative litres: refund adjustment (Phase 1)
         ]
     )
-    with patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=mock_insert_transactions_batch), \
@@ -241,7 +241,7 @@ def run_phase2_tests():
             ["2026-03-01", "DXB 10293", "35.0", "108.50", "INV-009", "120450"],
         ]
     )
-    with patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=mock_insert_transactions_batch), \
@@ -275,7 +275,7 @@ def run_phase2_tests():
         headers=["Date", "Vehicle", "Litres"],
         rows=[["bad_date", "v1", "bad_litres"]]
     )
-    with patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=mock_insert_transactions_batch), \
@@ -315,7 +315,7 @@ def run_phase2_tests():
          patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", side_effect=mock_fetch_for_analytics), \
          patch("app.fuel.routes.login", return_value="mock-sid"), \
          patch("app.fuel.routes.get_all_vehicles", side_effect=mock_wialon_units), \
-         patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
+         patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints", side_effect=mock_fetch_existing_fingerprints), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=mock_insert_transactions_batch), \

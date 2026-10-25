@@ -42,12 +42,12 @@ def xlsx(rows):
 
 def run_import(flag, insert_v2_result=None, sha_hit=None):
     create = MagicMock(return_value=77)
-    insert = MagicMock(side_effect=lambda transactions, batch_size=100, bearer_token=None: (len(transactions), []))
-    insert_v2 = MagicMock(side_effect=insert_v2_result or (lambda group, batch_size=100, bearer_token=None: (len(group), 0, [])))
+    insert = MagicMock(side_effect=lambda transactions, batch_size=100, bearer_token=None, **_: (len(transactions), []))
+    insert_v2 = MagicMock(side_effect=insert_v2_result or (lambda group, batch_size=100, bearer_token=None, **_: (len(group), 0, [])))
     find = MagicMock(return_value=sha_hit)
     env = {"FUEL_SCHEMA_V2": "1"} if flag else {"FUEL_SCHEMA_V2": ""}
     with patch.dict(os.environ, env), \
-         patch("app.fuel.importer.create_fuel_import_record", create), \
+         patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
          patch("app.fuel.importer.update_fuel_import_record", return_value=True), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", insert), \
          patch("app.fuel.importer.insert_fuel_transactions_ignore_duplicates", insert_v2), \
@@ -93,7 +93,7 @@ def test_on_conflict_counts_from_returned_rows():
     assert post.call_args.kwargs["params"] == {"on_conflict": "fingerprint"}
     assert "ignore-duplicates" in post.call_args.kwargs["headers"]["Prefer"]
     calls = []
-    res, *_ = run_import(True, insert_v2_result=lambda group, batch_size=100, bearer_token=None: (0, len(group), []) if not calls.append(1) and len(calls) == 1 else (len(group), 0, []))
+    res, *_ = run_import(True, insert_v2_result=lambda group, batch_size=100, bearer_token=None, **_: (0, len(group), []) if not calls.append(1) and len(calls) == 1 else (len(group), 0, []))
     assert res.rows_duplicate == 1, res.rows_duplicate
     print("[PASS] on_conflict=fingerprint: rows the database skipped are counted as duplicates (from returned rows).")
 

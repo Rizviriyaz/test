@@ -114,7 +114,7 @@ class FakePostgrest:
         stored_utc = wall.replace(tzinfo=self.session_tz).astimezone(timezone.utc)
         return stored_utc.astimezone(self.session_tz).isoformat()
 
-    def insert(self, transactions, batch_size=100, bearer_token=None):
+    def insert(self, transactions, batch_size=100, bearer_token=None, **_kwargs):
         if self.reject_negative_litres and any(t["litres"] < 0 for t in transactions):
             return 0, ["Batch 1 failed: HTTP 400"]
         for t in transactions:
@@ -171,7 +171,7 @@ class FakePostgrest:
 def run_import(fake, rows, mapping=MAPPING, headers=HEADERS):
     """Run the real importer + real fingerprint fetch against the fake table."""
     create = MagicMock(side_effect=lambda **kw: 500 + len(fake.rows))
-    with patch("app.fuel.importer.create_fuel_import_record", create), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
          patch("app.fuel.importer.update_fuel_import_record", return_value=True), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=fake.insert), \
          patch("app.fuel.importer.resolve_fleet_vehicles", side_effect=AssertionError("must not be called")) as resolve, \
@@ -421,8 +421,9 @@ def test_import_refused_when_duplicate_check_unavailable():
     fake.fail_get_on_call = 1
     inserted = MagicMock(return_value=(0, []))
     create = MagicMock(return_value=1)
-    with patch("app.fuel.importer.create_fuel_import_record", create), \
-         patch("app.fuel.importer.update_fuel_import_record", return_value=True), \
+    update = MagicMock(return_value=True)
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
+         patch("app.fuel.importer.update_fuel_import_record", update), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", inserted), \
          patch("app.fuel.db._session.get", side_effect=fake.get):
         try:
@@ -431,20 +432,25 @@ def test_import_refused_when_duplicate_check_unavailable():
             raise AssertionError("expected FuelImportError")
         except FuelImportError as exc:
             assert exc.status_code == 503 and "Nothing was imported" in exc.message
-    assert not create.called and not inserted.called
+    # The record is created (and the import claimed) before the duplicate check, then closed as failed with zero rows
+    assert create.called and not inserted.called
+    closed = update.call_args.kwargs["updates"]
+    assert closed["status"] == "failed" and closed["rows_imported"] == 0 and "Nothing was imported" in closed["error_message"]
     assert fake.get_calls[0]["and"] == "(transaction_date.gte.2026-03-04T00:00:00,transaction_date.lte.2026-03-06T23:59:59.999999)"
 
     client = TestClient(app)
     fake2 = FakePostgrest("timestamp")
     fake2.fail_get_on_call = 1
     with patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
-         patch("app.fuel.importer.create_fuel_import_record", create), \
+         patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
+         patch("app.fuel.importer.update_fuel_import_record", update), \
+         patch("app.fuel.importer.insert_fuel_transactions_batch", inserted), \
          patch("app.fuel.db._session.get", side_effect=fake2.get):
         r = client.post("/api/fuel/import", headers=AUTH, data={"mapping": json.dumps(MAPPING)},
                         files={"file": ("x.xlsx", make_xlsx([["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, None, None]]))})
     assert r.status_code == 503, r.text
-    assert not create.called
-    print("[PASS] Import refused with 503 and zero writes when the duplicate check cannot complete; window = file dates ±1 day.")
+    assert not inserted.called and update.call_args.kwargs["updates"]["status"] == "failed"
+    print("[PASS] Import refused with 503 and no transaction writes when the duplicate check cannot complete (record closed as failed); window = file dates ±1 day.")
 
 
 # ─── 4. Refunds, sign rules, warnings, derived values ──────────────────────────

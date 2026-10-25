@@ -16,8 +16,13 @@ class FuelImportPreviewResponse(BaseModel):
     worksheet_name: str
     detected_header_row: int
     rows_found: int
-    rows_candidate: int
-    rows_ignored: int
+    rows_candidate: int = Field(..., description="Rows that will be validated as fuel transactions (rows_fuel + rows_invalid)")
+    rows_ignored: int = Field(..., description="Blank, summary/total and non-fuel rows skipped, as the import counts them")
+    rows_fuel: Optional[int] = Field(None, description="Valid fuel transaction rows (before the duplicate check); null when required columns are unmapped")
+    rows_invalid: Optional[int] = Field(None, description="Rows the import will report as failed; null when required columns are unmapped")
+    rows_non_fuel: int = Field(0, description="Part of rows_ignored: payments, charges or fees without litres")
+    invalid_row_details: Optional[List[Dict[str, Any]]] = Field(None, description="Source row and reason of invalid rows (capped)")
+    non_fuel_row_details: Optional[List[Dict[str, Any]]] = Field(None, description="Source row and reason of non-fuel rows (capped)")
     detected_columns: List[str]
     suggested_mapping: Dict[str, Optional[str]]
     mapping_details: List[HeaderMappingItem]
@@ -35,6 +40,11 @@ class FuelImportResultResponse(BaseModel):
     rows_imported: int
     rows_duplicate: int
     rows_failed: int
+    rows_unverified: int = Field(0, description="Rows sent whose write outcome is unknown (they may be stored); not counted as failed. Reconcile counts them later")
+    rows_not_processed: int = Field(0, description="Rows never sent because the request time limit was reached; re-import the file to add them")
+    rows_ignored: int = Field(0, description="Blank, repeated-header, summary/total or non-fuel rows skipped; with the counts above they add up to rows_found")
+    rows_non_fuel: int = Field(0, description="Part of rows_ignored: statement entries typed as payments, charges or fees with no litres")
+    ignored_row_details: Optional[List[Dict[str, Any]]] = Field(None, description="Source row and reason of skipped non-fuel rows (capped)")
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     error_message: Optional[str] = None
@@ -62,6 +72,9 @@ class FuelImportItem(BaseModel):
     rows_imported: int
     rows_duplicate: int
     rows_failed: int
+    # Stored only after Backend/sql/fuel_imports_ignored_counts.sql (FUEL_IMPORT_IGNORED_COUNTS=1); null for older records
+    rows_ignored: Optional[int] = None
+    rows_non_fuel: Optional[int] = None
     date_from: Optional[str] = None
     date_to: Optional[str] = None
     error_message: Optional[str] = None

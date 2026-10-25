@@ -25,7 +25,7 @@ from app.fuel.db import (
     get_fuel_transactions_list,
 )
 from app.fuel import classification
-from app.fuel.importer import FuelImportError, execute_fuel_import, generate_fuel_preview
+from app.fuel.importer import FuelImportError, execute_fuel_import, generate_fuel_preview, reconcile_fuel_import
 from app.fuel.scope import (
     EXCLUDED_REASONS,
     NO_TRANSACTIONS_WARNING,
@@ -280,6 +280,7 @@ async def import_fuel_statement(
             confirmed_mapping,
             imported_by,
             bearer_token,
+            getattr(request.state, "started", None),
         )
         return import_result
 
@@ -316,6 +317,22 @@ async def list_fuel_imports(
         count=len(records),
         imports=[FuelImportItem(**r) for r in records],
     )
+
+
+@router.post(
+    "/imports/{import_id}/reconcile",
+    response_model=FuelImportItem,
+    summary="Reconcile a fuel import with the stored transactions",
+    description="Recounts the transactions stored under one import and writes the corrected counts and a terminal status to its history record (e.g. an import left 'processing' by an interrupted run). Inserts and deletes nothing.",
+)
+async def reconcile_import(request: Request, import_id: int):
+    """Requires an import role, like the import itself."""
+    _require_fuel_import_role(request)
+    try:
+        record = await run_in_threadpool(reconcile_fuel_import, import_id, _get_bearer_token(request))
+    except FuelImportError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message)
+    return FuelImportItem(**record)
 
 
 async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],

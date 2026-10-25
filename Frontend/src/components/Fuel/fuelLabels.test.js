@@ -2,7 +2,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels.js"
+import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel } from "./fuelLabels.js"
 import { compactTick, formatTrendPoint } from "./telemetryFormat.js"
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
@@ -123,4 +123,15 @@ test("idle waste is not a confident zero when Wialon idle data is unavailable or
     assert.match(waste, /effective_idle_threshold_hours/)
     const gauge = read("./FleetEfficiencyGauge.jsx")
     assert.match(gauge, /if \(!efficiencyData\)/, "no response renders an unavailable state, not zero counts")
+})
+
+test("skippedRowsLabel separates non-fuel rows and treats unrecorded (legacy) counts as unknown", () => {
+    assert.equal(skippedRowsLabel({ rows_ignored: 6, rows_non_fuel: 6 }), "6 non-fuel payments/charges skipped")
+    assert.equal(skippedRowsLabel({ rows_ignored: 8, rows_non_fuel: 6 }), "2 blank/summary, 6 non-fuel payments/charges skipped")
+    assert.equal(skippedRowsLabel({ rows_ignored: 2 }), "2 blank/summary skipped")
+    assert.equal(skippedRowsLabel({ rows_ignored: 0, rows_non_fuel: 0 }), "")
+    // History records written before fuel_imports_ignored_counts.sql
+    assert.equal(skippedRowsLabel({ rows_ignored: null, rows_non_fuel: null }), "")
+    assert.equal(skippedRowsLabel({ rows_imported: 5 }), "")
+    assert.equal(skippedRowsLabel(null), "")
 })

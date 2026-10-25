@@ -139,6 +139,8 @@ async def require_supabase_auth(request: Request, call_next):
     trace_id = new_trace_id() if tracked_path else "-"
     trace_token = request_trace_id.set(trace_id)
     request_started = time.perf_counter()
+    # Request entry for time budgets (the fuel import counts upload parsing and its lock wait against it)
+    request.state.started = request_started
     if tracked_path:
         logging.debug("PERF request start request_id=%s method=%s path=%s", trace_id, request.method, request.url.path)
     response = None

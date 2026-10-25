@@ -107,7 +107,7 @@ def _run_with_failing_batches(v2):
     batch_v2 = MagicMock(return_value=(0, 0, ["Batch 1 failed: HTTP 400"]))
     rows = [ROW, ["2026-03-05 11:00:00", "AUH 44120", 60, 3.0, 180, "INV-3", None]]
     with patch.dict(os.environ, {"FUEL_SCHEMA_V2": "1" if v2 else ""}), \
-         patch("app.fuel.importer.create_fuel_import_record", create), \
+         patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
          patch("app.fuel.importer.update_fuel_import_record", update), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", batch), \
          patch("app.fuel.importer.insert_fuel_transactions_ignore_duplicates", batch_v2), \
@@ -129,7 +129,7 @@ def test_failed_batch_rows_counted_as_failed():
 
 def test_history_update_failure_is_warned():
     fake = FakePostgrest("timestamp")
-    with patch("app.fuel.importer.create_fuel_import_record", return_value=77), \
+    with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", return_value=77), \
          patch("app.fuel.importer.update_fuel_import_record", return_value=False), \
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=fake.insert), \
          patch("app.fuel.db._session.get", side_effect=fake.get):

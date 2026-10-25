@@ -22,6 +22,7 @@ import {
     previewFuelImport,
     executeFuelImport,
     getFuelImports,
+    reconcileFuelImport,
     getFuelWaste,
     clearClientCache,
 } from "../api/fleetApi"
@@ -34,7 +35,7 @@ import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
 import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
-import { fixedOrDash, sortOrderLabels } from "../components/Fuel/fuelLabels"
+import { fixedOrDash, skippedRowsLabel, sortOrderLabels } from "../components/Fuel/fuelLabels"
 import { formatUAEDateTime } from "../utils/datetime"
 
 const SORT_OPTIONS = [
@@ -104,6 +105,8 @@ export default function FuelPerformance() {
     const [history, setHistory] = useState([])
     const [loadingHistory, setLoadingHistory] = useState(false)
     const [historyError, setHistoryError] = useState(null)
+    const [reconcilingId, setReconcilingId] = useState(null)
+    const [reconcileError, setReconcileError] = useState(null)
 
     const fileInputRef = useRef(null)
 
@@ -251,6 +254,21 @@ export default function FuelPerformance() {
         return () => document.removeEventListener("keydown", onKey)
     }, [isImportModalOpen])
 
+    // Recount an interrupted or partly failed import from its stored rows (the backend inserts/deletes nothing)
+    const handleReconcile = async (importId) => {
+        try {
+            setReconcilingId(importId)
+            setReconcileError(null)
+            await reconcileFuelImport(importId)
+            await loadImportHistory()
+            setDataVersion((n) => n + 1)
+        } catch (err) {
+            setReconcileError(err?.message || "Could not reconcile the import.")
+        } finally {
+            setReconcilingId(null)
+        }
+    }
+
     const openImportModal = () => {
         setIsImportModalOpen(true)
         loadImportHistory()
@@ -301,6 +319,8 @@ export default function FuelPerformance() {
         } catch (err) {
             console.error("Import execution failed:", err)
             setImportError(err.message || "An error occurred while importing fuel statement.")
+            // Rows may have been stored before the error: show the history record and its Reconcile action
+            loadImportHistory()
         } finally {
             setImporting(false)
         }
@@ -762,6 +782,9 @@ export default function FuelPerformance() {
                                 </div>
                                 <p className="text-slate-700">
                                     {importResult.rows_imported} transactions imported • {importResult.rows_duplicate} duplicates skipped • {importResult.rows_failed} failed
+                                    {importResult.rows_unverified > 0 && ` • ${importResult.rows_unverified} unverified`}
+                                    {importResult.rows_not_processed > 0 && ` • ${importResult.rows_not_processed} not processed`}
+                                    {skippedRowsLabel(importResult) && ` • ${skippedRowsLabel(importResult)}`}
                                 </p>
                                 {importResult.error_message && (
                                     <p className="mt-1 text-rose-700">{importResult.error_message}</p>
@@ -833,16 +856,36 @@ export default function FuelPerformance() {
                                 <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 text-xs">
                                     <div className="flex items-center justify-between font-semibold text-slate-800 mb-2">
                                         <span>{previewData.file_name}</span>
-                                        <span className="text-emerald-700">{previewData.rows_candidate} valid rows detected</span>
+                                        <span className="text-emerald-700">
+                                            {previewData.rows_fuel ?? previewData.rows_candidate} {previewData.rows_fuel != null ? "fuel transactions detected" : "valid rows detected"}
+                                        </span>
                                     </div>
                                     <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
                                         <div className="rounded-md bg-white p-2 border border-slate-200">
                                             <span className="text-slate-400 block">Total Rows</span>
                                             <span className="font-semibold tabular-nums text-slate-800">{previewData.rows_found}</span>
                                         </div>
+                                        {previewData.rows_fuel != null && (
+                                            <>
+                                                <div className="rounded-md bg-white p-2 border border-slate-200">
+                                                    <span className="text-slate-400 block">Fuel Purchases</span>
+                                                    <span className="font-semibold tabular-nums text-emerald-700">{previewData.rows_fuel}</span>
+                                                </div>
+                                                <div className="rounded-md bg-white p-2 border border-slate-200">
+                                                    <span className="text-slate-400 block">Invalid</span>
+                                                    <span className={`font-semibold tabular-nums ${previewData.rows_invalid > 0 ? "text-rose-600" : "text-slate-500"}`}>{previewData.rows_invalid}</span>
+                                                </div>
+                                                <div className="rounded-md bg-white p-2 border border-slate-200">
+                                                    <span className="text-slate-400 block">Non-fuel Skipped</span>
+                                                    <span className="font-semibold tabular-nums text-slate-500">{previewData.rows_non_fuel ?? 0}</span>
+                                                </div>
+                                            </>
+                                        )}
                                         <div className="rounded-md bg-white p-2 border border-slate-200">
-                                            <span className="text-slate-400 block">Ignored</span>
-                                            <span className="font-semibold tabular-nums text-slate-500">{previewData.rows_ignored}</span>
+                                            <span className="text-slate-400 block">{previewData.rows_fuel != null ? "Blank/Summary" : "Ignored"}</span>
+                                            <span className="font-semibold tabular-nums text-slate-500">
+                                                {previewData.rows_fuel != null ? previewData.rows_ignored - (previewData.rows_non_fuel ?? 0) : previewData.rows_ignored}
+                                            </span>
                                         </div>
                                         <div className="rounded-md bg-white p-2 border border-slate-200">
                                             <span className="text-slate-400 block">Columns</span>
@@ -850,6 +893,17 @@ export default function FuelPerformance() {
                                         </div>
                                     </div>
                                 </div>
+
+                                {previewData.invalid_row_details?.length > 0 && (
+                                    <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
+                                        <p className="font-semibold mb-1">{previewData.rows_invalid} row(s) will fail validation and not be imported:</p>
+                                        <ul className="space-y-0.5">
+                                            {previewData.invalid_row_details.slice(0, 5).map((d) => (
+                                                <li key={d.source_row}>Row {d.source_row}: {d.reason}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
 
                                 {previewData.missing_required_fields?.length > 0 && (
                                     <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
@@ -905,6 +959,9 @@ export default function FuelPerformance() {
                                 </button>
                             </div>
 
+                            {reconcileError && (
+                                <div role="alert" className="mb-2 text-xs text-rose-600">{reconcileError}</div>
+                            )}
                             <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 text-xs">
                                 {loadingHistory ? (
                                     <div className="py-4 text-center text-slate-400">Loading history…</div>
@@ -928,6 +985,20 @@ export default function FuelPerformance() {
                                                 <span className="text-[11px] text-slate-500 block">
                                                     {h.status}
                                                 </span>
+                                                {skippedRowsLabel(h) && (
+                                                    <span className="text-[11px] text-slate-400 block">{skippedRowsLabel(h)}</span>
+                                                )}
+                                                {h.status !== "completed" && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleReconcile(h.id)}
+                                                        disabled={reconcilingId !== null}
+                                                        title="Recount this import from the transactions stored in the database"
+                                                        className="text-[11px] font-medium text-brand hover:underline disabled:opacity-50 cursor-pointer"
+                                                    >
+                                                        {reconcilingId === h.id ? "Reconciling…" : "Reconcile"}
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                     ))
