@@ -14,9 +14,14 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
-import { LIVE_STATUSES, countByStatus, normalizeVehicleStatus } from "../utils/vehicleStatus"
+import { LIVE_STATUSES, countByStatus, formatAge, isPositionStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function formatLastUpdate(vehicle) {
+    // A recent message with an old GPS fix: show the fix age, never "Just now"
+    if (isPositionStale(vehicle)) {
+        const fixAge = formatAge(vehicle.seconds_since_position)
+        return fixAge ? `GPS fix ${fixAge} ago` : "GPS fix stale"
+    }
     if (typeof vehicle.seconds_since_update === "number" && !isNaN(vehicle.seconds_since_update)) {
         const secs = vehicle.seconds_since_update
         if (secs < 60) return "Just now"

@@ -29,7 +29,7 @@ from app.wialon_reports import (
     parse_duration_to_seconds,
     GROUP_ID_ALL_UNITS
 )
-from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name
+from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name, parse_wialon_epoch
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
 from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS
 from app.utils.ttl_cache import TTLCache
@@ -156,7 +156,10 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
                 battery_level_label = f"Optimal ({voltage:.1f}V)"
 
     # Internal backup battery
-    prms = ((raw_unit or {}).get("lmsg") or {}).get("p") or {}
+    # A malformed (non-dict) last message is treated as absent, never a crash
+    raw_lmsg = (raw_unit or {}).get("lmsg")
+    raw_lmsg = raw_lmsg if isinstance(raw_lmsg, dict) else {}
+    prms = raw_lmsg.get("p") or {}
     if not prms and calc_data:
         prms = calc_data.get("prms") or {}
     pwr_int = prms.get("pwr_int")
@@ -180,13 +183,17 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 
     # Connectivity
     pos_data = (calc_data or {}).get("pos") or (raw_unit or {}).get("pos") or {}
-    last_msg_ts = ((raw_unit or {}).get("lmsg") or {}).get("t") or pos_data.get("t")
+    # Last message time, else the position time (as before), parsed like the live view: missing or malformed is None
+    # (OFFLINE, unknown age), never a crash of the fleet health, alerts or deep-analytics response
+    last_msg_ts = parse_wialon_epoch(raw_lmsg.get("t"))
+    if last_msg_ts is None and isinstance(pos_data, dict):
+        last_msg_ts = parse_wialon_epoch(pos_data.get("t"))
     now_ts = int(time.time())
 
     conn_status = "STABLE"
     seconds_since_update = 0
-    if last_msg_ts:
-        seconds_since_update = max(0, now_ts - int(last_msg_ts))
+    if last_msg_ts is not None:
+        seconds_since_update = max(0, now_ts - last_msg_ts)
         if seconds_since_update > HEALTH_THRESHOLDS["CONN_DELAYED_SECONDS"]:
             conn_status = "OFFLINE"
         elif seconds_since_update > HEALTH_THRESHOLDS["CONN_STABLE_SECONDS"] and vehicle.get("last_known_status") != "STOPPED":
@@ -220,6 +227,14 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
     elif conn_status == "DELAYED":
         score -= 15
 
+    # R2: last seen MOVING with a GPS fix older than CONN_STABLE_SECONDS although messages are recent (the live
+    # record's position_stale). The satellites describe that old fix, so GPS quality is STALE, with the same -15 as a
+    # delayed connection. Not applied when the connection is already DELAYED/OFFLINE (no double penalty); a unit last
+    # seen STOPPED or IDLING is never position_stale (D3).
+    if vehicle.get("position_stale") is True and conn_status == "STABLE":
+        gps_status = "STALE"
+        score -= 15
+
     health_score = max(0, min(100, score))
 
     return {
@@ -242,6 +257,8 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
             "status": gps_status,
             "latitude": loc.get("latitude"),
             "longitude": loc.get("longitude"),
+            "position_timestamp": vehicle.get("position_timestamp"),
+            "seconds_since_position": vehicle.get("seconds_since_position"),
         },
         "connectivity": {
             "status": conn_status,
@@ -289,7 +306,7 @@ def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
         if ev["battery"]["status"] in ["WARNING", "CRITICAL"]:
             battery_warnings += 1
             has_issue = True
-        if ev["gps"]["status"] == "WEAK":
+        if ev["gps"]["status"] in ("WEAK", "STALE"):
             gps_warnings += 1
             has_issue = True
         if ev["connectivity"]["status"] in ["DELAYED", "OFFLINE"]:
@@ -1103,6 +1120,24 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
                 "message": f"{v['vehicle_name']} has degraded GPS accuracy with only {sats} satellites locked.",
                 "value": f"{sats} sats",
                 "timestamp": v["connectivity"]["last_message_ts"],
+                "location": {"latitude": v["gps"]["latitude"], "longitude": v["gps"]["longitude"]}
+            })
+            alert_counter += 1
+        elif v["gps"]["status"] == "STALE":
+            pos_sec = v["gps"].get("seconds_since_position")
+            mins_old = (pos_sec // 60) if pos_sec is not None else "—"
+            alerts.append({
+                "id": f"alt-{alert_counter}",
+                "vehicle_id": v["vehicle_id"],
+                "vehicle_name": v["vehicle_name"],
+                "group": v["group"],
+                "severity": "WARNING",
+                "alert_type": "GPS_POSITION_STALE",
+                "title": f"GPS Position Stale ({mins_old}m old)",
+                "message": f"{v['vehicle_name']} was last seen moving, but its last GPS fix is {mins_old} minutes old "
+                           f"although messages are recent. Its position and speed are not current.",
+                "value": f"{mins_old}m old fix",
+                "timestamp": v["gps"].get("position_timestamp") or v["connectivity"]["last_message_ts"],
                 "location": {"latitude": v["gps"]["latitude"], "longitude": v["gps"]["longitude"]}
             })
             alert_counter += 1

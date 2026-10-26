@@ -334,7 +334,7 @@ export default function VehicleLeaderboard({
                                                             : isZeroDistance
                                                                 ? "No movement"
                                                                 : isUntracked
-                                                                    ? "Untracked"
+                                                                    ? "No Wialon unit"
                                                                     : "No ratio"}
                                                     </span>
                                                 </div>

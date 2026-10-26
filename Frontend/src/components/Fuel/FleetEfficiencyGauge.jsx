@@ -29,17 +29,17 @@ export default function FleetEfficiencyGauge({ efficiencyData, loading }) {
     const trackedVehicles = efficiencyData?.matched_vehicle_count || 0
     const vehiclesWithDist = efficiencyData?.vehicles_with_distance || 0
     const vehiclesWithoutDist = efficiencyData?.vehicles_without_distance || 0
-    const unmatchedVehicles = efficiencyData?.unmatched_vehicle_count || 0
 
     // Neutral visual scale (0 to 60 L/100km typical fleet operational spectrum)
     const gaugeValue = eff ? Math.min(Math.max(eff, 0), 60) : 0
     const gaugePercent = Math.min((gaugeValue / 60) * 100, 100)
 
+    // Matched vehicles only: fuel identifiers with no or several Wialon units are excluded records (Excluded panel),
+    // not fleet vehicles, and their business status is unconfirmed
     const coverage = [
-        { label: "GPS tracked", note: "Active Wialon units", value: trackedVehicles },
+        { label: "GPS tracked", note: "Matched to one Wialon unit", value: trackedVehicles },
         { label: "With distance", note: "Trips recorded", value: vehiclesWithDist },
         { label: "No distance", note: "Tracked, 0 km", value: vehiclesWithoutDist, warn: vehiclesWithoutDist > 0 },
-        { label: "Untracked", note: "Fuel-only vehicles", value: unmatchedVehicles },
     ]
 
     return (

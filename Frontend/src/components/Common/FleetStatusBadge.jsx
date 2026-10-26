@@ -3,7 +3,7 @@
  * - MOVING: speed > 0, ignition on
  * - IDLING: speed = 0, ignition on
  * - STOPPED: stationary, ignition off
- * - DELAYED: last seen Moving or Idling, message older than 10 min (the vehicle's current state is unknown);
+ * - DELAYED: last seen Moving or Idling, message older than 10 min, or last seen Moving with a GPS fix older than 10 min although messages are recent (the vehicle's current state is unknown);
  *   a vehicle last seen Stopped stays Stopped until Offline
  * - OFFLINE: no message for 12 h / disconnected
  * Unknown values render as Stopped.

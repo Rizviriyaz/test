@@ -1,5 +1,6 @@
 // Live vehicle status from a backend record. DELAYED means the last message, showing Moving or Idling, is older
-// than the stale threshold (10 min by default): last_known_status is what that message showed, not the vehicle's
+// than the stale threshold (10 min by default), or last seen Moving with a GPS fix older than that although messages
+// are recent (position_stale): last_known_status is what that message showed, not the vehicle's
 // current state. A stale unit last seen Stopped stays STOPPED until OFFLINE (12 h).
 // Unknown values keep rendering as STOPPED, as before.
 
@@ -34,11 +35,23 @@ export function formatAge(seconds) {
     return mins % 60 ? `${h}h ${mins % 60}m` : `${h}h`
 }
 
-// "Last seen Moving · 11h ago" for a DELAYED or OFFLINE vehicle; null for live ones or when unknown
+// True when the backend marked the GPS fix stale although messages are recent (last seen Moving, fix > 10 min old)
+export function isPositionStale(vehicle) {
+    return vehicle?.position_stale === true && normalizeVehicleStatus(vehicle) === "DELAYED"
+}
+
+// "Last seen Moving · 11h ago" for a DELAYED or OFFLINE vehicle; null for live ones or when unknown.
+// A stale GPS fix with recent messages reads "Last GPS fix Moving · 6h ago (data 1 min ago)", so a recent
+// heartbeat never makes the old position look current.
 export function lastSeenLabel(vehicle) {
     const status = normalizeVehicleStatus(vehicle)
     if (status !== "DELAYED" && status !== "OFFLINE") return null
     const state = STATE_LABELS[String(vehicle?.last_known_status || "").toUpperCase()]
+    if (isPositionStale(vehicle)) {
+        const fixAge = formatAge(vehicle?.seconds_since_position)
+        const dataAge = formatAge(vehicle?.seconds_since_update)
+        return `Last GPS fix${state ? ` ${state}` : ""}${fixAge ? ` · ${fixAge} ago` : ""}${dataAge ? ` (data ${dataAge} ago)` : ""}`
+    }
     const age = formatAge(vehicle?.seconds_since_update)
     if (!state && !age) return null
     return `Last seen${state ? ` ${state}` : ""}${age ? ` · ${age} ago` : ""}`

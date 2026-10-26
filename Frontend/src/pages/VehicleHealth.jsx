@@ -27,8 +27,10 @@ const batteryBadge = (status, voltage) => {
     return { label: voltage ? `${fmt(voltage, 1)} V` : "No data", note: null, tone: "none" }
 }
 
-const gpsBadge = (status, sats) => {
+const gpsBadge = (status, sats, positionAge) => {
     const s = String(status || "").toUpperCase()
+    // Last seen Moving with an old GPS fix although messages are recent: the satellites describe that old fix
+    if (s === "STALE") return { label: `Fix ${fmtAgo(positionAge)}`, note: "Stale", tone: "warn" }
     if (s === "EXCELLENT") return { label: `${sats ?? "—"} sats`, note: "Excellent", tone: "good" }
     if (s === "GOOD") return { label: `${sats ?? "—"} sats`, note: "Good", tone: "good" }
     if (s === "WEAK") return { label: `${sats ?? "—"} sats`, note: "Weak", tone: "warn" }
@@ -123,8 +125,8 @@ export default function VehicleHealth() {
             v = v.filter(x => (x.registration_plate || "").toLowerCase().includes(q) || (x.vehicle_name || "").toLowerCase().includes(q) || String(x.vehicle_id).includes(q) || (x.group || "").toLowerCase().includes(q))
         }
         if (filter === "critical") v = v.filter(x => x.battery?.status === "CRITICAL" || x.connectivity?.status === "OFFLINE")
-        if (filter === "warning")  v = v.filter(x => x.battery?.status === "WARNING"  || x.connectivity?.status === "DELAYED" || x.gps?.status === "WEAK")
-        if (filter === "healthy")  v = v.filter(x => (x.health_score ?? 0) >= 80 && x.connectivity?.status === "STABLE")
+        if (filter === "warning")  v = v.filter(x => x.battery?.status === "WARNING"  || x.connectivity?.status === "DELAYED" || x.gps?.status === "WEAK" || x.gps?.status === "STALE")
+        if (filter === "healthy")  v = v.filter(x => (x.health_score ?? 0) >= 80 && x.connectivity?.status === "STABLE" && x.gps?.status !== "STALE")
         return v
     }, [vehicles, search, filter])
 
@@ -265,7 +267,7 @@ export default function VehicleHealth() {
                                                         </div>
                                                     </td>
                                                     <td className="px-3 py-2"><Signal {...batteryBadge(bat.status, bat.voltage)} /></td>
-                                                    <td className="px-3 py-2"><Signal {...gpsBadge(gps.status, gps.satellites)} /></td>
+                                                    <td className="px-3 py-2"><Signal {...gpsBadge(gps.status, gps.satellites, gps.seconds_since_position)} /></td>
                                                     <td className="px-3 py-2"><Signal {...connBadge(conn.status)} /></td>
                                                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-slate-600">
                                                         {fmtAgo(conn.seconds_since_update)}

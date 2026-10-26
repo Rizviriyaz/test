@@ -157,3 +157,18 @@ test("H4: hour bars never fall back to the fuel percentages", () => {
     assert.equal(pctLines.length, 2)
     assert.ok(pctLines.every((l) => !/estimated_(driving|idle)_percentage/.test(l)), pctLines.join(" | "))
 })
+
+test("matched-fleet views never present unmatched/ambiguous identifiers as fleet vehicles (Phase 3 P5)", () => {
+    const gauge = read("./FleetEfficiencyGauge.jsx")
+    assert.doesNotMatch(gauge, /Fuel-only|Untracked|unmatched_vehicle_count/, "gauge shows matched-vehicle coverage only")
+    assert.match(gauge, /matched_vehicle_count/)
+    const badge = read("./VehicleStatusBadge.jsx")
+    assert.match(badge, /not_tracked: \{ label: "No Wialon unit"/)
+    assert.match(badge, /\|\| UNKNOWN/, "an unknown status renders as Unknown")
+    assert.match(badge, /UNKNOWN = \{ label: "Unknown"/)
+    assert.doesNotMatch(badge, /"Untracked"/)
+    const board = read("./VehicleLeaderboard.jsx")
+    assert.doesNotMatch(board, /"Untracked"/)
+    // The ranking requests only the matched KPI scope: no option lists excluded identifiers among fleet vehicles
+    assert.doesNotMatch(board, /<option value="(not_tracked|ambiguous)"/)
+})

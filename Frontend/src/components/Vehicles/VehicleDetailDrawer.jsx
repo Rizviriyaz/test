@@ -4,7 +4,7 @@ import { Loader2, ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
-import { lastSeenLabel, normalizeVehicleStatus } from "../../utils/vehicleStatus"
+import { isPositionStale, lastSeenLabel, normalizeVehicleStatus } from "../../utils/vehicleStatus"
 import LiveIdleTimer from "../Common/LiveIdleTimer"
 import { formatElapsedDuration } from "../../utils/datetime"
 import { formatKm, isKnownNumber, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "../../utils/knownTotals"
@@ -153,6 +153,8 @@ export default function VehicleDetailDrawer({
     const statusStr = normalizeVehicleStatus({ ...currentVehicle, status: currentVehicle.status || currentVehicle.normalizedStatus })
     // DELAYED/OFFLINE: speed and ignition are the last reported values, not the current state
     const lastSeen = lastSeenLabel(currentVehicle)
+    // Last seen Moving with a GPS fix older than 10 min although messages are recent
+    const positionStale = isPositionStale(currentVehicle)
 
     // Customer-facing identifier: unit name only. Registration plate and unit ID are omitted from visible UI.
     const vehicleName = currentVehicle.vehicle_name || currentVehicle.name || "Fleet Vehicle"
@@ -202,6 +204,15 @@ export default function VehicleDetailDrawer({
                             <Row label="Last update">
                                 <span className="tabular-nums">{formatUAETime(currentVehicle.last_update || currentVehicle.last_message_timestamp || currentVehicle.timestamp)}</span>
                             </Row>
+                            {/* GPS fix time is separate from the last message: a recent message may carry an old position */}
+                            {/* Boolean(): a 0 timestamp (no position time, as the backend treats it) must not render a stray "0" */}
+                            {Boolean(currentVehicle.position_timestamp) && (
+                                <Row label="Last GPS fix">
+                                    <span className={`tabular-nums ${positionStale ? "text-violet-800" : ""}`}>
+                                        {formatUAETime(currentVehicle.position_timestamp)}{positionStale ? " (stale)" : ""}
+                                    </span>
+                                </Row>
+                            )}
                             {lastSeen && (
                                 <Row label="Telemetry"><span className="text-violet-800">{lastSeen}</span></Row>
                             )}
@@ -217,13 +228,18 @@ export default function VehicleDetailDrawer({
                         </Section>
 
                         <Section title="GPS">
-                            <Row label="Coordinates">
+                            {/* Stale GPS fix: coordinates and satellites describe the last fix, not the current position */}
+                            <Row label={positionStale ? "Last coordinates" : "Coordinates"}>
                                 <span className="font-mono text-[11px]">
                                     {lat !== null && lon !== null ? `${Number(lat).toFixed(4)}, ${Number(lon).toFixed(4)}` : "No GPS fix"}
                                 </span>
                             </Row>
-                            <Row label="Satellites">
-                                <span className="tabular-nums">{satellites !== null ? `${satellites} locked` : "GPS active"}</span>
+                            <Row label={positionStale ? "Last satellites" : "Satellites"}>
+                                <span className="tabular-nums">
+                                    {positionStale
+                                        ? (satellites !== null ? `${satellites} at last fix` : "Unknown")
+                                        : (satellites !== null ? `${satellites} locked` : "GPS active")}
+                                </span>
                             </Row>
                         </Section>
 

@@ -1,7 +1,7 @@
 // Offline tests for the shared live-status helper (audit H2). Run: npm test (node --test).
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { countByStatus, formatAge, lastSeenLabel, normalizeVehicleStatus } from "./vehicleStatus.js"
+import { countByStatus, formatAge, isPositionStale, lastSeenLabel, normalizeVehicleStatus } from "./vehicleStatus.js"
 
 test("DELAYED is its own status, never live Moving/Idling", () => {
     assert.equal(normalizeVehicleStatus({ status: "DELAYED", connection_status: "DELAYED", last_known_status: "MOVING" }), "DELAYED")
@@ -45,4 +45,44 @@ test("last seen label describes the last reported state and its age", () => {
     assert.equal(lastSeenLabel({ status: "MOVING", last_known_status: "MOVING", seconds_since_update: 30 }), null)
     assert.equal(lastSeenLabel({ status: "DELAYED" }), null)
     assert.equal(formatAge(null), null)
+})
+
+test("a stale GPS fix with recent messages shows the fix age, never the message age alone (Phase 3 P2)", () => {
+    const staleFix = {
+        status: "DELAYED", connection_status: "STABLE", last_known_status: "MOVING",
+        seconds_since_update: 30, seconds_since_position: 6 * 3600, position_stale: true,
+    }
+    assert.equal(normalizeVehicleStatus(staleFix), "DELAYED")
+    assert.equal(isPositionStale(staleFix), true)
+    assert.equal(lastSeenLabel(staleFix), "Last GPS fix Moving · 6h ago (data 0 min ago)")
+    // Fix age unknown: still labelled as a GPS fix, never "Last seen · 0 min ago"
+    assert.equal(lastSeenLabel({ ...staleFix, seconds_since_position: null }), "Last GPS fix Moving (data 0 min ago)")
+    // Not stale: unchanged behaviour (message age), including an old fix on a live or parked unit
+    assert.equal(isPositionStale({ ...staleFix, position_stale: false }), false)
+    assert.equal(lastSeenLabel({ status: "MOVING", position_stale: false, seconds_since_position: 30, seconds_since_update: 30 }), null)
+    assert.equal(lastSeenLabel({ status: "STOPPED", connection_status: "DELAYED", position_stale: false, seconds_since_position: 9000 }), null)
+    // OFFLINE wins over a stale flag: the message age is reported
+    assert.equal(isPositionStale({ ...staleFix, is_offline: true }), false)
+    assert.equal(lastSeenLabel({ ...staleFix, status: "OFFLINE", is_offline: true, seconds_since_update: 50000 }), "Last seen Moving · 13h 53m ago")
+})
+
+test("Tracking, drawer and Health page read the GPS fix age separately (source checks)", async () => {
+    const { readFileSync } = await import("node:fs")
+    const read = (p) => readFileSync(new URL(p, import.meta.url), "utf8")
+    const tracking = read("../pages/Tracking.jsx")
+    assert.match(tracking, /isPositionStale\(vehicle\)[\s\S]{0,200}seconds_since_position/, "Tracking list shows the fix age")
+    const drawer = read("../components/Vehicles/VehicleDetailDrawer.jsx")
+    assert.match(drawer, /label="Last GPS fix"/)
+    assert.match(drawer, /position_timestamp/)
+    // A 0 timestamp must not render a stray "0" (a bare `x && <Row>` renders 0)
+    assert.match(drawer, /Boolean\(currentVehicle\.position_timestamp\) &&/)
+    assert.doesNotMatch(drawer, /\{currentVehicle\.position_timestamp &&/)
+    // A stale fix labels coordinates and satellites as last-reported
+    assert.match(drawer, /positionStale \? "Last coordinates" : "Coordinates"/)
+    assert.match(drawer, /positionStale \? "Last satellites" : "Satellites"/)
+    assert.match(drawer, /at last fix/)
+    const health = read("../pages/VehicleHealth.jsx")
+    assert.match(health, /s === "STALE"/, "STALE GPS badge")
+    assert.match(health, /filter === "warning"[^\n]*gps\?\.status === "STALE"/, "STALE listed under warnings")
+    assert.match(health, /filter === "healthy"[^\n]*gps\?\.status !== "STALE"/, "STALE never healthy")
 })

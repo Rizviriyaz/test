@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 
 from app.performance_diagnostics import request_trace_id
@@ -26,6 +27,23 @@ idle_start_times = {}
 # History windows (hours) searched for the start of a vehicle's current idle period when it is first seen idling
 # (e.g. after a restart). A wider window is loaded only when the idle run fills the previous one entirely.
 IDLE_SEED_LOOKBACK_HOURS = (2, 24)
+
+
+def parse_wialon_epoch(value):
+    """
+    A Wialon time (last message `lmsg.t`, GPS position `pos.t`) as int epoch seconds, or None when missing or
+    malformed: None, a bool, a non-numeric or non-finite value, or a time <= 0 (Wialon sends 0 when there is no time).
+    One unit's bad value is unknown, never a crash of the whole fleet response. Future times are passed through.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return int(number)
 
 def extract_registration_plate(unit):
     """
@@ -288,12 +306,18 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         # DRIVING STATUS & CONNECTIVITY
         # ---------------------------------------------------------
 
-        last_message_ts = (vehicle.get("lmsg") or {}).get("t") or position.get("t")
-        seconds_since_update = (current_time - int(last_message_ts)) if last_message_ts else None
+        # Last message time, else calc_last's position time (as before). Missing or malformed: None, so the unit is
+        # OFFLINE with an unknown age, like a unit that never reported, instead of failing the whole response.
+        last_msg = vehicle.get("lmsg")
+        last_message_ts = parse_wialon_epoch(last_msg.get("t") if isinstance(last_msg, dict) else None)
+        if last_message_ts is None:
+            last_message_ts = parse_wialon_epoch(position.get("t"))
+        seconds_since_update = (current_time - last_message_ts) if last_message_ts is not None else None
         # Time of the last GPS position (core/search_items `pos`, flag 1024); unit/calc_last's `pos` carries the speed
-        # but no time. None when Wialon sends none: unknown, never treated as stale.
-        position_ts = (vehicle.get("pos") or {}).get("t")
-        seconds_since_position = (current_time - int(position_ts)) if position_ts else None
+        # but no time. None when Wialon sends none or a malformed one: unknown, never treated as stale.
+        search_pos = vehicle.get("pos")
+        position_ts = parse_wialon_epoch(search_pos.get("t") if isinstance(search_pos, dict) else None)
+        seconds_since_position = (current_time - position_ts) if position_ts is not None else None
 
         if seconds_since_update is None or seconds_since_update > CONN_DELAYED_SECONDS:
             connection_status = "OFFLINE"
@@ -307,6 +331,8 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         # live; a stale unit last seen Stopped (a parked tracker reports less often) stays STOPPED. Both become
         # OFFLINE past CONN_DELAYED_SECONDS.
         last_known_status = calculate_status(speed, ignition_on) if last_message_ts else None
+        # R2: True only when the GPS-position rule below makes the unit DELAYED (messages are recent)
+        position_stale = False
         if is_offline:
             status = "OFFLINE"
         elif connection_status == "DELAYED" and last_known_status in ("MOVING", "IDLING"):
@@ -317,6 +343,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             # CONN_STABLE_SECONDS is not live (DELAYED; last_known_status MOVING, speed kept). IDLING/STOPPED are
             # not judged by position age: a stationary tracker may not send new positions.
             status = "DELAYED"
+            position_stale = True
         else:
             status = last_known_status
 
@@ -453,6 +480,10 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             "is_offline": is_offline,
             "seconds_since_update": seconds_since_update,
             "last_message_timestamp": last_message_ts,
+            # GPS fix age, separate from message age (None when Wialon sends no or a malformed position time)
+            "position_timestamp": position_ts,
+            "seconds_since_position": seconds_since_position,
+            "position_stale": position_stale,
             "idle_duration": idle_duration,
             "idle_start": idle_start if status == "IDLING" else None,
             "idle_start_iso": to_iso_uae(idle_start) if status == "IDLING" and idle_start else None,

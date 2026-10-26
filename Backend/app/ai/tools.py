@@ -39,6 +39,20 @@ def _resolve_unit(units: list, ref):
             or next((u for u in units if str(u.get("nm", "")).strip().lower() == ref_str), None))
 
 
+def _data_age_fields(v: dict) -> dict:
+    """Message age and GPS fix age (minutes, None when unknown) of a live record. A DELAYED or OFFLINE unit's speed and
+    position are the last reported values, and a stale GPS fix means its position is not current."""
+    def _mins(sec):
+        return None if sec is None else round(sec / 60, 1)
+    return {
+        "last_known_status": v.get("last_known_status"),
+        "message_age_minutes": _mins(v.get("seconds_since_update")),
+        "gps_fix_age_minutes": _mins(v.get("seconds_since_position")),
+        "gps_position_stale": bool(v.get("position_stale")),
+        "speed_is_last_reported": v.get("status") in ("DELAYED", "OFFLINE"),
+    }
+
+
 def _format_ts(ts) -> str:
     """Unix timestamp → readable string in UAE time."""
     if not ts:
@@ -95,7 +109,7 @@ def tool_get_vehicles_by_status(status: str) -> dict:
             "vehicle_id": v["vehicle_id"],
             "vehicle_name": v["vehicle_name"],
             "status": v.get("status"),
-            "last_known_status": v.get("last_known_status"),
+            **_data_age_fields(v),
             "speed": v.get("speed", 0),
             "idle_duration": _format_duration(v.get("idle_duration", 0)),
             "idle_seconds": v.get("idle_duration", 0) or 0,
@@ -137,6 +151,7 @@ def tool_get_vehicle_status(vehicle_id) -> dict:
         "vehicle_id": vehicle["vehicle_id"],
         "vehicle_name": vehicle["vehicle_name"],
         "status": vehicle.get("status"),
+        **_data_age_fields(vehicle),
         "speed": vehicle.get("speed"),
         "idle_duration": _format_duration(vehicle.get("idle_duration", 0)),
         "idle_seconds": vehicle.get("idle_duration", 0) or 0,
@@ -379,7 +394,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicles_by_status",
-            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes, or last seen MOVING with a GPS position older than 10 minutes although messages are recent; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL.",
+            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes, or last seen MOVING with a GPS position older than 10 minutes although messages are recent; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL. message_age_minutes is the age of the last message and gps_fix_age_minutes the age of the last GPS position; when speed_is_last_reported or gps_position_stale is true, say the speed and location are the last reported values with their age, never that the vehicle is currently at that speed or place.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -397,7 +412,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicle_status",
-            "description": "Get live status, speed, location, and idle duration for a specific vehicle by its ID or name.",
+            "description": "Get live status, speed, location, and idle duration for a specific vehicle by its ID or name. message_age_minutes is the age of the last message and gps_fix_age_minutes the age of the last GPS position; when speed_is_last_reported or gps_position_stale is true, say the speed and location are the last reported values with their age, never that the vehicle is currently at that speed or place.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -414,7 +429,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_fleet_health",
-            "description": "Get fleet health diagnostics: battery warnings, GPS issues, offline devices, and average health score.",
+            "description": "Get fleet health diagnostics: battery warnings, GPS issues (gps.status WEAK, or STALE: last seen moving with a GPS fix older than 10 minutes although messages are recent), offline devices, and average health score.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
@@ -450,7 +465,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_fleet_alerts",
-            "description": "Get active fleet operational alerts: critical low battery, device offline, weak GPS, and safety triggers.",
+            "description": "Get active fleet operational alerts: critical low battery, device offline, weak GPS, stale GPS position (GPS_POSITION_STALE: last seen moving, GPS fix older than 10 minutes although messages are recent, so its position and speed are not current), and safety triggers.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },

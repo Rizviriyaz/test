@@ -588,7 +588,7 @@ function Dashboard() {
         { key: "MOVING", label: "Moving", count: movingCount, dot: "bg-status-moving", note: "in motion" },
         { key: "IDLING", label: "Idling", count: idlingCount, dot: "bg-status-idling", note: "engine on" },
         { key: "STOPPED", label: "Stopped", count: stoppedCount, dot: "bg-status-stopped", note: "parked" },
-        { key: "DELAYED", label: "Delayed", count: delayedCount, dot: "bg-status-delayed", note: "moving/idling, stale > 10 min" },
+        { key: "DELAYED", label: "Delayed", count: delayedCount, dot: "bg-status-delayed", note: "moving/idling, data or GPS fix > 10 min old" },
         { key: "OFFLINE", label: "Offline", count: offlineCount, dot: "bg-status-offline", note: "no signal" },
     ]
 
