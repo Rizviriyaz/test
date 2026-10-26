@@ -176,7 +176,9 @@ class TestFuelDistance(unittest.TestCase):
         dist = {"distance": 3210.5, "unit": "km", "source": "wialon_native_trips_report", "trip_count": 42, "has_data": True}
         with patch("app.fuel.routes.login", return_value="sid"), \
                 patch("app.fuel.routes.get_all_vehicles", return_value=MOCK_UNITS), \
-                patch("app.fuel.routes.get_vehicle_distance", return_value=dist) as get_distance:
+                patch("app.fuel.routes.get_vehicle_distance", return_value=dist) as get_distance, \
+                patch("app.fuel.routes.get_fuel_vehicle_identifiers", return_value=["CC-DXB-17428"]):
+            # Unit "17428" matches by registration number only, so the imported identifiers are checked for conflicts
             resp = self.client.get(
                 "/api/fuel/analytics/distance",
                 params={"vehicle_identifier": "CC-DXB-17428", "date_from": "2026-08-03", "date_to": "2026-08-31"},

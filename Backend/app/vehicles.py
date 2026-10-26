@@ -3,7 +3,7 @@ import time
 
 from app.performance_diagnostics import request_trace_id
 from app.utils.datetime_helpers import now_timestamp, to_iso_uae
-from app.utils.status_config import CONN_DELAYED_SECONDS
+from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS
 
 from app.wialon import (
     wialon_request,
@@ -293,19 +293,22 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
         if seconds_since_update is None or seconds_since_update > CONN_DELAYED_SECONDS:
             connection_status = "OFFLINE"
-        elif seconds_since_update > 600:
+        elif seconds_since_update > CONN_STABLE_SECONDS:
             connection_status = "DELAYED"
         else:
             connection_status = "STABLE"
         is_offline = (connection_status == "OFFLINE")
 
+        # The state the last message describes. Stale telemetry last seen Moving/Idling is DELAYED, never shown as
+        # live; a stale unit last seen Stopped (a parked tracker reports less often) stays STOPPED. Both become
+        # OFFLINE past CONN_DELAYED_SECONDS.
+        last_known_status = calculate_status(speed, ignition_on) if last_message_ts else None
         if is_offline:
             status = "OFFLINE"
+        elif connection_status == "DELAYED" and last_known_status in ("MOVING", "IDLING"):
+            status = "DELAYED"
         else:
-            status = calculate_status(
-                speed,
-                ignition_on
-            )
+            status = last_known_status
 
         # ---------------------------------------------------------
         # IDLE DURATION
@@ -435,6 +438,7 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             "speed": speed,
             "ignition": ignition_on,
             "status": status,
+            "last_known_status": last_known_status,
             "connection_status": connection_status,
             "is_offline": is_offline,
             "seconds_since_update": seconds_since_update,

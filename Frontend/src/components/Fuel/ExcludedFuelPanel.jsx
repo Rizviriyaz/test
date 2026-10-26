@@ -15,6 +15,13 @@ const REASON_EXPLANATIONS = {
     suspected_duplicate: "Identified as a duplicate or re-imported fuel transaction.",
 }
 
+// Ambiguity detail sent by the backend (ambiguity_reason); falls back to the reason's own explanation
+const AMBIGUITY_EXPLANATIONS = {
+    plate_code_conflict: "Matches this Wialon unit by registration number only, and other plate codes share that number; not attributed.",
+}
+
+const explanationOf = (g) => AMBIGUITY_EXPLANATIONS[g.ambiguity_reason] || REASON_EXPLANATIONS[g.reason]
+
 export default function ExcludedFuelPanel() {
     const { queryParams } = useFuelFilters()
     const [data, setData] = useState(null)
@@ -252,10 +259,10 @@ export default function ExcludedFuelPanel() {
                                                     {EXCLUDED_REASON_LABELS[g.reason] || g.reason}
                                                 </span>
                                             </td>
-                                            <td className="px-3 py-2 text-slate-500 max-w-[200px] truncate" title={REASON_EXPLANATIONS[g.reason]}>
+                                            <td className="px-3 py-2 text-slate-500 max-w-[200px] truncate" title={explanationOf(g)}>
                                                 {g.candidate_unit_names?.length
-                                                    ? g.candidate_unit_names.join(", ")
-                                                    : REASON_EXPLANATIONS[g.reason]}
+                                                    ? `${g.candidate_unit_names.join(", ")}${g.ambiguity_reason === "plate_code_conflict" ? " (number only, plate codes conflict)" : ""}`
+                                                    : explanationOf(g)}
                                             </td>
                                             <td className="px-3 py-2 text-right tabular-nums text-slate-700">
                                                 {g.transaction_count}

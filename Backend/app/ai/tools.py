@@ -62,6 +62,7 @@ def tool_get_fleet_summary() -> dict:
     moving = sum(1 for v in fleet if v.get("status") == "MOVING")
     idling = sum(1 for v in fleet if v.get("status") == "IDLING")
     stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
+    delayed = sum(1 for v in fleet if v.get("status") == "DELAYED")  # stale telemetry, not live
     offline = sum(1 for v in fleet if v.get("status") == "OFFLINE")
     extended_idling = sum(1 for v in fleet if v.get("status") == "IDLING" and (v.get("idle_duration") or 0) >= 900)
 
@@ -70,13 +71,14 @@ def tool_get_fleet_summary() -> dict:
         "moving": moving,
         "idling": idling,
         "stopped": stopped,
+        "delayed": delayed,
         "offline": offline,
         "vehicles_requiring_idle_attention": extended_idling,
     }
 
 
 def tool_get_vehicles_by_status(status: str) -> dict:
-    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/OFFLINE/ALL)."""
+    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/DELAYED/OFFLINE/ALL)."""
     status = status.upper().strip()
     sid = login()
     vehicles = get_all_vehicles(sid)
@@ -93,6 +95,7 @@ def tool_get_vehicles_by_status(status: str) -> dict:
             "vehicle_id": v["vehicle_id"],
             "vehicle_name": v["vehicle_name"],
             "status": v.get("status"),
+            "last_known_status": v.get("last_known_status"),
             "speed": v.get("speed", 0),
             "idle_duration": _format_duration(v.get("idle_duration", 0)),
             "idle_seconds": v.get("idle_duration", 0) or 0,
@@ -376,13 +379,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicles_by_status",
-            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, OFFLINE, or ALL.",
+            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["MOVING", "IDLING", "STOPPED", "OFFLINE", "ALL"],
+                        "enum": ["MOVING", "IDLING", "STOPPED", "DELAYED", "OFFLINE", "ALL"],
                         "description": "Vehicle operational status to filter by, or ALL for entire fleet.",
                     }
                 },
@@ -702,7 +705,7 @@ def _check_date(value, name):
 
 
 def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: str = None):
-    from app.fuel.db import fetch_fuel_transactions_for_analytics
+    from app.fuel.db import fetch_fuel_transactions_for_analytics, get_fuel_vehicle_identifiers
     from app.fuel.scope import build_scope
 
     date_from, date_to = _check_date(date_from, "date_from"), _check_date(date_to, "date_to")
@@ -710,7 +713,8 @@ def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: 
         raise ToolInputError("date_from must be on or before date_to")
 
     filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier}
-    return build_scope(filters, fetch_fuel_transactions_for_analytics, lambda: login(), lambda sid: get_all_vehicles(sid))
+    return build_scope(filters, fetch_fuel_transactions_for_analytics, lambda: login(), lambda sid: get_all_vehicles(sid),
+                       get_fuel_vehicle_identifiers)
 
 
 def _excluded_brief(scope) -> dict:

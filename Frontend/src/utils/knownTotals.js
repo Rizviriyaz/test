@@ -32,6 +32,73 @@ export function idleSecondsOf(row) {
     return null
 }
 
+// Driving time (engine on, moving) of an idle-analytics row: the Wialon Engine Hours report's "In motion"
+// seconds. `in_motion_seconds: null` or an absent key (older payload) is unknown; it is never estimated from
+// distance and average speed.
+export function inMotionSecondsOf(row) {
+    if (!row) return null
+    return isKnownNumber(row.in_motion_seconds) ? Number(row.in_motion_seconds) : null
+}
+
+export const DRIVING_MILEAGE_TOLERANCE_KM = 2
+export const DRIVING_MILEAGE_TOLERANCE_RATIO = 0.05
+
+// True when a unit's Engine Hours report mileage agrees with its Dashboard (Trips report) mileage within
+// max(2 km, 5% of the Dashboard mileage). False when either is unknown: the check cannot be performed.
+export function engineMileageAgrees(engineKm, dashboardKm) {
+    if (!isKnownNumber(engineKm) || !isKnownNumber(dashboardKm)) return false
+    const tolerance = Math.max(DRIVING_MILEAGE_TOLERANCE_KM, DRIVING_MILEAGE_TOLERANCE_RATIO * Number(dashboardKm))
+    // Report mileage has two decimals; the epsilon keeps a difference exactly at the tolerance inside it
+    return Math.abs(Number(engineKm) - Number(dashboardKm)) <= tolerance + 1e-9
+}
+
+// Driving seconds per unit for one period, as Map(vehicle_id string -> seconds | null), over the idle-analytics
+// rows accepted by includeVehicle(id). A unit's "In motion" value is used only when its Engine Hours mileage
+// agrees with its Dashboard mileage for the same period start; otherwise, or when the unit covered distance
+// with 0 s in motion, or when it is missing / duplicated in the mileage list, its driving time is unknown (null).
+export function drivingSecondsByVehicle(idleData, mileageData, includeVehicle = () => true) {
+    const result = new Map()
+    const rows = idleData?.by_vehicle
+    if (!Array.isArray(rows)) return result
+    const samePeriod = isKnownNumber(idleData?.timeframe?.from_time)
+        && idleData.timeframe.from_time === mileageData?.effective_from
+    const mileageById = new Map()
+    const duplicateIds = new Set()
+    for (const unit of (samePeriod && mileageData.all_units) || []) {
+        if (unit?.vehicle_id === null || unit?.vehicle_id === undefined) continue
+        const id = String(unit.vehicle_id)
+        if (mileageById.has(id)) duplicateIds.add(id)
+        mileageById.set(id, unit.mileage)
+    }
+    for (const row of rows) {
+        const id = String(row.vehicle_id)
+        if (!includeVehicle(id)) continue
+        const motion = inMotionSecondsOf(row)
+        const dashboardKm = duplicateIds.has(id) ? null : mileageById.get(id)
+        const reliable = motion !== null
+            && engineMileageAgrees(row.engine_mileage_km, dashboardKm)
+            && !(motion === 0 && Number(dashboardKm) > 0)
+        result.set(id, reliable ? motion : null)
+    }
+    return result
+}
+
+// Totals of two per-unit maps over the units known in both (like-for-like comparison of partial periods)
+export function sumKnownInBoth(mapA, mapB) {
+    let a = 0
+    let b = 0
+    let units = 0
+    for (const [id, valueA] of mapA || []) {
+        const valueB = mapB?.get(id)
+        if (isKnownNumber(valueA) && isKnownNumber(valueB)) {
+            a += Number(valueA)
+            b += Number(valueB)
+            units += 1
+        }
+    }
+    return { a, b, units }
+}
+
 // Trip distance in km, or null when the trip is flagged with an unreadable distance cell
 export function tripDistanceOf(trip) {
     if (!trip || (trip.incomplete_fields || []).includes("distance_km")) return null

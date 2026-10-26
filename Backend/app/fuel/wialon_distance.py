@@ -91,90 +91,101 @@ def unit_match_keys(wialon_units: List[Dict[str, Any]]) -> List[Tuple[Dict[str, 
     return keys
 
 
+MATCH_EXACT_PLATE = "exact_plate"
+MATCH_EXACT_NAME = "exact_name"
+MATCH_NUMBER_ONLY = "number_only"
+
+
+def registration_number(val: Any) -> Optional[str]:
+    """Trailing registration number of a plate identifier ('13-AUH-30561' -> '30561'), or None."""
+    trailing = re.search(r"(\d+)$", str(val or "").strip())
+    return trailing.group(1) if trailing else None
+
+
+def plate_code_prefix(val: Any) -> str:
+    """Normalized identifier without its trailing registration number ('13-AUH-30561' -> '13auh', '30561' -> '')."""
+    norm = normalize_alphanumeric(val)
+    number = registration_number(val)
+    return norm[: len(norm) - len(number)] if number and norm.endswith(number) else norm
+
+
+def _distinct_result(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The single candidate unit, an ambiguous marker for several distinct units, or None."""
+    distinct_ids = {c.get("id") for c in candidates if c.get("id")}
+    if len(distinct_ids) == 1:
+        return candidates[0]
+    if len(distinct_ids) > 1:
+        return {"ambiguous": True, "candidates": candidates, "id": None, "nm": None}
+    return None
+
+
+def match_fuel_vehicle_with_basis(
+    vehicle_identifier: str,
+    wialon_units: List[Dict[str, Any]],
+    match_keys: Optional[List[Tuple[Dict[str, Any], Optional[str], str, str, str]]] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Match a fuel vehicle identifier (e.g. 'T-DXB-15770', '13-AUH-30561') to one Wialon unit from a dynamically
+    fetched unit list. Returns (result, basis); result is the unit, an ambiguous marker, or None.
+
+    1. Exact (basis exact_plate / exact_name): the identifier equals a unit's verified Profile Registration Plate,
+       or its unit name (General -> Name). Plate and name candidates are considered together, so a plate naming
+       one unit and a name naming another is ambiguous rather than the plate winning.
+    2. Number only (basis number_only): the identifier's trailing registration number equals a unit plate or
+       name that is just that number. Prefix/emirate tokens ('13', 'AUH', 'T') never match. The emirate/code
+       cannot be verified on this basis; scope.UnitResolver rejects it when other identifiers conflict.
+
+    If several Wialon units match on one basis, does NOT guess; returns an ambiguous marker.
+    Zero hardcoded values: matching is purely algorithmic and scales to any fleet size.
+    """
+    if not vehicle_identifier or not wialon_units:
+        return None, None
+
+    fuel_raw = vehicle_identifier.strip()
+    fuel_lower = fuel_raw.lower()
+    fuel_norm = normalize_alphanumeric(fuel_raw)
+    keys = match_keys if match_keys is not None else unit_match_keys(wialon_units)
+
+    # 1. Exact plate or exact unit name
+    exact: List[Dict[str, Any]] = []
+    by_plate = set()
+    for u, u_plate_lower, u_plate_norm, u_nm, _ in keys:
+        plate_hit = u_plate_lower is not None and (
+            u_plate_lower == fuel_lower or (u_plate_norm and u_plate_norm == fuel_norm))
+        name_hit = bool(u_nm) and (u_nm == fuel_lower or u_nm == fuel_norm)
+        if plate_hit or name_hit:
+            if u not in exact:
+                exact.append(u)
+            if plate_hit:
+                by_plate.add(id(u))
+    result = _distinct_result(exact)
+    if result is not None:
+        if result.get("ambiguous"):
+            return result, None
+        return result, MATCH_EXACT_PLATE if id(result) in by_plate else MATCH_EXACT_NAME
+
+    # 2. Registration number only, against units whose plate or name is just that number
+    number = registration_number(fuel_raw)
+    numbers = {n for n in (number, number.lstrip("0") if number else None) if n}
+    if not numbers:
+        return None, None
+    by_number = [
+        u for u, _, u_plate_norm, _, u_nm_norm in keys
+        if (u_plate_norm and u_plate_norm in numbers) or (u_nm_norm and u_nm_norm in numbers)
+    ]
+    result = _distinct_result(by_number)
+    if result is None:
+        return None, None
+    return result, None if result.get("ambiguous") else MATCH_NUMBER_ONLY
+
+
 def match_fuel_vehicle_to_wialon(
     vehicle_identifier: str,
     wialon_units: List[Dict[str, Any]],
     match_keys: Optional[List[Tuple[Dict[str, Any], Optional[str], str, str, str]]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Dynamically matches a fuel vehicle identifier (e.g. 'T-DXB-15770', '13-AUH-30561')
-    to an active Wialon unit from a dynamically fetched unit list.
-
-    Matching hierarchy:
-    1. Primary exact match against verified Wialon Profile Registration Plate.
-    2. Primary token match against verified Wialon Profile Registration Plate.
-    3. Fallback exact match against Wialon unit name (General -> Name) for backward compatibility.
-    4. Fallback token match against Wialon unit name.
-
-    If multiple Wialon units match the same identifier, does NOT guess; returns an ambiguous marker.
-    Zero hardcoded values: matching is purely algorithmic and scales to any fleet size.
-    """
-    if not vehicle_identifier or not wialon_units:
-        return None
-
-    fuel_raw = vehicle_identifier.strip()
-    fuel_lower = fuel_raw.lower()
-    fuel_norm = normalize_alphanumeric(fuel_raw)
-    fuel_tokens = extract_plate_tokens(fuel_raw)
-    keys = match_keys if match_keys is not None else unit_match_keys(wialon_units)
-
-    # 1. Primary: Exact match against verified Wialon Profile Registration Plate
-    candidates_primary: List[Dict[str, Any]] = []
-    for u, u_plate_lower, u_plate_norm, _, _ in keys:
-        if u_plate_lower is not None:
-            if u_plate_lower == fuel_lower or (u_plate_norm and u_plate_norm == fuel_norm):
-                if u not in candidates_primary:
-                    candidates_primary.append(u)
-
-    if candidates_primary:
-        distinct_ids = {c.get("id") for c in candidates_primary if c.get("id")}
-        if len(distinct_ids) == 1:
-            return candidates_primary[0]
-        elif len(distinct_ids) > 1:
-            return {"ambiguous": True, "candidates": candidates_primary, "id": None, "nm": None}
-
-    # 2. Primary: Match against fuel tokens using verified Profile Registration Plate
-    for u, u_plate_lower, u_plate_norm, _, _ in keys:
-        if u_plate_lower is not None:
-            if u_plate_lower in fuel_tokens or (u_plate_norm and u_plate_norm in fuel_tokens):
-                if u not in candidates_primary:
-                    candidates_primary.append(u)
-
-    if candidates_primary:
-        distinct_ids = {c.get("id") for c in candidates_primary if c.get("id")}
-        if len(distinct_ids) == 1:
-            return candidates_primary[0]
-        elif len(distinct_ids) > 1:
-            return {"ambiguous": True, "candidates": candidates_primary, "id": None, "nm": None}
-
-    # 3. Explicit Fallback: Exact match against Wialon unit name (General -> Name) for backward compatibility
-    candidates_fallback: List[Dict[str, Any]] = []
-    for u, _, _, u_nm, _ in keys:
-        if u_nm and (u_nm == fuel_lower or u_nm == fuel_norm):
-            if u not in candidates_fallback:
-                candidates_fallback.append(u)
-
-    if candidates_fallback:
-        distinct_ids = {c.get("id") for c in candidates_fallback if c.get("id")}
-        if len(distinct_ids) == 1:
-            return candidates_fallback[0]
-        elif len(distinct_ids) > 1:
-            return {"ambiguous": True, "candidates": candidates_fallback, "id": None, "nm": None}
-
-    # 4. Explicit Fallback: Match against fuel tokens using unit name
-    for u, _, _, u_nm, u_nm_norm in keys:
-        if u_nm in fuel_tokens or (u_nm_norm and u_nm_norm in fuel_tokens):
-            if u not in candidates_fallback:
-                candidates_fallback.append(u)
-
-    if candidates_fallback:
-        distinct_ids = {c.get("id") for c in candidates_fallback if c.get("id")}
-        if len(distinct_ids) == 1:
-            return candidates_fallback[0]
-        elif len(distinct_ids) > 1:
-            return {"ambiguous": True, "candidates": candidates_fallback, "id": None, "nm": None}
-
-    return None
+    """The unit, ambiguous marker or None of match_fuel_vehicle_with_basis (see there for the rules)."""
+    return match_fuel_vehicle_with_basis(vehicle_identifier, wialon_units, match_keys)[0]
 
 
 # ─── Report execution helpers ──────────────────────────────────────────────────

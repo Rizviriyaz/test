@@ -31,7 +31,7 @@ from app.wialon_reports import (
 )
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
-from app.utils.status_config import CONN_DELAYED_SECONDS
+from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS
 from app.utils.ttl_cache import TTLCache
 
 # ── Simple in-memory cache with TTL ──────────────────────────────────────────
@@ -77,7 +77,7 @@ HEALTH_THRESHOLDS = {
     "GPS_HDOP_GOOD": _env_float("GPS_HDOP_GOOD", 2.5),
 
     # Connectivity thresholds (seconds)
-    "CONN_STABLE_SECONDS": int(_env_float("CONN_STABLE_SECONDS", 600)),
+    "CONN_STABLE_SECONDS": CONN_STABLE_SECONDS,
     "CONN_DELAYED_SECONDS": CONN_DELAYED_SECONDS,
 }
 
@@ -1184,6 +1184,7 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         moving = sum(1 for v in g_vehicles if v.get("status") == "MOVING")
         idling = sum(1 for v in g_vehicles if v.get("status") == "IDLING")
         stopped = sum(1 for v in g_vehicles if v.get("status") == "STOPPED")
+        delayed = sum(1 for v in g_vehicles if v.get("status") == "DELAYED")  # stale telemetry, not live
         offline = sum(1 for v in g_vehicles if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
         distances = [trips_by_veh.get(v["vehicle_id"], {}).get("gps_mileage_km") for v in g_vehicles]
@@ -1200,6 +1201,7 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
             "moving": moving,
             "idling": idling,
             "stopped": stopped,
+            "delayed": delayed,
             "offline": offline,
             "distance_24h_km": round(total_distance, 1) if total_distance is not None else None,
             "trips_24h": total_trips,

@@ -4,6 +4,7 @@ import { Loader2, ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
+import { lastSeenLabel, normalizeVehicleStatus } from "../../utils/vehicleStatus"
 import LiveIdleTimer from "../Common/LiveIdleTimer"
 import { formatElapsedDuration } from "../../utils/datetime"
 import { formatKm, isKnownNumber, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "../../utils/knownTotals"
@@ -149,7 +150,9 @@ export default function VehicleDetailDrawer({
     const vehicleId = currentVehicle?.vehicle_id || currentVehicle?.id || "active"
     const morphId = `vehicle-${vehicleId}`
 
-    const statusStr = String(currentVehicle.status || currentVehicle.normalizedStatus || (currentVehicle.is_offline ? "OFFLINE" : "STOPPED")).toUpperCase()
+    const statusStr = normalizeVehicleStatus({ ...currentVehicle, status: currentVehicle.status || currentVehicle.normalizedStatus })
+    // DELAYED/OFFLINE: speed and ignition are the last reported values, not the current state
+    const lastSeen = lastSeenLabel(currentVehicle)
 
     // Customer-facing identifier: unit name only. Registration plate and unit ID are omitted from visible UI.
     const vehicleName = currentVehicle.vehicle_name || currentVehicle.name || "Fleet Vehicle"
@@ -199,8 +202,11 @@ export default function VehicleDetailDrawer({
                             <Row label="Last update">
                                 <span className="tabular-nums">{formatUAETime(currentVehicle.last_update || currentVehicle.last_message_timestamp || currentVehicle.timestamp)}</span>
                             </Row>
+                            {lastSeen && (
+                                <Row label="Telemetry"><span className="text-violet-800">{lastSeen}</span></Row>
+                            )}
                             {ignitionState !== null && (
-                                <Row label="Ignition">
+                                <Row label={lastSeen ? "Last ignition" : "Ignition"}>
                                     <span className={ignitionState === "ON" ? "text-slate-900" : "text-slate-500"}>{ignitionState === "ON" ? "On" : "Off"}</span>
                                 </Row>
                             )}
@@ -244,7 +250,7 @@ export default function VehicleDetailDrawer({
                                 <Row label="Started">
                                     {isIdling && currentVehicle.idle_start
                                         ? <span className="tabular-nums">{formatUAETime(currentVehicle.idle_start)}</span>
-                                        : (isIdling ? "Start time unavailable" : <span className="font-normal text-slate-500">Not currently idling</span>)}
+                                        : (isIdling ? "Start time unavailable" : <span className="font-normal text-slate-500">{lastSeen ? "Unknown (telemetry delayed)" : "Not currently idling"}</span>)}
                                 </Row>
                                 <Row label={isIdling ? "Elapsed" : "Last idle duration"}>
                                     {isIdling ? (
@@ -343,7 +349,7 @@ export default function VehicleDetailDrawer({
                             <span className="text-slate-300" aria-hidden="true">·</span>
                             <span className="truncate text-slate-500">{vehicleGroup}</span>
                             <span className="text-slate-300" aria-hidden="true">·</span>
-                            <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
+                            <span className="shrink-0 tabular-nums text-slate-900" title={lastSeen ? "Last reported speed" : undefined}>{speed} <span className="text-slate-500">km/h{lastSeen ? " (last)" : ""}</span></span>
                         </div>
                     </div>
                     <button
@@ -388,7 +394,7 @@ export default function VehicleDetailDrawer({
                                 <span className="text-slate-300" aria-hidden="true">·</span>
                                 <span className="truncate text-slate-500">{vehicleGroup}</span>
                                 <span className="text-slate-300" aria-hidden="true">·</span>
-                                <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
+                                <span className="shrink-0 tabular-nums text-slate-900" title={lastSeen ? "Last reported speed" : undefined}>{speed} <span className="text-slate-500">km/h{lastSeen ? " (last)" : ""}</span></span>
                             </MorphingDialogSubtitle>
                         </div>
                         <MorphingDialogClose onClick={handleClose} />

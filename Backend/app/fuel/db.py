@@ -15,6 +15,7 @@ from urllib3.exceptions import NewConnectionError
 from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_float, get_env_int
 from app.utils.datetime_helpers import parse_tx_wallclock
+from app.utils.ttl_cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
@@ -677,6 +678,8 @@ def _insert_batches(
         unresolved += open_rows
         if error:
             errors.append(error)
+    if transactions:
+        clear_vehicle_identifier_cache()
     return stored, unresolved, errors
 
 
@@ -913,6 +916,37 @@ def fetch_fuel_transactions_for_analytics(
         params["import_id"] = f"eq.{filters['import_id']}"
 
     return _fetch_all_pages(url, params, headers, "fuel transactions")
+
+
+def fetch_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[str]:
+    """
+    Every distinct vehicle_identifier ever imported (all dates), for the number-only plate conflict check.
+    Reads every page (see _fetch_all_pages) or raises FuelDataFetchError; never returns a partial list.
+    """
+    url = get_supabase_rest_url("fuel_transactions")
+    params = {"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)}
+    rows = _fetch_all_pages(url, params, _read_headers(bearer_token), "fuel vehicle identifiers")
+    return sorted({str(r.get("vehicle_identifier") or "").strip() for r in rows} - {""})
+
+
+# Identifier registry per reader (service role, or the caller's token since row-level security may differ).
+# Cleared whenever rows are written, so a new import's identifiers are checked on the next request.
+IDENTIFIER_REGISTRY_TTL_S = 300
+_IDENTIFIER_CACHE = TTLCache(max_entries=16)
+
+
+def get_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[str]:
+    """Cached fetch_fuel_vehicle_identifiers (IDENTIFIER_REGISTRY_TTL_S); failures propagate and are not cached."""
+    auth_key = None if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else bearer_token
+    return _IDENTIFIER_CACHE.get_or_compute(
+        ("identifiers", auth_key),
+        lambda: fetch_fuel_vehicle_identifiers(bearer_token),
+        lambda _ids: IDENTIFIER_REGISTRY_TTL_S,
+    )
+
+
+def clear_vehicle_identifier_cache() -> None:
+    _IDENTIFIER_CACHE.clear()
 
 
 def build_fingerprint(

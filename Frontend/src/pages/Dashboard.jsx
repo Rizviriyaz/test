@@ -33,6 +33,7 @@ import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
 import { ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import { formatUAETime } from "../utils/datetime"
+import { normalizeVehicleStatus } from "../utils/vehicleStatus"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import {
     CATEGORY_TICK,
@@ -41,7 +42,13 @@ import {
     TOOLTIP_CURSOR,
     TOOLTIP_STYLE,
 } from "../components/Common/chartTheme"
-import { compareKnownDesc, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
+import {
+    compareKnownDesc, drivingSecondsByVehicle, idleSecondsOf, isKnownNumber, sumKnown, sumKnownInBoth,
+} from "../utils/knownTotals"
+
+const DRIVING_LABEL_TITLE = "Wialon Engine Hours report \"In motion\" time per vehicle (engine on and moving). Not total "
+    + "engine hours: Wialon may classify some engine-on time as neither moving nor idling. A vehicle is left out as "
+    + "unknown when this report's mileage disagrees with the Dashboard mileage by more than max(2 km, 5%)."
 
 // Legacy mileage formatter contract: formatter={(val) => [formatKm(val) ?? "Unknown (unreadable)", "Mileage"]}
 
@@ -198,22 +205,11 @@ function Dashboard() {
     // ─── 4. Normalize Vehicles ──────────────────────────────────────────────
     const normalizedVehicles = useMemo(() => {
         return vehicles.map(vehicle => {
-            const rawStatus = String(vehicle.status || "").trim().toUpperCase()
-            const isOffline = vehicle.connection_status === "OFFLINE" ||
-                Boolean(vehicle.is_offline) ||
-                rawStatus === "OFFLINE"
-            let finalStatus = "STOPPED"
-            if (isOffline) {
-                finalStatus = "OFFLINE"
-            } else if (rawStatus === "MOVING") {
-                finalStatus = "MOVING"
-            } else if (rawStatus === "IDLING") {
-                finalStatus = "IDLING"
-            }
+            const finalStatus = normalizeVehicleStatus(vehicle)
             return {
                 ...vehicle,
                 normalizedStatus: finalStatus,
-                isOffline,
+                isOffline: finalStatus === "OFFLINE",
             }
         })
     }, [vehicles])
@@ -238,11 +234,14 @@ function Dashboard() {
     const idlingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "IDLING"), [filteredVehicles])
     const stoppedVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "STOPPED"), [filteredVehicles])
     const offlineVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "OFFLINE"), [filteredVehicles])
+    // Stale telemetry: not counted as live Moving/Idling/Stopped
+    const delayedVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "DELAYED"), [filteredVehicles])
 
     const movingCount = movingVehicles.length
     const idlingCount = idlingVehicles.length
     const stoppedCount = stoppedVehicles.length
     const offlineCount = offlineVehicles.length
+    const delayedCount = delayedVehicles.length
 
     const pct = (count) => (totalVehiclesCount > 0 ? Math.round((count / totalVehiclesCount) * 100) : 0)
 
@@ -340,28 +339,15 @@ function Dashboard() {
             trips = tripCountsKnown ? filteredTripVehs.reduce((sum, tv) => sum + tv.trip_count, 0) : null
         }
 
-        let drivingMinutes = 0
-        let drivingKnown = false
-        let drivingUnknownVehicles = 0
-        if (tripsDataPayload?.vehicles) {
-            tripsDataPayload.vehicles.forEach(tv => {
-                if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(tv.vehicle_id))) {
-                    if (Array.isArray(tv.trips) && tv.trips.length > 0) {
-                        const tripMinutes = sumKnown(tv.trips, t => t.duration_minutes)
-                        drivingMinutes += tripMinutes.total
-                        if (tripMinutes.partial) drivingUnknownVehicles += 1
-                        if (tripMinutes.known > 0) drivingKnown = true
-                    } else if (tv.gps_mileage_km === 0) {
-                        drivingKnown = true
-                    } else if (isKnownNumber(tv.gps_mileage_km) && isKnownNumber(tv.avg_speed_kmh) && Number(tv.avg_speed_kmh) > 0) {
-                        drivingMinutes += Math.round((Number(tv.gps_mileage_km) / Number(tv.avg_speed_kmh)) * 60)
-                        drivingKnown = true
-                    } else {
-                        drivingUnknownVehicles += 1
-                    }
-                }
-            })
-        }
+        // Driving time (engine on, moving): Wialon Engine Hours "In motion", trusted per unit only when that report's
+        // mileage agrees with this period's Dashboard mileage. Unknown units are left out and counted, never 0.
+        const drivingByVehicle = drivingSecondsByVehicle(
+            idleDataPayload, mileageData, id => selectedGroup === "ALL" || filteredVehicleIdSet.has(id),
+        )
+        const drivingSum = sumKnown(Array.from(drivingByVehicle.values()), seconds => seconds)
+        const drivingKnown = Array.isArray(idleDataPayload?.by_vehicle) && !drivingSum.allUnknown
+        const drivingMinutes = Math.round(drivingSum.total / 60)
+        const drivingUnknownVehicles = drivingSum.unknown
 
         let idleMinutes = 0
         let idleUnknownVehicles = 0
@@ -391,6 +377,7 @@ function Dashboard() {
             driving: drivingKnown ? formatHoursMins(drivingMinutes) : "—",
             drivingRaw: drivingKnown ? drivingMinutes : null,
             drivingUnknownVehicles,
+            drivingByVehicle,
             idle: idleAllUnknown ? "—" : formatHoursMins(idleMinutes),
             idleRaw: idleAllUnknown ? null : idleMinutes,
             idleUnknownVehicles,
@@ -460,7 +447,15 @@ function Dashboard() {
     const comparisonMetrics = useMemo(() => {
         const distChange = calculateComparisonChange(todayFleetActivity.distanceRaw, yesterdayFleetActivity.distanceRaw, false)
         const tripsChange = calculateComparisonChange(todayFleetActivity.tripsRaw, yesterdayFleetActivity.tripsRaw, false)
-        const drivingChange = calculateComparisonChange(todayFleetActivity.drivingRaw, yesterdayFleetActivity.drivingRaw, false)
+        // Driving time is compared over the vehicles known on both days, so an unknown vehicle on either day does
+        // not read as a change
+        const drivingBoth = sumKnownInBoth(todayFleetActivity.drivingByVehicle, yesterdayFleetActivity.drivingByVehicle)
+        const drivingChange = todayFleetActivity.drivingRaw === null || yesterdayFleetActivity.drivingRaw === null || drivingBoth.units === 0
+            ? calculateComparisonChange(null, null, false)
+            : calculateComparisonChange(Math.round(drivingBoth.a / 60), Math.round(drivingBoth.b / 60), false)
+        if (drivingBoth.units > 0 && (todayFleetActivity.drivingUnknownVehicles > 0 || yesterdayFleetActivity.drivingUnknownVehicles > 0)) {
+            drivingChange.tooltip = `${drivingChange.tooltip} min, over ${drivingBoth.units} vehicle(s) known on both days`
+        }
         const idleChange = calculateComparisonChange(todayFleetActivity.idleRaw, yesterdayFleetActivity.idleRaw, true)
 
         return [
@@ -484,7 +479,8 @@ function Dashboard() {
             },
             {
                 id: "driving",
-                label: "Driving Time",
+                label: "Driving time (engine on, moving)",
+                labelTitle: DRIVING_LABEL_TITLE,
                 unit: "hrs/mins",
                 today: todayFleetActivity.driving,
                 yesterday: yesterdayFleetActivity.driving,
@@ -592,6 +588,7 @@ function Dashboard() {
         { key: "MOVING", label: "Moving", count: movingCount, dot: "bg-status-moving", note: "in motion" },
         { key: "IDLING", label: "Idling", count: idlingCount, dot: "bg-status-idling", note: "engine on" },
         { key: "STOPPED", label: "Stopped", count: stoppedCount, dot: "bg-status-stopped", note: "parked" },
+        { key: "DELAYED", label: "Delayed", count: delayedCount, dot: "bg-status-delayed", note: "moving/idling, stale > 10 min" },
         { key: "OFFLINE", label: "Offline", count: offlineCount, dot: "bg-status-offline", note: "no signal" },
     ]
 
@@ -600,14 +597,15 @@ function Dashboard() {
             label: "Distance",
             value: todayFleetActivity.distance,
             partial: todayFleetActivity.distanceUnknownUnits > 0 ? `${todayFleetActivity.distanceUnknownUnits} unit(s) unknown` : null,
-            partialTitle: "Wialon could not read these units' mileage; they are left out of the total",
+            partialTitle: "Wialon reported no usable mileage for these units (unreadable, ambiguous name, or not covered by the report group); they are left out of the total",
         },
         { label: "Trips", value: todayFleetActivity.trips, partial: null },
         {
-            label: "Driving time",
+            label: "Driving time (engine on, moving)",
+            labelTitle: DRIVING_LABEL_TITLE,
             value: todayFleetActivity.driving,
             partial: todayFleetActivity.drivingUnknownVehicles > 0 ? `${todayFleetActivity.drivingUnknownVehicles} vehicle(s) unknown` : null,
-            partialTitle: "Wialon reported no usable distance, speed or trip duration for these vehicles; they are left out of the total",
+            partialTitle: "Wialon \"In motion\" time is unreadable or unattributed for these vehicles, or their Engine Hours mileage disagrees with the Dashboard mileage; they are left out of the total",
         },
         {
             label: "Idle time",
@@ -729,7 +727,7 @@ function Dashboard() {
                                 </div>
 
                                 {/* Status Cards Grid */}
-                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                                <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-2.5">
                                     {statusSegments.map(seg => (
                                         <Link
                                             key={seg.key}
@@ -766,7 +764,7 @@ function Dashboard() {
                                         key={row.label}
                                         className="flex flex-col justify-center rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300"
                                     >
-                                        <dt className="text-xs font-medium text-slate-500">{row.label}</dt>
+                                        <dt className="text-xs font-medium text-slate-500" title={row.labelTitle}>{row.label}</dt>
                                         <dd className="mt-1">
                                             <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
                                                 {row.value}
@@ -1065,7 +1063,7 @@ function Dashboard() {
                                                 <tr key={m.id} className="transition-colors hover:bg-slate-50/60">
                                                     <td className="py-2.5 font-medium text-slate-700">
                                                         <div>
-                                                            <span className="text-slate-900 font-semibold">{m.label}</span>
+                                                            <span className="text-slate-900 font-semibold" title={m.labelTitle}>{m.label}</span>
                                                             {m.partial && (
                                                                 <span className="block text-[10px] text-amber-700">
                                                                     {m.partial}

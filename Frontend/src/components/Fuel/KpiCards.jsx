@@ -7,6 +7,7 @@ import {
     Database,
     Calculator,
 } from "lucide-react"
+import { fuelShareNote } from "./fuelLabels"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -55,6 +56,8 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const transactionCount = efficiencyData?.transaction_count
     const vehicleCount = efficiencyData?.vehicle_count
     const trackedLitres = efficiencyData?.tracked_litres
+    // Basis of the idle/driving fuel shares: litres of vehicles with distance or engine hours
+    const telemetryLitres = efficiencyData?.telemetry_litres
     const vehiclesWithDistance = efficiencyData?.vehicles_with_distance
     const engineOnlyCount = efficiencyData?.vehicles_engine_hours_only
     const suppressedReason = efficiencyData?.efficiency_suppressed_reason
@@ -179,7 +182,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Productive Driving Time", value: drivingHours !== null && drivingHours !== undefined ? `${drivingHours.toFixed(1)} hrs` : "—", source: "Wialon Motion Telematics" },
                         { label: "Estimated Driving Fuel", value: estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? `${formatNumber(estimatedDrivingFuel, 1)} L` : "—", source: "Tracked Litres - Estimated Idle Fuel" },
-                        { label: "Driving Share of Hours", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Driving Hours ÷ Total Engine Hours" },
+                        { label: "Estimated driving share of fuel", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Estimated driving litres ÷ litres of vehicles with telemetry" },
                     ],
                     calculationSteps: [
                         "Driving Hours = Sum of motion durations across matched units",
@@ -199,7 +202,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Stationary Idle Time", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Stationary Engine Telematics" },
                         { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Configurable Idle Parameter" },
-                        { label: "Idle Share of Hours", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Idle Hours ÷ Total Engine Hours" },
+                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with telemetry" },
                     ],
                     calculationSteps: [
                         "Idling Hours = Sum of stationary engine durations",
@@ -219,13 +222,13 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Qualifying Idle Duration", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Telematics (Stationary Engine)" },
                         { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Dashboard Coefficient Parameter" },
-                        { label: "Total Fleet Fuel", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Total Litres" },
-                        { label: "Idle Consumption Share", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Idle Litres ÷ Total Litres" },
+                        { label: "Fuel of vehicles with telemetry", value: `${formatNumber(telemetryLitres, 1)} L`, source: "Purchased litres of vehicles with Wialon distance or engine hours" },
+                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with telemetry" },
                         { label: "Estimated Idle Spend", value: `AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`, source: "Idle Litres × Weighted Avg Price" },
                     ],
                     calculationSteps: [
                         `Idle Fuel = ${idleHours !== null && idleHours !== undefined ? idleHours.toFixed(1) : "—"} hrs × ${idleRate.toFixed(1)} L/h`,
-                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of fuel volume" : "—"})`,
+                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of telemetry vehicles' fuel" : "—"})`,
                     ],
                 }
             case "vehicle_count":
@@ -301,7 +304,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Driving hours",
             value: has(drivingHours) ? formatNumber(drivingHours, 1) : "—",
             unit: "h",
-            note: has(drivingPct) ? `${drivingPct.toFixed(1)}% of engine time` : "In active motion",
+            note: fuelShareNote(drivingPct) ?? "In active motion",
             provenance: "Recorded",
         },
         {
@@ -309,7 +312,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Idling hours",
             value: has(idleHours) ? formatNumber(idleHours, 1) : "—",
             unit: "h",
-            note: has(idlePct) ? `${idlePct.toFixed(1)}% of engine time` : "Stationary engine",
+            note: fuelShareNote(idlePct) ?? "Stationary engine",
             provenance: "Recorded",
         },
         {

@@ -23,6 +23,7 @@ Source of truth for tokens: `Frontend/src/index.css` (`@theme` block and `type-*
 | `--color-status-idling` | `#D97706` | IDLING |
 | `--color-status-stopped` | `#94A3B8` | STOPPED |
 | `--color-status-offline` | `#E11D48` | OFFLINE / critical |
+| `--color-status-delayed` | `#7C3AED` | DELAYED (last seen Moving/Idling, telemetry older than 10 min; shows last known state). Last seen Stopped stays STOPPED until OFFLINE (12 h) |
 | Chart categorical | `#1479A0`, `#E0702E`, `#2FA88A`, `#C98E0E`, `#5A63C9`, `#C4507F`; other `#94A3B8` | Multi-series charts |
 
 - **Radius**: 4 px badges · 6 px controls · 8 px panels · 12 px dialogs.

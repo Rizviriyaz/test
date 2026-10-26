@@ -405,6 +405,7 @@ def get_groups():
             moving = sum(1 for v in group_vehicles if v["status"] == "MOVING")
             idling = sum(1 for v in group_vehicles if v["status"] == "IDLING")
             stopped = sum(1 for v in group_vehicles if v["status"] == "STOPPED")
+            delayed = sum(1 for v in group_vehicles if v["status"] == "DELAYED")  # stale telemetry, not live
             offline = sum(1 for v in group_vehicles if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
             group_summaries.append({
                 "id": g.get("id"),
@@ -413,6 +414,7 @@ def get_groups():
                 "moving": moving,
                 "idling": idling,
                 "stopped": stopped,
+                "delayed": delayed,
                 "offline": offline,
                 "vehicles": group_vehicles
             })
@@ -836,6 +838,7 @@ def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
         moving = sum(1 for v in fleet if v.get("status") == "MOVING")
         idling = sum(1 for v in fleet if v.get("status") == "IDLING")
         stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
+        delayed = sum(1 for v in fleet if v.get("status") == "DELAYED")  # stale telemetry, not live
         offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
         # Authoritative analytics
@@ -850,6 +853,7 @@ def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
                 "moving": moving,
                 "idling": idling,
                 "stopped": stopped,
+                "delayed": delayed,
                 "offline": offline,
                 "total_distance_km": trips_data.get("summary", {}).get("total_distance_km", 0.0),
                 # The totals above cover vehicles with known values only; these flag when some were unknown
@@ -885,6 +889,7 @@ def get_fleet_health():
     moving = sum(1 for v in fleet if v["status"] == "MOVING")
     idling = sum(1 for v in fleet if v["status"] == "IDLING")
     stopped = sum(1 for v in fleet if v["status"] == "STOPPED")
+    delayed = sum(1 for v in fleet if v["status"] == "DELAYED")  # stale telemetry, not live
     offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
     gps_available = sum(1 for v in fleet if v.get("latitude") is not None and v.get("longitude") is not None)
@@ -924,6 +929,7 @@ def get_fleet_health():
             "moving": moving,
             "idling": idling,
             "stopped": stopped,
+            "delayed": delayed,
             "offline": offline
         },
         "health": {
@@ -1154,6 +1160,10 @@ def get_dashboard_mileage(
                     source = "ambiguous_vehicle_name" if len(name_candidates(v_name)) > 1 else "duplicate_report_rows"
                 elif member_ids is not None and vid in member_ids and v_name not in covered_names:
                     source = "missing_from_report"
+                elif group_id is None and member_ids is not None and vid not in member_ids and v_name not in covered_names:
+                    # Fleet-wide view: a fleet unit outside the "All Unit" report group was not covered by the
+                    # report, so its mileage is unknown (listed, total marked partial), never silently left out
+                    source = "outside_report_group"
                 else:
                     continue
                 report_incomplete = True
@@ -1483,12 +1493,14 @@ def get_fleet_idle_analytics(
     elif from_date:
         window_spec = f"dates-{from_date}-{to_date or from_date}"
     elif timeframe:
-        window_spec = f"tf-{timeframe.lower().strip()}"
+        tf = timeframe.lower().strip()
+        # A calendar window's start moves at UAE midnight: a result cached before it never answers after it
+        window_spec = f"tf-{tf}" if tf in ROLLING_TIMEFRAMES else f"tf-{tf}-{eff_from}"
     else:
         window_spec = f"hours-{hours or 24}"
 
     events_tag = "full" if include_events else "summary"
-    cache_key = f"fleet-idle-v8-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
+    cache_key = f"fleet-idle-v10-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
     if not refresh and not skip_cache:
         hit = cached(cache_key, ttl_seconds=180)
         log_cache_state("/api/idle/fleet-analytics", hit is not None)
@@ -1653,6 +1665,17 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         v_engine_sec = None if v_unattributed or "engine_hours_seconds" in v_unreadable else w_veh.get("engine_hours_seconds", 0)
         v_total_sec = None if v_unattributed or "total_time_seconds" in v_unreadable else w_veh.get("total_time_seconds", 0)
         v_longest_sec = None if v_idle_sec is None else w_veh.get("longest_idle_seconds", 0)
+        # Driving time (engine on, moving) is the report's "In motion" value. Engine-report mileage is exposed so
+        # the Dashboard can check it against its own (Trips report) mileage before trusting the unit's value.
+        # Either is unknown (None) when unattributed or unreadable; "In motion" is also unknown when this report's
+        # mileage is unknown (no consistency check possible) or when the unit covered distance with 0 s in motion.
+        v_engine_km = (
+            None if v_unattributed or "mileage_km" in v_unreadable or w_veh.get("mileage_km") is None
+            else w_veh["mileage_km"]
+        )
+        v_motion_sec = None if v_unattributed or "in_motion_seconds" in v_unreadable else w_veh.get("in_motion_seconds")
+        if v_engine_km is None or (v_motion_sec == 0 and v_engine_km > 0):
+            v_motion_sec = None
 
         # Discrete events for this vehicle from Wialon
         raw_v_events = wialon_events_by_veh.get(vname, [])
@@ -1695,6 +1718,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
             "longest_idle_seconds": v_longest_sec,
             "engine_hours_seconds": v_engine_sec,
             "total_time_seconds": v_total_sec,
+            "in_motion_seconds": v_motion_sec,
+            "engine_mileage_km": v_engine_km,
             "status": live_st,
             "idle_start": v_idle_st if live_st == "IDLING" else None,
             "idle_duration": v_idle_dur,

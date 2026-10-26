@@ -13,6 +13,7 @@ import "leaflet/dist/leaflet.css"
 import FleetStatusBadge from "./Common/FleetStatusBadge"
 import { MorphingDialogTrigger } from "./core/morphing-dialog"
 import { isValidCoordinate } from "../utils/coordinates"
+import { lastSeenLabel, normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function getMarkerIcon(status, selected = false) {
     // Same status colors as the rest of the UI (index.css --color-status-*)
@@ -20,6 +21,7 @@ function getMarkerIcon(status, selected = false) {
         MOVING: "#059669",
         IDLING: "#D97706",
         STOPPED: "#94A3B8",
+        DELAYED: "#7C3AED",
         OFFLINE: "#E11D48",
     }
 
@@ -196,14 +198,16 @@ function formatDriver(vehicle) {
 }
 
 function VehiclePopupCard({ vehicle, onInspect }) {
-    const statusStr = String(vehicle.status || (vehicle.is_offline ? "OFFLINE" : "STOPPED")).toUpperCase()
+    const statusStr = normalizeVehicleStatus(vehicle)
+    // Stale telemetry: speed and ignition are the last reported values, and no idle timer is running
+    const lastSeen = lastSeenLabel(vehicle)
     const driverName = formatDriver(vehicle)
     const hasCoords = isValidCoordinate(vehicle.latitude, vehicle.longitude)
 
     const rows = [
-        ["Speed", <span key="s" className="tabular-nums">{Math.round(Number(vehicle.speed) || 0)} km/h</span>],
-        ["Ignition", vehicle.ignition ? "On" : "Off"],
-        ["Idle time", <span key="i" className="tabular-nums">{vehicle.idle_duration_formatted || "00:00:00"}</span>],
+        [lastSeen ? "Last speed" : "Speed", <span key="s" className="tabular-nums">{Math.round(Number(vehicle.speed) || 0)} km/h</span>],
+        [lastSeen ? "Last ignition" : "Ignition", vehicle.ignition ? "On" : "Off"],
+        ["Idle time", <span key="i" className="tabular-nums">{lastSeen ? "—" : (vehicle.idle_duration_formatted || "00:00:00")}</span>],
         ["Driver", <span key="d" className="block max-w-[140px] truncate" title={driverName}>{driverName}</span>],
     ]
 
@@ -220,6 +224,7 @@ function VehiclePopupCard({ vehicle, onInspect }) {
                 </div>
                 <FleetStatusBadge status={statusStr} size="xs" />
             </div>
+            {lastSeen && <p className="pt-1.5 text-[11px] font-medium text-violet-800">{lastSeen}</p>}
 
             <dl className="divide-y divide-slate-100 text-xs">
                 {rows.map(([label, value]) => (
@@ -328,7 +333,7 @@ function FleetMap({
                                 Number(vehicle.latitude),
                                 Number(vehicle.longitude),
                             ]}
-                            icon={getMarkerIcon(vehicle.status, isSelected)}
+                            icon={getMarkerIcon(normalizeVehicleStatus(vehicle), isSelected)}
                             eventHandlers={{
                                 click: () => {
                                     onVehicleSelect(vehicle)

@@ -37,8 +37,10 @@ export default function DrivingVsIdlingChart({
     const totalHours = (drivingHours || 0) + (idleHours || 0)
     const totalFuel = (drivingFuel || 0) + (idleFuel || 0)
 
-    const hoursDrivingPct = totalHours > 0 ? ((drivingHours || 0) / totalHours) * 100 : (drivingPct || 0)
-    const hoursIdlePct = totalHours > 0 ? ((idleHours || 0) / totalHours) * 100 : (idlePct || 0)
+    // Hour shares come from hours only; without hours they are 0 (shown as "—"), never the fuel percentages
+    const hoursKnown = totalHours > 0
+    const hoursDrivingPct = hoursKnown ? ((drivingHours || 0) / totalHours) * 100 : 0
+    const hoursIdlePct = hoursKnown ? ((idleHours || 0) / totalHours) * 100 : 0
 
     const fuelDrivingPct = totalFuel > 0 ? ((drivingFuel || 0) / totalFuel) * 100 : (drivingPct || 0)
     const fuelIdlePct = totalFuel > 0 ? ((idleFuel || 0) / totalFuel) * 100 : (idlePct || 0)
@@ -104,23 +106,23 @@ export default function DrivingVsIdlingChart({
                             <div
                                 style={{ width: `${Math.max(hoursDrivingPct, 0)}%` }}
                                 className="bg-[#33758F] transition-[width] duration-300"
-                                title={`Driving: ${drivingHours != null ? Number(drivingHours).toFixed(1) + 'h' : '—'} (${Math.round(hoursDrivingPct)}%)`}
+                                title={`Driving: ${drivingHours != null ? Number(drivingHours).toFixed(1) + 'h' : '—'} (${hoursKnown ? Math.round(hoursDrivingPct) + '%' : '—'})`}
                             />
                             <div
                                 style={{ width: `${Math.max(hoursIdlePct, 0)}%` }}
                                 className="bg-[#D97706] transition-[width] duration-300"
-                                title={`Idling: ${idleHours != null ? Number(idleHours).toFixed(1) + 'h' : '—'} (${Math.round(hoursIdlePct)}%)`}
+                                title={`Idling: ${idleHours != null ? Number(idleHours).toFixed(1) + 'h' : '—'} (${hoursKnown ? Math.round(hoursIdlePct) + '%' : '—'})`}
                             />
                         </div>
 
                         <div className="flex items-center justify-between mt-2 text-[11px]">
                             <span className="inline-flex items-center gap-1.5 text-[#33758F] font-medium">
                                 <span className="h-2 w-2 rounded-full bg-[#33758F]" />
-                                Active Driving Motion: {Math.round(hoursDrivingPct)}%
+                                Active Driving Motion: {hoursKnown ? `${Math.round(hoursDrivingPct)}%` : "—"}
                             </span>
                             <span className="inline-flex items-center gap-1.5 text-[#D97706] font-medium">
                                 <span className="h-2 w-2 rounded-full bg-[#D97706]" />
-                                Stationary Idling: {Math.round(hoursIdlePct)}%
+                                Stationary Idling: {hoursKnown ? `${Math.round(hoursIdlePct)}%` : "—"}
                             </span>
                         </div>
                     </div>

@@ -10,22 +10,34 @@ Every fetched transaction lands in exactly one bucket:
 Reconciliation invariant (count, litres and cost separately, refunds signed):
   kpi + unmatched + ambiguous + suspected_duplicates == all fetched rows.
 
-Matching rules are those of match_fuel_vehicle_to_wialon (unchanged); this module only applies them
-consistently, once per identifier, and groups by Wialon unit id so a unit is never counted twice.
+Matching rules are those of match_fuel_vehicle_to_wialon; this module applies them consistently, once per
+identifier, and groups by Wialon unit id so a unit is never counted twice. A match on the registration number
+alone (the unit's plate or name is just the number) cannot verify the emirate/code: it is ambiguous whenever
+identifiers with different codes resolve to that unit that way (plate_code_conflict), checked against every
+identifier ever imported (registry_fn) so the outcome does not depend on the selected period.
 Nothing is deleted: suspected duplicates are only excluded from KPIs and listed for review.
 """
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.fuel.db import build_fingerprint
-from app.fuel.wialon_distance import match_fuel_vehicle_to_wialon, normalize_alphanumeric, unit_match_keys
+from app.fuel.wialon_distance import (
+    MATCH_NUMBER_ONLY,
+    match_fuel_vehicle_to_wialon,
+    match_fuel_vehicle_with_basis,
+    normalize_alphanumeric,
+    plate_code_prefix,
+    unit_match_keys,
+)
 from app.utils.datetime_helpers import parse_tx_wallclock
 
 REASON_UNMATCHED = "unmatched"
 REASON_AMBIGUOUS = "ambiguous"
 REASON_DUPLICATE = "suspected_duplicate"
+AMBIGUITY_PLATE_CODE_CONFLICT = "plate_code_conflict"
 EXCLUDED_REASONS = (REASON_UNMATCHED, REASON_AMBIGUOUS, REASON_DUPLICATE)
 
 NO_TRANSACTIONS_WARNING = (
@@ -53,33 +65,94 @@ def _identifier(tx: Dict[str, Any]) -> str:
 
 
 class UnitResolver:
-    """Memoized identifier -> Wialon unit resolution using the unchanged matching rules."""
+    """
+    Memoized identifier -> Wialon unit resolution using the matching rules of match_fuel_vehicle_to_wialon.
 
-    def __init__(self, wialon_units: List[Dict[str, Any]], match_fn: Optional[MatchFn] = None):
+    A number-only match is accepted only when no other known identifier with a different, non-empty plate code
+    resolves number-only to the same unit. Known identifiers are `known_identifiers` (the rows at hand) plus
+    `registry_fn()` (every identifier ever imported), read lazily: only the first time a number-only match
+    occurs, so fleets matched by exact plate or name never read it. A failing registry_fn propagates.
+    """
+
+    def __init__(self, wialon_units: List[Dict[str, Any]], match_fn: Optional[MatchFn] = None,
+                 registry_fn: Optional[Callable[[], Iterable[str]]] = None,
+                 known_identifiers: Optional[Iterable[str]] = None):
         self.units = wialon_units or []
         self._match = match_fn or match_fuel_vehicle_to_wialon
         self._memo: Dict[str, Dict[str, Any]] = {}
+        self._raw_memo: Dict[str, Tuple[Optional[Dict[str, Any]], Optional[str]]] = {}
         self._match_keys = None  # the units' plate/name keys, computed once for the default matcher
+        self._registry_fn = registry_fn
+        self._known = {str(i).strip() for i in known_identifiers or [] if i and str(i).strip()}
+        self._registry: Optional[set] = None  # registry_fn() result, read at most once
+        self._conflicts: Optional[Dict[str, List[str]]] = None  # identifier -> conflicting identifiers
+
+    def add_known_identifiers(self, identifiers: Iterable[str]) -> None:
+        """Identifiers to check number-only matches against; resolutions are recomputed if the set grows."""
+        new = {str(i).strip() for i in identifiers or [] if i and str(i).strip()} - self._known
+        if new:
+            self._known |= new
+            if self._conflicts is not None:
+                self._conflicts = None
+                self._memo.clear()
+
+    def _raw(self, key: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        if key not in self._raw_memo:
+            m, basis = None, None
+            if key and self.units:
+                if self._match is match_fuel_vehicle_to_wialon:
+                    if self._match_keys is None:
+                        self._match_keys = unit_match_keys(self.units)
+                    m, basis = match_fuel_vehicle_with_basis(key, self.units, match_keys=self._match_keys)
+                else:
+                    m = self._match(key, self.units)
+            self._raw_memo[key] = (m, basis)
+        return self._raw_memo[key]
+
+    def _conflict_map(self) -> Dict[str, List[str]]:
+        """Number-only identifiers whose unit is also reached number-only under a different plate code."""
+        if self._conflicts is None:
+            if self._registry is None:
+                registry = self._registry_fn() if self._registry_fn is not None else []
+                self._registry = {str(i).strip() for i in registry or [] if i and str(i).strip()}
+            ids = self._known | self._registry
+            by_unit: Dict[int, List[str]] = defaultdict(list)
+            for ident in ids:
+                m, basis = self._raw(ident)
+                if basis == MATCH_NUMBER_ONLY and m and m.get("id") is not None:
+                    by_unit[int(m["id"])].append(ident)
+            conflicts: Dict[str, List[str]] = {}
+            for idents in by_unit.values():
+                prefixes = {plate_code_prefix(i) for i in idents} - {""}
+                if len(prefixes) > 1:
+                    for ident in idents:
+                        if plate_code_prefix(ident):
+                            conflicts[ident] = sorted(idents)
+            self._conflicts = conflicts
+        return self._conflicts
 
     def resolve(self, identifier: str) -> Dict[str, Any]:
-        """{"status": matched|unmatched|ambiguous, "unit_id", "unit_name", "unit", "candidates"}."""
+        """{"status": matched|unmatched|ambiguous, "unit_id", "unit_name", "unit", "candidates", "ambiguity", "basis"}."""
         key = str(identifier or "").strip()
         if key in self._memo:
             return self._memo[key]
-        res: Dict[str, Any] = {"status": REASON_UNMATCHED, "unit_id": None, "unit_name": None, "unit": None, "candidates": []}
-        m = None
-        if key and self.units:
-            if self._match is match_fuel_vehicle_to_wialon:
-                if self._match_keys is None:
-                    self._match_keys = unit_match_keys(self.units)
-                m = self._match(key, self.units, match_keys=self._match_keys)
-            else:
-                m = self._match(key, self.units)
+        res: Dict[str, Any] = {"status": REASON_UNMATCHED, "unit_id": None, "unit_name": None, "unit": None,
+                               "candidates": [], "ambiguity": None, "basis": None}
+        m, basis = self._raw(key)
         if m and m.get("ambiguous"):
             res["status"] = REASON_AMBIGUOUS
             res["candidates"] = sorted({str(c.get("nm", "")).strip() for c in m.get("candidates") or [] if c})
         elif m and m.get("id") is not None:
-            res.update(status="matched", unit_id=int(m["id"]), unit_name=str(m.get("nm", "")).strip(), unit=m)
+            if basis == MATCH_NUMBER_ONLY:
+                self.add_known_identifiers([key])
+                conflicting = self._conflict_map().get(key)
+                if conflicting:
+                    res.update(status=REASON_AMBIGUOUS, candidates=[str(m.get("nm", "")).strip()],
+                               ambiguity=AMBIGUITY_PLATE_CODE_CONFLICT, conflicting_identifiers=conflicting)
+                    self._memo[key] = res
+                    return res
+            res.update(status="matched", unit_id=int(m["id"]), unit_name=str(m.get("nm", "")).strip(), unit=m,
+                       basis=basis)
         self._memo[key] = res
         return res
 
@@ -137,6 +210,7 @@ def partition_transactions(transactions: List[Dict[str, Any]], resolver: UnitRes
     part = ScopePartition()
     if transactions and not resolver.units:
         part.warnings.append(EMPTY_UNIT_LIST_WARNING)
+    resolver.add_known_identifiers(_identifier(tx) for tx in transactions or [])
     dup_flags = _suspected_duplicate_flags(transactions or [])
     for tx, is_dup in zip(transactions or [], dup_flags):
         res = resolver.resolve(_identifier(tx))
@@ -145,7 +219,8 @@ def partition_transactions(transactions: List[Dict[str, Any]], resolver: UnitRes
         elif res["status"] == "matched":
             part.matched.append(dict(tx, _unit_id=res["unit_id"], _unit_name=res["unit_name"]))
         elif res["status"] == REASON_AMBIGUOUS:
-            part.ambiguous.append(dict(tx, _exclusion_reason=REASON_AMBIGUOUS, _candidates=res["candidates"]))
+            part.ambiguous.append(dict(tx, _exclusion_reason=REASON_AMBIGUOUS, _candidates=res["candidates"],
+                                       _ambiguity=res.get("ambiguity")))
         else:
             part.unmatched.append(dict(tx, _exclusion_reason=REASON_UNMATCHED))
     if transactions and not part.matched:
@@ -242,7 +317,12 @@ def filter_by_vehicle(
     target = resolver.resolve(str(value).strip())
     target_norm = normalize_alphanumeric(value)
     warnings: List[str] = []
-    if target["status"] == REASON_AMBIGUOUS:
+    if target.get("ambiguity") == AMBIGUITY_PLATE_CODE_CONFLICT:
+        warnings.append(
+            f"Vehicle filter '{value}' matches Wialon unit {', '.join(target['candidates'])} by registration number "
+            "only, and other plate codes share that number; only rows with exactly this identifier are shown, as ambiguous."
+        )
+    elif target["status"] == REASON_AMBIGUOUS:
         warnings.append(
             f"Vehicle filter '{value}' matches several Wialon units ({', '.join(target['candidates'])}); "
             "only rows with exactly this identifier are shown, as ambiguous."
@@ -343,12 +423,14 @@ def build_scope(
     fetch_fn: Callable[[Dict[str, Any]], List[Dict[str, Any]]],
     login_fn: Callable[[], str],
     units_fn: Callable[[str], List[Dict[str, Any]]],
+    registry_fn: Optional[Callable[[], Iterable[str]]] = None,
 ) -> ScopeContext:
     """
     fetch -> exact vehicle filter -> partition -> fuel-type filter. Wialon (login + unit list) is only
     contacted when there are fetched transactions to classify. Callers inject their fetch/login/unit
     functions so each module's own imports (and test patches) are used. The fuel-type filter is applied in
-    memory (all fuel types are fetched) so mixed-fuel units can be detected.
+    memory (all fuel types are fetched) so mixed-fuel units can be detected. `registry_fn` (every identifier ever
+    imported) is read only if a number-only match occurs; without it, conflicts are checked among fetched rows.
     """
     vehicle_value = filters.get("vehicle_identifier")
     fuel_type = filters.get("fuel_type")
@@ -361,7 +443,7 @@ def build_scope(
         return ScopeContext(empty, UnitResolver([]), None, build_excluded_scope(empty, [NO_TRANSACTIONS_WARNING]),
                             [NO_TRANSACTIONS_WARNING], 0)
     sid = login_fn()
-    resolver = UnitResolver(units_fn(sid))
+    resolver = UnitResolver(units_fn(sid), registry_fn=registry_fn, known_identifiers=(_identifier(t) for t in raw))
     rows, filter_warnings = filter_by_vehicle(raw, vehicle_value, resolver)
     if not rows:
         empty = ScopePartition()
@@ -386,6 +468,7 @@ def summarize_excluded(
         key = (rsn, _identifier(r))
         g = groups.setdefault(key, {
             "vehicle_identifier": key[1], "reason": rsn, "candidate_unit_names": list(r.get("_candidates") or []),
+            "ambiguity_reason": r.get("_ambiguity"),
             "transaction_count": 0, "_l": Decimal(0), "_c": Decimal(0), "first_date": None, "last_date": None,
             "transaction_ids": [],
         })
@@ -411,6 +494,9 @@ def unit_key(tx: Dict[str, Any], resolver: Optional[UnitResolver] = None) -> Tup
     """Grouping key: the Wialon unit id when the row is (or resolves as) matched, else its identifier."""
     if tx.get("_unit_id") is not None:
         return ("unit", int(tx["_unit_id"]))
+    if tx.get("_exclusion_reason"):
+        # Excluded by the scope partition (e.g. a plate-code conflict): never re-resolved into a unit
+        return ("id", _identifier(tx))
     if resolver is not None:
         res = resolver.resolve(_identifier(tx))
         if res["status"] == "matched":

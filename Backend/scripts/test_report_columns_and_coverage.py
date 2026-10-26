@@ -101,14 +101,14 @@ def test_parser_missing_header_name():
     print("[PASS] Parser: header without 'Mileage' -> mileage_km listed as unlocated (and warned).")
 
 
-def _main_patches(stack, engine, units=UNITS):
+def _main_patches(stack, engine, units=UNITS, groups=GROUPS):
     main._cache.clear()
     fa._analytics_cache.clear()
     stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-    stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS))
+    stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=groups))
     for target in ("app.main", "app.fleet_analytics"):
         stack.enter_context(patch(f"{target}.login", return_value="sid"))
-        stack.enter_context(patch(f"{target}.get_vehicle_groups", return_value=GROUPS))
+        stack.enter_context(patch(f"{target}.get_vehicle_groups", return_value=groups))
         stack.enter_context(patch(f"{target}.get_all_vehicles", return_value=units))
         stack.enter_context(patch(f"{target}.get_calculated_data", return_value=CALCULATED))
         stack.enter_context(patch(f"{target}.get_vehicle_live_data", side_effect=lambda *a, **k: [dict(v) for v in FLEET]))
@@ -143,6 +143,35 @@ def test_dashboard_mileage_guessed_column_and_missing_member():
         assert engine.count("report/exec_report") == 1, "a result with a missing member must not be served from cache"
     print("[PASS] Dashboard mileage: guessed Mileage column -> unknown (not cached); group member missing "
           "from the report -> unknown, listed in incomplete_units.")
+
+
+def test_dashboard_mileage_unit_outside_all_unit_group():
+    """H1: fleet-wide, a fleet unit that is not a member of the All Unit report group is unknown, not left out."""
+    groups = [dict(g, u=[101, 102]) if g["nm"] == "All Unit" else g for g in GROUPS]
+    tables = _tables(drop_group_rows=("UNIT-C",))
+    call = lambda gid: main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
+                                                  to_date=None, group_id=gid)
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.wialon_reports.GROUP_ID_ALL_UNITS", 0))
+        _main_patches(stack, FakeReportEngine(tables=tables), groups=groups)
+        res = call(None)
+        units = {u["vehicle_name"]: u for u in res["all_units"]}
+        assert units["UNIT-C"]["mileage"] is None and units["UNIT-C"]["source"] == "outside_report_group", units
+        assert res["incomplete_units"] == ["UNIT-C"], res
+        assert res["total_km"] == round(units["UNIT-A"]["mileage"] + units["UNIT-B"]["mileage"], 2), res
+        engine = FakeReportEngine(tables=tables)
+        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+        call(None)
+        assert engine.count("report/exec_report") == 1, "a fleet total missing a unit must not be served from cache"
+    # An explicitly requested group keeps non-members out of scope (unchanged)
+    with ExitStack() as stack:
+        stack.enter_context(patch("app.wialon_reports.GROUP_ID_ALL_UNITS", 0))
+        _main_patches(stack, FakeReportEngine(tables=tables), groups=groups)
+        res = call(7)
+        assert {u["vehicle_name"] for u in res["all_units"]} == {"UNIT-A", "UNIT-B"}, res["all_units"]
+        assert res["incomplete_units"] == [], res
+    print("[PASS] H1: fleet-wide mileage lists a unit outside the All Unit group as unknown (outside_report_group, "
+          "not cached); an explicit group still leaves non-members out.")
 
 
 def test_fleet_trips_guessed_column_and_missing_row():
@@ -418,6 +447,7 @@ def main_() -> int:
         test_parser_no_header_lists_guessed_fields_and_keeps_existing_values,
         test_parser_missing_header_name,
         test_dashboard_mileage_guessed_column_and_missing_member,
+        test_dashboard_mileage_unit_outside_all_unit_group,
         test_fleet_trips_guessed_column_and_missing_row,
         test_fleet_trips_unit_path_guessed_column,
         test_utilization_guessed_column_and_missing_row,

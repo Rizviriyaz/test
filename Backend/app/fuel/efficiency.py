@@ -189,7 +189,8 @@ def _group_fuel_by_unit(
                 continue
             g = others.get(vid)
             if g is None:
-                g = others[vid] = {"status": resolver.resolve(vid)["status"], "litres": Decimal(0), "cost": Decimal(0), "count": 0}
+                status = tx.get("_exclusion_reason") or resolver.resolve(vid)["status"]
+                g = others[vid] = {"status": status, "litres": Decimal(0), "cost": Decimal(0), "count": 0}
         g["litres"] += l
         g["cost"] += c
         g["count"] += 1

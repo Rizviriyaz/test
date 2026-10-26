@@ -235,12 +235,9 @@ export default function VehicleLeaderboard({
                                 const idlH = v.idle_duration_hours !== null && v.idle_duration_hours !== undefined ? v.idle_duration_hours : null
                                 const totalH = (drvH || 0) + (idlH || 0)
 
-                                const drvPct = totalH > 0 && drvH !== null
-                                    ? Math.round((drvH / totalH) * 100)
-                                    : (v.estimated_driving_percentage ? Math.round(v.estimated_driving_percentage) : null)
-                                const idlPct = totalH > 0 && idlH !== null
-                                    ? (100 - drvPct)
-                                    : (v.estimated_idle_percentage ? Math.round(v.estimated_idle_percentage) : null)
+                                // Time shares from hours only: without hours they are unknown, never the fuel shares
+                                const drvPct = totalH > 0 && drvH !== null ? Math.round((drvH / totalH) * 100) : null
+                                const idlPct = totalH > 0 && idlH !== null && drvPct !== null ? (100 - drvPct) : null
 
                                 // Top / Bottom performer indicator (when sorted by efficiency)
                                 const isTopRanked = sortBy === "efficiency" && rankNum <= 3 && hasValidEfficiency

@@ -3,13 +3,16 @@
  * - MOVING: speed > 0, ignition on
  * - IDLING: speed = 0, ignition on
  * - STOPPED: stationary, ignition off
- * - OFFLINE: telemetry stale / disconnected
+ * - DELAYED: last seen Moving or Idling, message older than 10 min (the vehicle's current state is unknown);
+ *   a vehicle last seen Stopped stays Stopped until Offline
+ * - OFFLINE: no message for 12 h / disconnected
  * Unknown values render as Stopped.
  */
 const STATUS = {
     MOVING: { label: "Moving", dot: "bg-status-moving", text: "text-emerald-800" },
     IDLING: { label: "Idling", dot: "bg-status-idling", text: "text-amber-800" },
     STOPPED: { label: "Stopped", dot: "bg-status-stopped", text: "text-slate-600" },
+    DELAYED: { label: "Delayed", dot: "bg-status-delayed", text: "text-violet-800" },
     OFFLINE: { label: "Offline", dot: "bg-status-offline", text: "text-rose-700" },
 }
 

@@ -14,6 +14,7 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import { LIVE_STATUSES, countByStatus, normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function formatLastUpdate(vehicle) {
     if (typeof vehicle.seconds_since_update === "number" && !isNaN(vehicle.seconds_since_update)) {
@@ -53,7 +54,7 @@ function Tracking() {
 
     const [statusFilter, setStatusFilter] = useState(() => {
         const param = searchParams.get("status")
-        if (param && ["ALL", "MOVING", "IDLING", "STOPPED", "OFFLINE"].includes(param.toUpperCase())) {
+        if (param && ["ALL", ...LIVE_STATUSES].includes(param.toUpperCase())) {
             return param.toUpperCase()
         }
         return "ALL"
@@ -79,7 +80,7 @@ function Tracking() {
             lastVehicleParamRef.current = null
         }
         const sParam = searchParams.get("status")
-        if (sParam && ["ALL", "MOVING", "IDLING", "STOPPED", "OFFLINE"].includes(sParam.toUpperCase())) {
+        if (sParam && ["ALL", ...LIVE_STATUSES].includes(sParam.toUpperCase())) {
             setStatusFilter(sParam.toUpperCase())
         }
     }, [searchParams])
@@ -183,9 +184,7 @@ function Tracking() {
                 const groupStr = String(vehicle.group || (Array.isArray(vehicle.groups) ? vehicle.groups.join(" ") : "")).toLowerCase()
                 const matchesSearch = !query || plateStr.includes(query) || name.includes(query) || idStr.includes(query) || groupStr.includes(query)
 
-                const vStatus = String(vehicle.status || "").toUpperCase()
-                const isOffline = vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || vStatus === "OFFLINE"
-                const normalizedStatus = isOffline ? "OFFLINE" : (vStatus === "MOVING" ? "MOVING" : (vStatus === "IDLING" ? "IDLING" : "STOPPED"))
+                const normalizedStatus = normalizeVehicleStatus(vehicle)
 
                 const matchesStatus =
                     statusFilter === "ALL" || normalizedStatus === statusFilter
@@ -207,27 +206,7 @@ function Tracking() {
     /*
         Status counts: clean mutually exclusive partitions
     */
-    const counts = useMemo(() => {
-        let moving = 0, idling = 0, stopped = 0, offline = 0
-        vehicles.forEach(v => {
-            const isOff = v.connection_status === "OFFLINE" || Boolean(v.is_offline) || String(v.status || "").toUpperCase() === "OFFLINE"
-            if (isOff) {
-                offline++
-            } else {
-                const s = String(v.status || "").toUpperCase()
-                if (s === "MOVING") moving++
-                else if (s === "IDLING") idling++
-                else stopped++
-            }
-        })
-        return {
-            ALL: vehicles.length,
-            MOVING: moving,
-            IDLING: idling,
-            STOPPED: stopped,
-            OFFLINE: offline,
-        }
-    }, [vehicles])
+    const counts = useMemo(() => countByStatus(vehicles), [vehicles])
 
     /*
         Select vehicle handler - highlights marker, focuses map, and opens single details drawer
@@ -283,6 +262,7 @@ function Tracking() {
         { key: "MOVING", label: "Moving", count: counts.MOVING, dot: "bg-status-moving" },
         { key: "IDLING", label: "Idling", count: counts.IDLING, dot: "bg-status-idling" },
         { key: "STOPPED", label: "Stopped", count: counts.STOPPED, dot: "bg-status-stopped" },
+        { key: "DELAYED", label: "Delayed", count: counts.DELAYED, dot: "bg-status-delayed" },
         { key: "OFFLINE", label: "Offline", count: counts.OFFLINE, dot: "bg-status-offline" },
     ]
 

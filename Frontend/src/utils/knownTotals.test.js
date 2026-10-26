@@ -3,7 +3,10 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { PARTIAL_EVENTS_NOTE, compareKnownDesc, formatKm, idleSecondsOf, partialEventsNote, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "./knownTotals.js"
+import {
+    PARTIAL_EVENTS_NOTE, compareKnownDesc, drivingSecondsByVehicle, engineMileageAgrees, formatKm, idleSecondsOf, inMotionSecondsOf,
+    partialEventsNote, sumKnown, sumKnownInBoth, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm,
+} from "./knownTotals.js"
 
 test("sumKnown keeps known values (including a recorded 0) and reports unknown ones", () => {
     const units = [{ mileage: 12.5 }, { mileage: null }, { mileage: 0 }, { mileage: undefined }, { mileage: 7.5 }]
@@ -149,4 +152,103 @@ test("Vehicle drawer takes its trips distance from tripsDistanceKm and shows —
     const drawer = readFileSync(new URL("../components/Vehicles/VehicleDetailDrawer.jsx", import.meta.url), "utf8")
     assert.match(drawer, /const tripsDistance = tripsDistanceKm\(tripsData\)/)
     assert.doesNotMatch(drawer, /total_distance_km \?\? \(tripsData \? 0 : null\)/)
+})
+
+// ─── H5: driving time (engine on, moving) from Wialon Engine Hours "In motion" ───
+
+const DAY = 1793131200 // a UAE day start (epoch seconds)
+const idlePayload = (rows, from = DAY) => ({ timeframe: { from_time: from }, by_vehicle: rows })
+const mileagePayload = (units, from = DAY) => ({ effective_from: from, all_units: units })
+const motionRow = (id, seconds, engineKm) => ({ vehicle_id: id, in_motion_seconds: seconds, engine_mileage_km: engineKm })
+
+test("inMotionSecondsOf reads a number and treats null or a missing key as unknown", () => {
+    assert.equal(inMotionSecondsOf({ in_motion_seconds: 3600 }), 3600)
+    assert.equal(inMotionSecondsOf({ in_motion_seconds: 0 }), 0)
+    assert.equal(inMotionSecondsOf({ in_motion_seconds: null }), null)
+    assert.equal(inMotionSecondsOf({}), null)
+    assert.equal(inMotionSecondsOf(null), null)
+})
+
+test("engineMileageAgrees accepts differences up to max(2 km, 5%) and rejects larger or unknown ones", () => {
+    assert.equal(engineMileageAgrees(12, 10), true, "2 km at 10 km (5% = 0.5 km)")
+    assert.equal(engineMileageAgrees(10.3, 8.3), true, "2 km exactly despite float rounding")
+    assert.equal(engineMileageAgrees(12.01, 10), false)
+    assert.equal(engineMileageAgrees(105, 100), true, "5% at 100 km")
+    assert.equal(engineMileageAgrees(95, 100), true)
+    assert.equal(engineMileageAgrees(105.1, 100), false)
+    assert.equal(engineMileageAgrees(0, 0), true)
+    assert.equal(engineMileageAgrees(null, 10), false)
+    assert.equal(engineMileageAgrees(10, null), false)
+    assert.equal(engineMileageAgrees(10, undefined), false)
+})
+
+test("the six inspected mileage discrepancies leave driving time unknown, not In motion and not 0", () => {
+    // [unit, Trips (Dashboard) km, Engine Hours km, In motion seconds] from the 25 Oct 2026 inspection
+    const cases = [[54836, 59.4, 1.7, 294], [72031, 42.7, 214.0, 14340], [99238, 26.8, 125.0, 8760],
+        [40630, 26.1, 46.3, 3960], [42897, 9.9, 5.3, 420], [94181, 496.0, 536.5, 37320]]
+    const byVehicle = drivingSecondsByVehicle(
+        idlePayload(cases.map(([id, , engineKm, motion]) => motionRow(id, motion, engineKm))),
+        mileagePayload(cases.map(([id, km]) => ({ vehicle_id: id, mileage: km }))),
+    )
+    for (const [id] of cases) assert.equal(byVehicle.get(String(id)), null, `unit ${id}`)
+})
+
+test("drivingSecondsByVehicle uses In motion when mileage agrees and keeps a legitimate zero", () => {
+    const byVehicle = drivingSecondsByVehicle(
+        idlePayload([motionRow(1, 5400, 101.5), motionRow(2, 0, 0), motionRow(3, 0, 0), motionRow(4, 0, 1.0)]),
+        mileagePayload([{ vehicle_id: 1, mileage: 100 }, { vehicle_id: 2, mileage: 0 }, { vehicle_id: 3, mileage: 1.5 },
+            { vehicle_id: 4, mileage: 0.5 }]),
+    )
+    assert.equal(byVehicle.get("1"), 5400)
+    assert.equal(byVehicle.get("2"), 0, "no distance, no motion: a real 0")
+    assert.equal(byVehicle.get("3"), null, "0 s in motion with Dashboard distance > 0 is unknown")
+    assert.equal(byVehicle.get("4"), null, "0 s in motion with distance > 0 is unknown")
+})
+
+test("drivingSecondsByVehicle: missing, unmatched, duplicated or other-period mileage leaves driving time unknown", () => {
+    const rows = [motionRow(1, 600, 10), motionRow(2, 600, 10), motionRow(3, 600, 10), motionRow(4, 600, null), motionRow(5, null, 10)]
+    const units = [{ vehicle_id: 1, mileage: null }, { vehicle_id: 3, mileage: 10 }, { vehicle_id: 3, mileage: 10 },
+        { vehicle_id: 4, mileage: 10 }, { vehicle_id: 5, mileage: 10 }, { vehicle_id: null, mileage: 10 }]
+    const byVehicle = drivingSecondsByVehicle(idlePayload(rows), mileagePayload(units))
+    assert.deepEqual([...byVehicle.values()], [null, null, null, null, null],
+        "unknown Dashboard mileage, unit absent from mileage, duplicated id, unknown engine mileage, unknown In motion")
+    const otherDay = drivingSecondsByVehicle(idlePayload([motionRow(1, 600, 10)]), mileagePayload([{ vehicle_id: 1, mileage: 10 }], DAY - 86400))
+    assert.equal(otherDay.get("1"), null, "mileage for a different period start is never compared")
+    assert.equal(drivingSecondsByVehicle(idlePayload([motionRow(1, 600, 10)]), null).get("1"), null, "no mileage payload")
+    assert.equal(drivingSecondsByVehicle(null, mileagePayload([])).size, 0, "no idle payload: no units")
+})
+
+test("missing driving-time data never falls back to distance ÷ average speed", () => {
+    const legacyRow = { vehicle_id: 1, gps_mileage_km: 50, avg_speed_kmh: 50, total_idle_seconds: 60 }
+    const byVehicle = drivingSecondsByVehicle(idlePayload([legacyRow]), mileagePayload([{ vehicle_id: 1, mileage: 50 }]))
+    assert.equal(byVehicle.get("1"), null)
+    const page = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
+    assert.doesNotMatch(page, /avg_speed_kmh/, "the Dashboard no longer reads average speed")
+    assert.doesNotMatch(page, /Est\. [Dd]riving/)
+})
+
+test("group-filtered driving totals exclude other groups and count unknown units for Partial", () => {
+    const idle = idlePayload([motionRow(1, 3600, 50), motionRow(2, 1800, 20), motionRow(3, null, 5), motionRow(9, 7200, 80)])
+    const mileage = mileagePayload([{ vehicle_id: 1, mileage: 50 }, { vehicle_id: 2, mileage: 40 }, { vehicle_id: 3, mileage: 5 },
+        { vehicle_id: 9, mileage: 80 }])
+    const group = new Set(["1", "2", "3"])
+    const byVehicle = drivingSecondsByVehicle(idle, mileage, id => group.has(id))
+    assert.deepEqual([...byVehicle.keys()], ["1", "2", "3"], "unit 9 (other group) left out entirely")
+    const sum = sumKnown([...byVehicle.values()], s => s)
+    assert.deepEqual(sum, { total: 3600, known: 1, unknown: 2, partial: true, allUnknown: false },
+        "unit 2 (mileage mismatch) and unit 3 (unknown In motion) are unknown, not 0")
+})
+
+test("Today and Yesterday use one driving definition; the comparison covers units known on both days", () => {
+    const mileageToday = mileagePayload([{ vehicle_id: 1, mileage: 50 }, { vehicle_id: 2, mileage: 20 }])
+    const mileageYesterday = mileagePayload([{ vehicle_id: 1, mileage: 40 }, { vehicle_id: 2, mileage: 20 }], DAY - 86400)
+    const today = drivingSecondsByVehicle(idlePayload([motionRow(1, 3600, 50), motionRow(2, 600, 60)]), mileageToday)
+    const yesterday = drivingSecondsByVehicle(idlePayload([motionRow(1, 1800, 40), motionRow(2, 900, 20)], DAY - 86400), mileageYesterday)
+    assert.deepEqual(sumKnownInBoth(today, yesterday), { a: 3600, b: 1800, units: 1 }, "unit 2 unknown today is left out of both sides")
+    const page = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
+    assert.match(page, /calculateTimeframeActivity\(todayMileageData, tripsData, idleAnalyticsData\)/)
+    assert.match(page, /calculateTimeframeActivity\(yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData\)/)
+    assert.match(page, /drivingSecondsByVehicle\(\s*idleDataPayload, mileageData,/)
+    assert.match(page, /sumKnownInBoth\(todayFleetActivity\.drivingByVehicle, yesterdayFleetActivity\.drivingByVehicle\)/)
+    assert.equal((page.match(/label: "Driving time \(engine on, moving\)"/g) || []).length, 2)
 })

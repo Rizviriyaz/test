@@ -89,3 +89,10 @@ export function skippedRowsLabel(record) {
     if (nonFuel > 0) parts.push(`${nonFuel} non-fuel payments/charges`)
     return `${parts.join(", ")} skipped`
 }
+
+// estimated_idle/driving_percentage are shares of FUEL (estimated litres / litres of vehicles with telemetry),
+// not of engine time: the label says so. Unknown -> null.
+export function fuelShareNote(pct) {
+    if (pct === null || pct === undefined || !Number.isFinite(Number(pct))) return null
+    return `${Number(pct).toFixed(1)}% of fuel (estimated)`
+}

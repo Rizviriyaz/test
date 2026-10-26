@@ -22,6 +22,7 @@ from app.fuel.db import (
     FuelDataFetchError,
     fetch_fuel_transactions_for_analytics,
     get_fuel_imports_list,
+    get_fuel_vehicle_identifiers,
     get_fuel_transactions_list,
 )
 from app.fuel import classification
@@ -29,7 +30,10 @@ from app.fuel.importer import FuelImportError, execute_fuel_import, generate_fue
 from app.fuel.scope import (
     EXCLUDED_REASONS,
     NO_TRANSACTIONS_WARNING,
+    AMBIGUITY_PLATE_CODE_CONFLICT,
+    REASON_AMBIGUOUS,
     ScopeContext,
+    UnitResolver,
     build_scope,
     resolve_effective_dates,
     summarize_excluded,
@@ -369,6 +373,7 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
             fetch,
             login_fn or (lambda: login()),
             units_fn or units,
+            lambda: get_fuel_vehicle_identifiers(bearer_token),
         )
     except FuelDataFetchError as exc:
         # The cause (which page, which failure, how many attempts) is logged by the read itself
@@ -380,6 +385,28 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
         request_trace_id.get(), read_ms[0], (time.perf_counter() - started) * 1000, scope.fetched_count,
     )
     return scope
+
+
+async def _resolve_single_vehicle(identifier: str, wialon_units: List[Dict[str, Any]],
+                                  bearer_token: Optional[str]) -> Dict[str, Any]:
+    """
+    Resolve one identifier with the KPI scope's rules, including the plate-code conflict check against every
+    imported identifier. Raises 404 (no unit), 409 (several units or a plate-code conflict) or 503 (fuel read failed).
+    """
+    resolver = UnitResolver(wialon_units, registry_fn=lambda: get_fuel_vehicle_identifiers(bearer_token))
+    try:
+        res = await run_in_threadpool(resolver.resolve, identifier)
+    except FuelDataFetchError:
+        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+    if res["status"] == REASON_AMBIGUOUS:
+        if res.get("ambiguity") == AMBIGUITY_PLATE_CODE_CONFLICT:
+            detail = (f"Vehicle '{identifier}' matches Wialon unit {', '.join(res['candidates'])} by registration number "
+                      f"only, and other plate codes share that number ({', '.join(res.get('conflicting_identifiers') or [])}); "
+                      "not attributed.")
+        else:
+            detail = f"Vehicle '{identifier}' matches several Wialon units ({', '.join(res['candidates'])}); not attributed."
+        raise HTTPException(status_code=409, detail=detail)
+    return res
 
 
 def _validate_range(date_from: Optional[str], date_to: Optional[str]) -> None:
@@ -651,18 +678,13 @@ async def get_fuel_vehicle_distance(
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
 
-    matched_unit = match_fuel_vehicle_to_wialon(vehicle_identifier, wialon_units)
-    if not matched_unit:
+    resolved = await _resolve_single_vehicle(vehicle_identifier, wialon_units, _get_bearer_token(request))
+    if resolved["status"] != "matched":
         raise HTTPException(
             status_code=404,
             detail=f"Vehicle '{vehicle_identifier}' does not have an active matching Wialon GPS unit.",
         )
-    if matched_unit.get("ambiguous"):
-        names = sorted({str(c.get("nm", "")).strip() for c in matched_unit.get("candidates") or []})
-        raise HTTPException(
-            status_code=409,
-            detail=f"Vehicle '{vehicle_identifier}' matches several Wialon units ({', '.join(names)}); distance not attributed.",
-        )
+    matched_unit = resolved["unit"]
 
     dist_info = await run_in_threadpool(get_vehicle_distance, int(matched_unit["id"]), date_from, date_to, sid)
 
@@ -906,19 +928,13 @@ async def get_vehicle_fuel_detail(
 
     sid = await run_in_threadpool(login)
     wialon_units = await run_in_threadpool(get_all_vehicles, sid)
-    matched_unit = match_fuel_vehicle_to_wialon(clean_vid, wialon_units)
-
-    if not matched_unit:
+    resolved = await _resolve_single_vehicle(clean_vid, wialon_units, bearer_token)
+    if resolved["status"] != "matched":
         raise HTTPException(
             status_code=404,
             detail=f"Vehicle '{clean_vid}' is not an active matched Wialon GPS fleet vehicle.",
         )
-    if matched_unit.get("ambiguous"):
-        names = sorted({str(c.get("nm", "")).strip() for c in matched_unit.get("candidates") or []})
-        raise HTTPException(
-            status_code=409,
-            detail=f"Vehicle '{clean_vid}' matches several Wialon units ({', '.join(names)}); not attributed.",
-        )
+    matched_unit = resolved["unit"]
     unit_id = int(matched_unit["id"])
     unit_name = str(matched_unit.get("nm", "")).strip()
 

@@ -2,7 +2,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel } from "./fuelLabels.js"
+import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote } from "./fuelLabels.js"
 import { compactTick, formatTrendPoint } from "./telemetryFormat.js"
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
@@ -134,4 +134,26 @@ test("skippedRowsLabel separates non-fuel rows and treats unrecorded (legacy) co
     assert.equal(skippedRowsLabel({ rows_ignored: null, rows_non_fuel: null }), "")
     assert.equal(skippedRowsLabel({ rows_imported: 5 }), "")
     assert.equal(skippedRowsLabel(null), "")
+})
+
+test("H4: idle/driving percentages are labelled as fuel shares, never as engine time", () => {
+    assert.equal(fuelShareNote(5), "5.0% of fuel (estimated)")
+    assert.equal(fuelShareNote(null), null)
+    assert.equal(fuelShareNote(undefined), null)
+    const kpi = read("./KpiCards.jsx")
+    for (const wrong of ["of engine time", "Share of Hours", "Hours ÷ Total Engine Hours", "Idle Litres ÷ Total Litres"]) {
+        assert.ok(!kpi.includes(wrong), `KpiCards.jsx still says "${wrong}"`)
+    }
+    assert.match(kpi, /litres of vehicles with telemetry/)
+})
+
+test("H4: hour bars never fall back to the fuel percentages", () => {
+    const chart = read("./DrivingVsIdlingChart.jsx")
+    const hoursLines = chart.split(/\r?\n/).filter((l) => /const hours(Driving|Idle)Pct =/.test(l))
+    assert.equal(hoursLines.length, 2)
+    assert.ok(hoursLines.every((l) => !/drivingPct|idlePct|estimated_/.test(l)), hoursLines.join(" | "))
+    const board = read("./VehicleLeaderboard.jsx")
+    const pctLines = board.split(/\r?\n/).filter((l) => /const (drvPct|idlPct) =/.test(l))
+    assert.equal(pctLines.length, 2)
+    assert.ok(pctLines.every((l) => !/estimated_(driving|idle)_percentage/.test(l)), pctLines.join(" | "))
 })
