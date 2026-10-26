@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react"
 import { createPortal } from "react-dom"
 import {
-    AlertTriangle,
     X,
     Info,
     Calendar,
     Database,
     Calculator,
 } from "lucide-react"
-import ClassificationBadge from "./ClassificationBadge"
-import { excludedSummary } from "./fuelLabels"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -39,21 +36,16 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
     if (loading) {
         return (
-            <div className="mb-5 space-y-4" role="status" aria-label="Loading fuel KPIs">
-                {[0, 1].map((row) => (
-                    <div key={row}>
-                        <div className="mb-2 h-3 w-40 animate-pulse rounded bg-slate-200 motion-reduce:animate-none" />
-                        <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4">
-                            {[0, 1, 2, 3].map((i) => (
-                                <div key={i} className="bg-white px-4 py-3">
-                                    <div className="h-3 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                                    <div className="mt-2 h-6 w-28 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                                    <div className="mt-2 h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                                </div>
-                            ))}
+            <div className="mb-5 space-y-3" role="status" aria-label="Loading fuel KPIs">
+                <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4 lg:grid-cols-4">
+                    {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
+                        <div key={i} className="bg-white px-4 py-3">
+                            <div className="h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                            <div className="mt-2 h-6 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                            <div className="mt-2 h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
                         </div>
-                    </div>
-                ))}
+                    ))}
+                </div>
             </div>
         )
     }
@@ -63,15 +55,9 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const transactionCount = efficiencyData?.transaction_count
     const vehicleCount = efficiencyData?.vehicle_count
     const trackedLitres = efficiencyData?.tracked_litres
-    const trackedCost = efficiencyData?.tracked_cost
     const vehiclesWithDistance = efficiencyData?.vehicles_with_distance
     const engineOnlyCount = efficiencyData?.vehicles_engine_hours_only
-    const vc = efficiencyData?.value_classification
-    const excluded = excludedSummary(efficiencyData?.excluded_scope)
-    const telemetryStatus = efficiencyData?.telematics_status
-    const dataWarnings = Array.isArray(efficiencyData?.data_warnings) ? efficiencyData.data_warnings : []
     const suppressedReason = efficiencyData?.efficiency_suppressed_reason
-    const showTelemetryNotice = Boolean(telemetryStatus && telemetryStatus !== "complete")
 
     const totalDistance = efficiencyData?.total_distance_km
     const drivingHours = efficiencyData?.total_driving_hours
@@ -85,6 +71,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const costPerKm = efficiencyData?.fuel_cost_per_km
 
     const avgPrice = totalLitres && totalCost ? (totalCost / totalLitres) : null
+    const kmPerLitre = efficiency && efficiency > 0 ? (100 / efficiency) : null
 
     // Period Range strings for breakdown modal
     const periodFrom = efficiencyData?.excluded_scope?.period?.date_from || "Period Start"
@@ -96,7 +83,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
         switch (kpiKey) {
             case "total_litres":
                 return {
-                    title: "Fuel Purchased",
+                    title: "Total Fuel Purchased",
                     category: "Recorded Statement Invoices",
                     classificationBadge: "recorded",
                     resultText: `${formatNumber(totalLitres, 1)} Litres`,
@@ -117,7 +104,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                 }
             case "total_cost":
                 return {
-                    title: "Recorded Expenditure",
+                    title: "Total Fuel Expenditure",
                     category: "Recorded Statement Invoices",
                     classificationBadge: "recorded",
                     resultText: `AED ${formatCurrency(totalCost)}`,
@@ -136,36 +123,121 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         `Result = AED ${formatCurrency(totalCost)}`,
                     ],
                 }
-            case "transaction_count":
+            case "total_distance":
                 return {
-                    title: "Refuel Transactions",
-                    category: "Recorded Transaction Logs",
+                    title: "Total Distance Travelled",
+                    category: "Recorded Telematics",
                     classificationBadge: "recorded",
-                    resultText: `${transactionCount != null ? formatCurrency(transactionCount) : "—"} Refuels`,
+                    resultText: `${totalDistance !== null && totalDistance !== undefined ? formatNumber(totalDistance, 1) + " km" : "—"}`,
                     dateRange: dateRangeStr,
-                    dataSource: "Fuel statement invoice line items",
-                    formulaText: "Count of Refuel Events in Selected Period",
-                    natureText: "Exact count of valid fuel transaction events processed from supplier fuel statements.",
+                    dataSource: "Wialon Native Reports & Odometer Mileage",
+                    formulaText: "Sum of verified GPS trip distance across matched units",
+                    natureText: "Authoritative distance travelled recorded by Wialon telematics for units matched to fuel transactions.",
                     inputs: [
-                        { label: "Total Invoiced Refuels", value: `${transactionCount != null ? formatCurrency(transactionCount) : "—"}`, source: "Fuel Invoices" },
-                        { label: "Total Fuel Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Litres Sum" },
-                        { label: "Avg Litres per Refuel", value: totalLitres && transactionCount ? `${(totalLitres / transactionCount).toFixed(1)} L / refuel` : "—", source: "Litres ÷ Refuel Count" },
+                        { label: "Total GPS Distance", value: totalDistance !== null && totalDistance !== undefined ? `${formatNumber(totalDistance, 1)} km` : "—", source: "Wialon GPS Reports" },
+                        { label: "Units with Distance", value: `${vehiclesWithDistance ?? "—"} units`, source: "Wialon Trips Registry" },
+                        { label: "Total Units Refuelled", value: `${vehicleCount ?? "—"} units`, source: "Matched Vehicle Scope" },
                     ],
                     calculationSteps: [
-                        "Count = Total individual refuelling transactions in period",
-                        `Result = ${transactionCount != null ? formatCurrency(transactionCount) : "—"} events`,
+                        "Total Distance = Sum(Trip Distance in km for matched units)",
+                        `Result = ${totalDistance !== null && totalDistance !== undefined ? formatNumber(totalDistance, 1) + " km" : "—"}`,
+                    ],
+                }
+            case "efficiency":
+                return {
+                    title: "Fleet Fuel Efficiency",
+                    category: "Derived Ratio",
+                    classificationBadge: "derived",
+                    resultText: `${kmPerLitre !== null ? formatNumber(kmPerLitre, 2) + " km/L" : "—"} (${efficiency !== null && efficiency !== undefined ? formatNumber(efficiency, 1) + " L/100km" : "—"})`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Fuel Invoices (Litres & Cost) + Wialon GPS Telematics (Mileage)",
+                    formulaText: "km/L = Total Distance (km) ÷ Tracked Fuel (L) | L/100km = (Tracked Fuel ÷ Distance) × 100",
+                    natureText: "Derived efficiency calculated from recorded refuelling volume divided by verified GPS distance. Withheld if distance is below minimum threshold or if net litres are non-positive.",
+                    inputs: [
+                        { label: "Fuel Efficiency (km/L)", value: kmPerLitre !== null ? `${formatNumber(kmPerLitre, 2)} km/L` : "—", source: "Total Distance ÷ Tracked Fuel" },
+                        { label: "Fuel Efficiency (L/100km)", value: efficiency !== null && efficiency !== undefined ? `${formatNumber(efficiency, 1)} L/100 km` : "—", source: "(Tracked Fuel ÷ Distance) × 100" },
+                        { label: "Tracked Fuel Purchased", value: `${formatNumber(trackedLitres, 1)} L`, source: "Invoiced Litres of Vehicles with Distance" },
+                        { label: "Total Wialon Distance", value: totalDistance !== null && totalDistance !== undefined ? `${formatNumber(totalDistance, 1)} km` : "—", source: "Wialon GPS Odometer Reports" },
+                        { label: "Fuel Cost per km", value: costPerKm !== null && costPerKm !== undefined ? `AED ${formatNumber(costPerKm, 2)} / km` : "—", source: "Tracked Cost ÷ Total Distance" },
+                        { label: "Suppression Status", value: suppressedReason || "Active (Distance Threshold Satisfied)", source: "Calculation Guard" },
+                    ],
+                    calculationSteps: [
+                        `km/L = ${totalDistance !== null && totalDistance !== undefined ? formatNumber(totalDistance, 1) : "—"} km ÷ ${formatNumber(trackedLitres, 1)} L`,
+                        `Result = ${kmPerLitre !== null ? formatNumber(kmPerLitre, 2) + " km/L" : "—"} (${efficiency !== null && efficiency !== undefined ? formatNumber(efficiency, 1) + " L/100 km" : "—"})`,
+                    ],
+                }
+            case "driving_hours":
+                return {
+                    title: "Total Driving Hours",
+                    category: "Recorded Telematics",
+                    classificationBadge: "recorded",
+                    resultText: `${drivingHours !== null && drivingHours !== undefined ? formatNumber(drivingHours, 1) + " h" : "—"}`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Wialon Motion Sensor Telematics",
+                    formulaText: "Sum of duration with ignition on and vehicle speed > 0 km/h",
+                    natureText: "Operational duration spent in active motion performing transportation tasks.",
+                    inputs: [
+                        { label: "Productive Driving Time", value: drivingHours !== null && drivingHours !== undefined ? `${drivingHours.toFixed(1)} hrs` : "—", source: "Wialon Motion Telematics" },
+                        { label: "Estimated Driving Fuel", value: estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? `${formatNumber(estimatedDrivingFuel, 1)} L` : "—", source: "Tracked Litres - Estimated Idle Fuel" },
+                        { label: "Driving Share of Hours", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Driving Hours ÷ Total Engine Hours" },
+                    ],
+                    calculationSteps: [
+                        "Driving Hours = Sum of motion durations across matched units",
+                        `Result = ${drivingHours !== null && drivingHours !== undefined ? formatNumber(drivingHours, 1) + " h" : "—"}`,
+                    ],
+                }
+            case "idle_hours":
+                return {
+                    title: "Total Idling Hours",
+                    category: "Recorded Telematics",
+                    classificationBadge: "recorded",
+                    resultText: `${idleHours !== null && idleHours !== undefined ? formatNumber(idleHours, 1) + " h" : "—"}`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Wialon Stationary Engine Telematics",
+                    formulaText: "Sum of duration with ignition on and vehicle speed = 0 km/h",
+                    natureText: "Duration where vehicle engine was running stationarily without productive movement.",
+                    inputs: [
+                        { label: "Stationary Idle Time", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Stationary Engine Telematics" },
+                        { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Configurable Idle Parameter" },
+                        { label: "Idle Share of Hours", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Idle Hours ÷ Total Engine Hours" },
+                    ],
+                    calculationSteps: [
+                        "Idling Hours = Sum of stationary engine durations",
+                        `Result = ${idleHours !== null && idleHours !== undefined ? formatNumber(idleHours, 1) + " h" : "—"}`,
+                    ],
+                }
+            case "estimated_idle_fuel":
+                return {
+                    title: "Estimated Idling Fuel Waste",
+                    category: "Estimated Telematics",
+                    classificationBadge: "estimated",
+                    resultText: `${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"})`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Wialon Stationary Engine Telematics & Configured Idle Rate",
+                    formulaText: "Qualifying Idle Hours (hrs) × Configured Idle Rate (L/h)",
+                    natureText: "Estimated telematics value. Wialon reports duration where ignition was on while speed was 0 km/h. Fuel consumed is estimated using the configurable burn coefficient.",
+                    inputs: [
+                        { label: "Qualifying Idle Duration", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Telematics (Stationary Engine)" },
+                        { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Dashboard Coefficient Parameter" },
+                        { label: "Total Fleet Fuel", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Total Litres" },
+                        { label: "Idle Consumption Share", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Idle Litres ÷ Total Litres" },
+                        { label: "Estimated Idle Spend", value: `AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`, source: "Idle Litres × Weighted Avg Price" },
+                    ],
+                    calculationSteps: [
+                        `Idle Fuel = ${idleHours !== null && idleHours !== undefined ? idleHours.toFixed(1) : "—"} hrs × ${idleRate.toFixed(1)} L/h`,
+                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of fuel volume" : "—"})`,
                     ],
                 }
             case "vehicle_count":
                 return {
-                    title: "Vehicles Refuelled",
-                    category: "Recorded & Matched Scope",
+                    title: "Vehicles Refuelled & Tracked",
+                    category: "Recorded Scope",
                     classificationBadge: "recorded",
                     resultText: `${vehicleCount ?? "—"} Units`,
                     dateRange: dateRangeStr,
                     dataSource: "Wialon Unit Registry & Fuel Statement Plate Resolution",
                     formulaText: "Count of Unique Wialon Units with Refuel Transactions in Period",
-                    natureText: "Fleet units matched to exactly one active Wialon telematics unit that recorded fuel transactions.",
+                    natureText: "Fleet units matched to an active Wialon telematics unit that recorded fuel transactions.",
                     inputs: [
                         { label: "Matched Wialon Units", value: `${vehicleCount ?? "—"}`, source: "Wialon Unit Registry" },
                         { label: "Units with GPS Distance", value: `${vehiclesWithDistance ?? "—"}`, source: "Wialon Odometer Reports" },
@@ -177,258 +249,140 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         `Result = ${vehicleCount ?? "—"} units (${vehiclesWithDistance ?? "—"} reporting GPS distance)`,
                     ],
                 }
-            case "estimated_idle_fuel":
-                return {
-                    title: "Estimated Idling Fuel",
-                    category: "Estimated Telematics",
-                    classificationBadge: "estimated",
-                    resultText: `${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"}`,
-                    dateRange: dateRangeStr,
-                    dataSource: "Wialon Stationary Engine Telematics & Idle Coefficient",
-                    formulaText: "Total Qualifying Idle Hours (hrs) × Configured Idle Rate (L/h)",
-                    natureText: "Estimated telematics value. Wialon reports duration where ignition was on while speed was 0 km/h. Fuel consumed is estimated using the configurable burn coefficient.",
-                    inputs: [
-                        { label: "Qualifying Idle Duration", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Telematics (Stationary Engine)" },
-                        { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Dashboard Coefficient Parameter" },
-                        { label: "Total Fleet Fuel", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Total Litres" },
-                        { label: "Idle Consumption Share", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Idle Litres ÷ Total Litres" },
-                    ],
-                    calculationSteps: [
-                        `Idle Fuel = ${idleHours !== null && idleHours !== undefined ? idleHours.toFixed(1) : "—"} hrs × ${idleRate.toFixed(1)} L/h`,
-                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of fuel volume" : "—"})`,
-                    ],
-                }
-            case "estimated_idle_cost":
-                return {
-                    title: "Estimated Idle Cost",
-                    category: "Estimated Telematics",
-                    classificationBadge: "estimated",
-                    resultText: `AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`,
-                    dateRange: dateRangeStr,
-                    dataSource: "Wialon Telematics & Fuel Statement Unit Prices",
-                    formulaText: "Estimated Idle Fuel (L) × Weighted Average Fuel Cost (AED/L)",
-                    natureText: "Estimated financial expenditure consumed while engines were idling stationarily without moving.",
-                    inputs: [
-                        { label: "Estimated Idle Fuel", value: estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? `${formatNumber(estimatedIdleFuel, 1)} L` : "—", source: "Idle Hours × Idle Rate" },
-                        { label: "Weighted Average Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
-                        { label: "Total Fuel Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoiced Total Costs" },
-                    ],
-                    calculationSteps: [
-                        `Idle Cost = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} × AED ${avgPrice !== null ? avgPrice.toFixed(2) : "—"}/L`,
-                        `Result = AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`,
-                    ],
-                }
-            case "estimated_driving_fuel":
-                return {
-                    title: "Estimated Driving Fuel",
-                    category: "Estimated Telematics",
-                    classificationBadge: "estimated",
-                    resultText: `${estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? formatNumber(estimatedDrivingFuel, 1) + " L" : "—"}`,
-                    dateRange: dateRangeStr,
-                    dataSource: "Fuel Statements & Wialon Motion Duration Telematics",
-                    formulaText: "Tracked Purchased Fuel (L) - Estimated Idle Fuel (L)",
-                    natureText: "Estimated fuel consumed for productive driving motion after subtracting the estimated stationary idle consumption.",
-                    inputs: [
-                        { label: "Tracked Fuel Purchased", value: `${formatNumber(trackedLitres ?? totalLitres, 1)} L`, source: "Invoiced Litres for Tracked Vehicles" },
-                        { label: "Estimated Idle Fuel", value: estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? `${formatNumber(estimatedIdleFuel, 1)} L` : "—", source: "Idle Hours × Idle Rate" },
-                        { label: "Productive Driving Hours", value: drivingHours !== null && drivingHours !== undefined ? `${drivingHours.toFixed(1)} hrs` : "—", source: "Wialon Moving Duration" },
-                        { label: "Tracked GPS Distance", value: totalDistance !== null && totalDistance !== undefined ? `${formatNumber(totalDistance, 0)} km` : "—", source: "Wialon Mileage" },
-                        { label: "Productive Fuel Share", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Driving Litres ÷ Total Litres" },
-                    ],
-                    calculationSteps: [
-                        `Driving Fuel = ${formatNumber(trackedLitres ?? totalLitres, 1)} L - ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "0 L"}`,
-                        `Result = ${estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? formatNumber(estimatedDrivingFuel, 1) + " L" : "—"} (${drivingPct !== null && drivingPct !== undefined ? drivingPct.toFixed(1) + "% productive motion" : "—"})`,
-                    ],
-                }
-            case "efficiency":
-                return {
-                    title: "Purchase-based Fleet Efficiency",
-                    category: "Derived Ratio",
-                    classificationBadge: "derived",
-                    resultText: `${efficiency !== null && efficiency !== undefined ? formatNumber(efficiency, 1) + " L / 100 km" : "—"}`,
-                    dateRange: dateRangeStr,
-                    dataSource: "Fuel Invoices (Litres & Cost) + Wialon GPS Telematics (Mileage)",
-                    formulaText: "(Tracked Fuel Purchased (L) ÷ Total Wialon Distance (km)) × 100",
-                    natureText: "Purchase-based derived efficiency calculated from recorded refuelling volume divided by verified GPS distance. Withheld if distance is below the minimum threshold or if net litres are non-positive.",
-                    inputs: [
-                        { label: "Tracked Fuel Purchased", value: `${formatNumber(trackedLitres, 1)} L`, source: "Invoiced Litres of Vehicles with Distance" },
-                        { label: "Total Wialon Distance", value: totalDistance !== null && totalDistance !== undefined ? `${formatNumber(totalDistance, 1)} km` : "—", source: "Wialon GPS Odometer Reports" },
-                        { label: "Tracked Fuel Cost", value: trackedCost !== null && trackedCost !== undefined ? `AED ${formatCurrency(trackedCost)}` : "—", source: "Invoiced AED for Tracked Units" },
-                        { label: "Fuel Cost per km", value: costPerKm !== null && costPerKm !== undefined ? `AED ${formatNumber(costPerKm, 2)} / km` : "—", source: "Tracked Cost ÷ Total Distance" },
-                        { label: "Minimum Distance Rule", value: `${efficiencyData?.min_efficiency_distance_km ?? 50} km`, source: "System Quality Safeguard" },
-                        { label: "Suppression Status", value: suppressedReason || "Active (Distance Threshold Satisfied)", source: "Calculation Guard" },
-                    ],
-                    calculationSteps: [
-                        `Efficiency = (${formatNumber(trackedLitres, 1)} L ÷ ${totalDistance !== null && totalDistance !== undefined ? formatNumber(totalDistance, 1) : "—"} km) × 100`,
-                        `Result = ${efficiency !== null && efficiency !== undefined ? formatNumber(efficiency, 1) + " L/100 km" : "—"} (Cost: ${costPerKm !== null && costPerKm !== undefined ? "AED " + formatNumber(costPerKm, 2) + "/km" : "—"})`,
-                    ],
-                }
             default:
                 return null
         }
     }
 
     const activeBreakdown = selectedKpi ? getBreakdownDetails(selectedKpi) : null
-
     const has = (v) => v !== null && v !== undefined
 
-    const recordedCells = [
+    // Primary & Secondary KPI configurations
+    const primaryMetrics = [
         {
             key: "total_litres",
-            label: "Fuel purchased",
+            label: "Total fuel purchased",
             value: formatNumber(totalLitres, 1),
             unit: "L",
-            note: "Net purchased volume",
-            badge: <ClassificationBadge classification={vc} field="total_litres" />,
+            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : "Net statement purchases",
+            provenance: "Recorded",
         },
         {
             key: "total_cost",
-            label: "Recorded expenditure",
+            label: "Total fuel cost",
             prefix: "AED",
             value: formatCurrency(totalCost),
-            note: "Total fuel spend",
-            badge: <ClassificationBadge classification={vc} field="total_cost" />,
+            note: transactionCount != null ? `${formatCurrency(transactionCount)} statement refuels` : "Net spend",
+            provenance: "Recorded",
         },
         {
-            key: "transaction_count",
-            label: "Refuel transactions",
-            value: transactionCount !== undefined ? formatCurrency(transactionCount) : "—",
-            unit: "events",
-            note: totalLitres && transactionCount ? `~${(totalLitres / transactionCount).toFixed(1)} L per refuel` : "Statement records",
-            badge: <ClassificationBadge classification={vc} field="transaction_count" />,
+            key: "total_distance",
+            label: "Total distance travelled",
+            value: has(totalDistance) ? formatNumber(totalDistance, 0) : "—",
+            unit: "km",
+            note: has(vehiclesWithDistance) ? `${vehiclesWithDistance} vehicles with GPS` : "Wialon verified",
+            provenance: "Recorded",
+        },
+        {
+            key: "efficiency",
+            label: "Fleet fuel efficiency",
+            value: has(kmPerLitre) ? formatNumber(kmPerLitre, 2) : (has(efficiency) ? formatNumber(efficiency, 1) : "—"),
+            unit: has(kmPerLitre) ? "km/L" : (has(efficiency) ? "L/100km" : ""),
+            note: has(kmPerLitre) && has(efficiency)
+                ? `${efficiency.toFixed(1)} L/100km · AED ${fixedOrDash(costPerKm)}/km`
+                : (has(costPerKm) ? `AED ${fixedOrDash(costPerKm)} / km` : "Purchase-based ratio"),
+            provenance: "Derived",
+        },
+    ]
+
+    const secondaryMetrics = [
+        {
+            key: "driving_hours",
+            label: "Driving hours",
+            value: has(drivingHours) ? formatNumber(drivingHours, 1) : "—",
+            unit: "h",
+            note: has(drivingPct) ? `${drivingPct.toFixed(1)}% of engine time` : "In active motion",
+            provenance: "Recorded",
+        },
+        {
+            key: "idle_hours",
+            label: "Idling hours",
+            value: has(idleHours) ? formatNumber(idleHours, 1) : "—",
+            unit: "h",
+            note: has(idlePct) ? `${idlePct.toFixed(1)}% of engine time` : "Stationary engine",
+            provenance: "Recorded",
+        },
+        {
+            key: "estimated_idle_fuel",
+            label: "Estimated idle fuel",
+            value: has(estimatedIdleFuel) ? formatNumber(estimatedIdleFuel, 1) : "—",
+            unit: "L",
+            note: has(estimatedIdleCost) ? `AED ${formatCurrency(estimatedIdleCost)} estimated loss` : "Stationary burn",
+            valueClass: has(estimatedIdleCost) && estimatedIdleCost > 0 ? "text-amber-800" : "text-slate-900",
+            tag: `${idleRate.toFixed(1)} L/h`,
+            provenance: "Estimated",
         },
         {
             key: "vehicle_count",
             label: "Vehicles refuelled",
             value: has(vehicleCount) ? vehicleCount : "—",
-            unit: "Wialon units",
-            note: [
-                has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : "—",
-                engineOnlyCount ? `${engineOnlyCount} engine-only` : null,
-            ].filter(Boolean).join(" · "),
+            unit: "units",
+            note: has(vehiclesWithDistance)
+                ? `${vehiclesWithDistance} eligible for distance`
+                : (engineOnlyCount ? `${engineOnlyCount} engine-only` : "Matched scope"),
+            provenance: "Recorded",
         },
     ]
 
-    const estimatedCells = [
-        {
-            key: "estimated_idle_fuel",
-            label: "Estimated idling fuel",
-            value: has(estimatedIdleFuel) ? formatNumber(estimatedIdleFuel, 1) : "—",
-            unit: "L",
-            note: has(idlePct) ? `${idlePct.toFixed(1)}% of fuel` : "Idle consumption",
-            tag: `${idleRate.toFixed(1)} L/h`,
-        },
-        {
-            key: "estimated_idle_cost",
-            label: "Estimated idle cost",
-            prefix: "AED",
-            value: has(estimatedIdleCost) ? formatCurrency(estimatedIdleCost) : "—",
-            valueClass: has(estimatedIdleCost) && estimatedIdleCost > 0 ? "text-amber-800" : "text-slate-900",
-            note: "Direct idling loss",
-        },
-        {
-            key: "estimated_driving_fuel",
-            label: "Estimated driving fuel",
-            value: has(estimatedDrivingFuel) ? formatNumber(estimatedDrivingFuel, 1) : "—",
-            unit: "L",
-            note: has(drivingPct) ? `${drivingPct.toFixed(1)}% productive` : (drivingHours ? `${drivingHours.toFixed(1)}h in motion` : "Productive motion"),
-            tag: `${formatNumber(totalDistance, 0)} km`,
-            tagTitle: has(trackedLitres) ? `${formatNumber(trackedLitres, 1)} L purchased by vehicles with Wialon distance` : undefined,
-        },
-        {
-            key: "efficiency",
-            label: "Purchase-based efficiency",
-            value: has(efficiency) ? formatNumber(efficiency, 1) : "—",
-            unit: "L/100 km",
-            note: has(costPerKm)
-                ? `AED ${formatNumber(costPerKm, 2)} per km`
-                : suppressedReason === "insufficient_distance"
-                    ? "Below minimum distance"
-                    : suppressedReason === "non_positive_net_fuel"
-                        ? "Refunds exceed purchases"
-                        : "Fuel purchased ÷ Wialon km",
-            badge: <ClassificationBadge classification={vc} field="fuel_efficiency_l_per_100km" />,
-        },
-    ]
+    function fixedOrDash(val) {
+        if (val === null || val === undefined) return "—"
+        return Number(val).toFixed(2)
+    }
 
-    const renderCell = (cell) => (
+    const renderCard = (cell, isPrimary = false) => (
         <button
             key={cell.key}
             type="button"
             onClick={() => setSelectedKpi(cell.key)}
-            className="group flex min-w-0 flex-col bg-white px-4 py-3 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-            title="View formula and calculation breakdown"
+            className="group flex min-w-0 flex-col bg-white p-3.5 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
+            title={`Click to view ${cell.label} calculation formula and audit breakdown`}
         >
-            <span className="flex items-center justify-between gap-2">
-                <span className="truncate text-xs font-medium text-slate-500">{cell.label}</span>
-                <span className="flex shrink-0 items-center gap-1.5">
-                    {cell.badge}
+            <span className="flex items-center justify-between gap-1.5">
+                <span className="truncate text-xs font-medium text-slate-500">
+                    {cell.label}
+                </span>
+                <span className="flex shrink-0 items-center gap-1">
+                    <span className="font-mono text-[10px] text-slate-400 opacity-60 group-hover:opacity-100 transition-opacity">
+                        {cell.provenance}
+                    </span>
                     <Calculator className="h-3.5 w-3.5 text-slate-300 transition-colors group-hover:text-brand" aria-hidden="true" />
                 </span>
             </span>
-            <span className="mt-1 flex items-baseline gap-1">
-                {cell.prefix && <span className="text-xs text-slate-500">{cell.prefix}</span>}
-                <span className={`text-[22px] font-semibold leading-7 tracking-tight tabular-nums ${cell.valueClass || "text-slate-900"}`}>{cell.value}</span>
-                {cell.unit && <span className="text-xs text-slate-500">{cell.unit}</span>}
+            <span className="mt-1.5 flex items-baseline gap-1">
+                {cell.prefix && <span className="text-xs font-medium text-slate-500">{cell.prefix}</span>}
+                <span className={`${isPrimary ? "text-[22px] sm:text-[24px]" : "text-[20px] sm:text-[22px]"} font-semibold leading-tight tracking-tight tabular-nums ${cell.valueClass || "text-slate-900"}`}>
+                    {cell.value}
+                </span>
+                {cell.unit && <span className="text-xs text-slate-500 font-normal">{cell.unit}</span>}
             </span>
-            <span className="mt-0.5 flex items-center justify-between gap-2 text-xs text-slate-500">
-                <span className="truncate">{cell.note}</span>
+            <span className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
+                <span className="truncate text-[11px] text-slate-500">{cell.note}</span>
                 {cell.tag && (
-                    <span className="shrink-0 font-mono text-[11px] text-slate-600" title={cell.tagTitle}>{cell.tag}</span>
+                    <span className="shrink-0 font-mono text-[10px] font-medium text-slate-600 bg-slate-100 rounded px-1 py-0.5">
+                        {cell.tag}
+                    </span>
                 )}
             </span>
         </button>
     )
 
-    const strip = "grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4"
-
     return (
-        <div className="mb-5 space-y-4">
-            {(excluded || showTelemetryNotice) && (
-                <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900" role="status">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-                    <div className="space-y-0.5">
-                        {excluded && (
-                            <span className="block">
-                                KPIs cover vehicles matched to exactly one Wialon unit; {excluded.count.toLocaleString()} of {excluded.allCount.toLocaleString()} transactions
-                                ({formatNumber(excluded.litres, 1)} L) are excluded and listed separately.
-                            </span>
-                        )}
-                        {showTelemetryNotice && (
-                            <span className="block font-medium">Wialon telemetry {telemetryStatus}: values shown as "—" were not reported.</span>
-                        )}
-                        {showTelemetryNotice && dataWarnings.map((w) => <span key={w} className="block">{w}</span>)}
-                    </div>
-                </div>
-            )}
-
-            <section aria-labelledby="fuel-recorded-heading">
-                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                    <h2 id="fuel-recorded-heading" className="type-section-title text-slate-900">
-                        Recorded <span className="font-normal text-slate-500">· fuel statement invoices, net of refunds</span>
-                    </h2>
-                    {avgPrice !== null && (
-                        <span className="text-xs text-slate-500">
-                            Weighted avg <span className="font-mono font-medium text-slate-900">AED {avgPrice.toFixed(2)}/L</span>
-                        </span>
-                    )}
-                </div>
-                <div className={strip}>{recordedCells.map(renderCell)}</div>
-            </section>
-
-            <section aria-labelledby="fuel-estimated-heading">
-                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-                    <h2 id="fuel-estimated-heading" className="type-section-title text-slate-900">
-                        Estimated <span className="font-normal text-slate-500">· stationary engine time at {idleRate.toFixed(1)} L/h</span>
-                    </h2>
-                    {has(idleHours) && (
-                        <span className="text-xs text-slate-500">
-                            Qualifying idle <span className="font-mono font-medium text-slate-900">{idleHours.toFixed(1)} h</span>
-                        </span>
-                    )}
-                </div>
-                <div className={strip}>{estimatedCells.map(renderCell)}</div>
-            </section>
+        <div className="mb-4 space-y-2">
+            {/* Unified 8-card hairline grid (Primary top row, Secondary bottom row) */}
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4 lg:grid-cols-4 shadow-xs">
+                {primaryMetrics.map((m) => renderCard(m, true))}
+                {secondaryMetrics.map((m) => renderCard(m, false))}
+            </div>
 
             {/* ─── INTERACTIVE KPI FORMULA & BREAKDOWN MODAL ───────────── */}
             {activeBreakdown && createPortal(
@@ -445,28 +399,26 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     >
                         {/* Header */}
                         <div className="flex items-center justify-between pb-3.5 border-b border-slate-100">
-                            <div className="flex items-center gap-2.5">
-                                <div>
-                                    <div className="flex items-center gap-2">
-                                        <h3 className="text-[15px] font-semibold text-slate-900">
-                                            {activeBreakdown.title}
-                                        </h3>
-                                        <span
-                                            className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
-                                                activeBreakdown.classificationBadge === "recorded"
-                                                    ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
-                                                    : activeBreakdown.classificationBadge === "estimated"
-                                                        ? "bg-amber-50 text-amber-800 border border-amber-200"
-                                                        : "bg-sky-50 text-sky-800 border border-sky-200"
-                                            }`}
-                                        >
-                                            {activeBreakdown.category}
-                                        </span>
-                                    </div>
-                                    <p className="text-xs text-slate-500 mt-0.5">
-                                        Calculation breakdown, actual inputs, and audit trail
-                                    </p>
+                            <div>
+                                <div className="flex items-center gap-2">
+                                    <h3 className="text-[15px] font-semibold text-slate-900">
+                                        {activeBreakdown.title}
+                                    </h3>
+                                    <span
+                                        className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                                            activeBreakdown.classificationBadge === "recorded"
+                                                ? "bg-emerald-50 text-emerald-800 border border-emerald-200"
+                                                : activeBreakdown.classificationBadge === "estimated"
+                                                    ? "bg-amber-50 text-amber-800 border border-amber-200"
+                                                    : "bg-sky-50 text-sky-800 border border-sky-200"
+                                        }`}
+                                    >
+                                        {activeBreakdown.category}
+                                    </span>
                                 </div>
+                                <p className="text-xs text-slate-500 mt-0.5">
+                                    Calculation formula, inputs, data source, and transparent audit trail
+                                </p>
                             </div>
 
                             <button
@@ -479,14 +431,14 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                             </button>
                         </div>
 
-                        {/* Top Result & Metadata Card */}
+                        {/* Result & Metadata Card */}
                         <div className="my-4 rounded-lg border border-slate-200 p-4">
                             <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 pb-3 border-b border-slate-200/60">
                                 <div>
                                     <span className="block text-xs text-slate-500">
                                         Result for current filters
                                     </span>
-                                    <span className="text-[28px] font-semibold tracking-tight tabular-nums text-slate-900">
+                                    <span className="text-[26px] font-semibold tracking-tight tabular-nums text-slate-900">
                                         {activeBreakdown.resultText}
                                     </span>
                                 </div>
@@ -504,7 +456,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
                             {/* Exact Mathematical Formula */}
                             <div className="pt-3">
-                                <span className="mb-1 block text-xs text-slate-500">
+                                <span className="mb-1 block text-xs text-slate-500 font-medium">
                                     Formula
                                 </span>
                                 <div className="rounded-md bg-slate-50 px-2.5 py-2 font-mono text-xs text-slate-800">
@@ -515,7 +467,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
                         {/* Actual Input Values Table */}
                         <div className="my-4">
-                            <span className="mb-1.5 block text-xs text-slate-500">
+                            <span className="mb-1.5 block text-xs text-slate-500 font-medium">
                                 Input values (from API data)
                             </span>
                             <div className="rounded-lg border border-slate-200 overflow-hidden text-xs">
@@ -543,8 +495,8 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         {/* Step-by-Step Calculation */}
                         {activeBreakdown.calculationSteps && activeBreakdown.calculationSteps.length > 0 && (
                             <div className="my-4 space-y-1 rounded-md bg-slate-50 px-3 py-2.5 text-xs">
-                                <span className="mb-1 block text-xs text-slate-500">
-                                    Calculation
+                                <span className="mb-1 block text-xs text-slate-500 font-medium">
+                                    Calculation Steps
                                 </span>
                                 {activeBreakdown.calculationSteps.map((step, i) => (
                                     <div key={i} className="font-mono text-[11px] text-slate-700 flex items-center gap-2">
@@ -555,7 +507,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                             </div>
                         )}
 
-                        {/* Nature & Data Quality Guarantee */}
+                        {/* Nature & Data Quality */}
                         <div className="flex items-start gap-2 border-t border-slate-200 pt-3 text-xs text-slate-600">
                             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
                             <p className="text-[11px] leading-relaxed">

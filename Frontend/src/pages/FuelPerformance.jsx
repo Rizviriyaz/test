@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { createPortal } from "react-dom"
 import {
     UploadCloud,
@@ -9,11 +9,11 @@ import {
     Loader2,
     History,
     RefreshCw,
-    ArrowUpRight,
+    ChevronDown,
+    ChevronUp,
+    ShieldAlert,
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
-import SearchInput from "../components/Common/SearchInput"
-import Pagination from "../components/Common/Pagination"
 import { ErrorBanner } from "../components/Common/StateViews"
 import { useFuelFilters } from "../context/useFuelFilters"
 import {
@@ -28,25 +28,16 @@ import {
 } from "../api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
 import KpiCards from "../components/Fuel/KpiCards"
+import DrivingVsIdlingChart from "../components/Fuel/DrivingVsIdlingChart"
+import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
 import FuelTrendChart from "../components/Fuel/FuelTrendChart"
 import FuelTypeDonut from "../components/Fuel/FuelTypeDonut"
 import FleetEfficiencyGauge from "../components/Fuel/FleetEfficiencyGauge"
-import VehicleStatusBadge from "../components/Fuel/VehicleStatusBadge"
 import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
-import { fixedOrDash, skippedRowsLabel, sortOrderLabels } from "../components/Fuel/fuelLabels"
+import { fixedOrDash, skippedRowsLabel } from "../components/Fuel/fuelLabels"
 import { formatUAEDateTime } from "../utils/datetime"
-
-const SORT_OPTIONS = [
-    { label: "Fuel Volume (Litres)", value: "litres" },
-    { label: "Fuel Expenditure (Cost)", value: "cost" },
-    { label: "Distance Traveled (km)", value: "distance" },
-    { label: "Fuel Efficiency (L/100km)", value: "efficiency" },
-    { label: "Cost Per km (AED/km)", value: "cost_per_km" },
-    { label: "Refuel Count (Transactions)", value: "transactions" },
-    { label: "Vehicle Identifier", value: "vehicle_identifier" },
-]
 
 export default function FuelPerformance() {
     const { queryParams, periodLabel, setPeriod } = useFuelFilters()
@@ -54,16 +45,19 @@ export default function FuelPerformance() {
     // Configurable Telematics Idle Rate (Litres/Hour)
     const [idleRate, setIdleRate] = useState(2.0)
     const [idleThreshold, setIdleThreshold] = useState(5.0)
+
     // Requests use the debounced rate, so dragging the slider does not fire a request per 0.1 L/h step
     const [idleRateQuery, setIdleRateQuery] = useState(2.0)
     useEffect(() => {
         const t = setTimeout(() => setIdleRateQuery(idleRate), 300)
         return () => clearTimeout(t)
     }, [idleRate])
+
     // Latest-request guards: a slower earlier response must never overwrite a newer one
     const efficiencyRequestIdRef = useRef(0)
     const rankingsRequestIdRef = useRef(0)
     const attentionRequestIdRef = useRef(0)
+    const wasteRequestIdRef = useRef(0)
 
     // Fleet Efficiency & Overview Metrics
     const [efficiency, setEfficiency] = useState(null)
@@ -74,10 +68,10 @@ export default function FuelPerformance() {
     const [wasteData, setWasteData] = useState(null)
     const [loadingWaste, setLoadingWaste] = useState(true)
     const [wasteError, setWasteError] = useState(null)
-    const wasteRequestIdRef = useRef(0)
+    const [showWastePanel, setShowWastePanel] = useState(false)
 
-    // Rankings & Outliers State
-    const [sortBy, setSortBy] = useState("litres")
+    // Rankings & Leaderboard State
+    const [sortBy, setSortBy] = useState("efficiency")
     const [sortOrder, setSortOrder] = useState("desc")
     const [statusFilter, setStatusFilter] = useState("")
     const [searchQuery, setSearchQuery] = useState("")
@@ -87,6 +81,7 @@ export default function FuelPerformance() {
     const [loadingRankings, setLoadingRankings] = useState(true)
     const [rankingsError, setRankingsError] = useState(null)
     const [attentionVehicles, setAttentionVehicles] = useState([])
+    const [bestVehicles, setBestVehicles] = useState([])
 
     // Vehicle Detail Modal State
     const [selectedVehicleDetail, setSelectedVehicleDetail] = useState(null)
@@ -124,7 +119,6 @@ export default function FuelPerformance() {
             setEfficiency(res)
         } catch (err) {
             if (requestId !== efficiencyRequestIdRef.current) return
-            // Never leave the previous period's KPIs on screen next to the error
             setEfficiency(null)
             setOverviewError(err.message || "Failed to load fleet efficiency metrics.")
         } finally {
@@ -186,31 +180,50 @@ export default function FuelPerformance() {
         }
     }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
 
-    // 4. Fetch Vehicles Needing Attention Outliers
+    // 4. Fetch Vehicles Efficiency Outliers (Attention Required & Best Performers)
     const loadAttentionData = useCallback(async () => {
         const requestId = ++attentionRequestIdRef.current
         try {
-            const res = await getVehicleEfficiencyList({
-                page: 1,
-                page_size: 4,
-                sort_by: "efficiency",
-                sort_order: "desc",
-                status: "matched",
-                idle_rate_lph: idleRateQuery,
-                ...queryParams,
-            })
+            const [worstRes, bestRes] = await Promise.all([
+                getVehicleEfficiencyList({
+                    page: 1,
+                    page_size: 4,
+                    sort_by: "efficiency",
+                    sort_order: "desc",
+                    status: "matched",
+                    idle_rate_lph: idleRateQuery,
+                    ...queryParams,
+                }),
+                getVehicleEfficiencyList({
+                    page: 1,
+                    page_size: 4,
+                    sort_by: "efficiency",
+                    sort_order: "asc",
+                    status: "matched",
+                    idle_rate_lph: idleRateQuery,
+                    ...queryParams,
+                }),
+            ])
             if (requestId !== attentionRequestIdRef.current) return
             // Only vehicles with a purchase-based ratio (suppressed ratios are null, never ranked)
-            setAttentionVehicles((res?.data || []).filter((v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined))
+            setAttentionVehicles(
+                (worstRes?.data || []).filter(
+                    (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
+                )
+            )
+            setBestVehicles(
+                (bestRes?.data || []).filter(
+                    (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
+                )
+            )
         } catch (err) {
             if (requestId !== attentionRequestIdRef.current) return
-            // Optional panel: hide it rather than keep the previous period's outliers
             setAttentionVehicles([])
+            setBestVehicles([])
             console.warn("Attention load error:", err)
         }
     }, [queryParams, idleRateQuery])
 
-    // Efficiency/attention URLs do not include the threshold, so a threshold change is served from the client cache
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
         loadEfficiencyData()
@@ -218,8 +231,6 @@ export default function FuelPerformance() {
         loadAttentionData()
     }, [loadEfficiencyData, loadWasteData, loadAttentionData, idleThreshold])
 
-    // A new global period/filter starts from the first page (the old page may not exist any more).
-    // Adjusted during render, so the rankings effect below never requests the stale page.
     const [pageFilters, setPageFilters] = useState(queryParams)
     if (pageFilters !== queryParams) {
         setPageFilters(queryParams)
@@ -239,7 +250,6 @@ export default function FuelPerformance() {
             const res = await getFuelImports(10, 0)
             setHistory(Array.isArray(res?.imports) ? res.imports : [])
         } catch (err) {
-            // An outage must not read as "no import records"
             setHistory([])
             setHistoryError(err?.message || "Could not load import history.")
         } finally {
@@ -254,7 +264,6 @@ export default function FuelPerformance() {
         return () => document.removeEventListener("keydown", onKey)
     }, [isImportModalOpen])
 
-    // Recount an interrupted or partly failed import from its stored rows (the backend inserts/deletes nothing)
     const handleReconcile = async (importId) => {
         try {
             setReconcilingId(importId)
@@ -309,7 +318,6 @@ export default function FuelPerformance() {
             setImportResult(result)
             setPreviewData(null)
             setSelectedFile(null)
-            // New rows: drop cached fuel responses so every panel reloads fresh data
             clearClientCache("/api/fuel/")
             setDataVersion((n) => n + 1)
             loadImportHistory()
@@ -319,39 +327,23 @@ export default function FuelPerformance() {
         } catch (err) {
             console.error("Import execution failed:", err)
             setImportError(err.message || "An error occurred while importing fuel statement.")
-            // Rows may have been stored before the error: show the history record and its Reconcile action
             loadImportHistory()
         } finally {
             setImporting(false)
         }
     }
 
-    const totalPages = Math.max(1, Math.ceil((vehiclesData.total || 0) / pageSize))
-
-    const maxSortMetric = useMemo(() => {
-        if (!vehiclesData.data || vehiclesData.data.length === 0) return 1
-        const vals = vehiclesData.data.map((v) => {
-            if (sortBy === "litres") return v.litres || 0
-            if (sortBy === "cost") return v.total_cost || 0
-            if (sortBy === "distance") return v.distance_km || 0
-            if (sortBy === "efficiency") return v.fuel_efficiency_l_per_100km || 0
-            if (sortBy === "cost_per_km") return v.fuel_cost_per_km || 0
-            if (sortBy === "transactions") return v.transaction_count || 0
-            return 100
-        })
-        return Math.max(...vals, 1)
-    }, [vehiclesData.data, sortBy])
-
-    // "No data" only when nothing was fetched at all; rows excluded from KPIs are shown in the excluded panel
     const hasNoData = !loadingEfficiency && efficiency?.excluded_scope?.all_transaction_count === 0
 
     return (
         <AppShell>
-            {/* ─── HEADER & GLOBAL CONTROLS ───────────────────────────── */}
+            {/* ─── 1. HEADER & GLOBAL CONTROLS ───────────────────────────── */}
             <FuelHeader
                 title="Fuel & Performance"
                 subtitle={periodLabel}
                 showFilters={true}
+                idleRate={idleRate}
+                setIdleRate={setIdleRate}
                 actions={
                     <button
                         type="button"
@@ -364,62 +356,14 @@ export default function FuelPerformance() {
                 }
             />
 
-            {/* ─── IDLE BURN RATE (drives every estimated figure below) ── */}
-            <div className="mb-5 flex flex-col gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
-                <p className="text-xs text-slate-600">
-                    <span className="font-medium text-slate-900">Idle burn rate</span>
-                    <span className="hidden sm:inline"> · used for every estimated figure on this page</span>
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                    <div role="group" aria-label="Idle burn rate presets" className="inline-flex rounded-md bg-slate-100 p-0.5 text-xs font-medium">
-                        {[
-                            { label: "1.5", val: 1.5 },
-                            { label: "2.0 std", val: 2.0 },
-                            { label: "2.5", val: 2.5 },
-                            { label: "3.0 AC", val: 3.0 },
-                        ].map((preset) => (
-                            <button
-                                key={preset.val}
-                                type="button"
-                                onClick={() => setIdleRate(preset.val)}
-                                aria-pressed={idleRate === preset.val}
-                                className={`rounded px-2.5 py-1 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                                    idleRate === preset.val
-                                        ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]"
-                                        : "text-slate-600 hover:text-slate-900"
-                                }`}
-                            >
-                                {preset.label}
-                            </button>
-                        ))}
-                    </div>
-                    <label className="flex items-center gap-2">
-                        <input
-                            type="range"
-                            min="0.5"
-                            max="5.0"
-                            step="0.1"
-                            value={idleRate}
-                            onChange={(e) => setIdleRate(parseFloat(e.target.value))}
-                            className="w-24 accent-brand cursor-pointer"
-                            title={`Idle rate: ${idleRate.toFixed(1)} L/h`}
-                            aria-label="Idle burn rate (litres per hour)"
-                        />
-                        <span className="w-14 text-right font-mono text-xs font-medium text-slate-900">
-                            {idleRate.toFixed(1)} L/h
-                        </span>
-                    </label>
-                </div>
-            </div>
-
             {/* Error Message */}
             {overviewError && (
-                <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} className="mb-5" />
+                <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} className="mb-4" />
             )}
 
             {/* Empty state when the period has no records */}
             {hasNoData && (
-                <div className="mb-5 flex flex-col gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                <div className="mb-4 flex flex-col gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                     <div className="flex items-start gap-2">
                         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
                         <div>
@@ -441,288 +385,207 @@ export default function FuelPerformance() {
                 </div>
             )}
 
-            {/* ─── 1. COMPACT KPI CARDS (RECORDED & ESTIMATED) ─────────── */}
+            {/* ─── 2. COMPACT KPI CARDS (PRIMARY & SECONDARY METRICS) ──────── */}
             <KpiCards
                 efficiencyData={efficiency}
                 loading={loadingEfficiency}
                 idleRate={idleRate}
             />
 
-            {/* Transactions excluded from KPIs (no single Wialon unit, suspected re-imports) */}
+            {/* ─── 3. TRANSACTION MATCHING & DATA QUALITY SUMMARY ─────────── */}
             <ExcludedFuelPanel key={`excluded-${dataVersion}`} />
 
-            {/* ─── 2. FUEL WASTE & ANOMALY INTELLIGENCE ─────────────────── */}
-            <FuelWasteIntelligence
-                wasteData={wasteData}
-                loading={loadingWaste}
-                error={wasteError}
-                onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
-                idleThreshold={idleThreshold}
-                onIdleThresholdChange={setIdleThreshold}
-            />
+            {/* ─── 4. VEHICLE EFFICIENCY SPOTLIGHT (BEST & ATTENTION OUTLIERS) */}
+            {(bestVehicles.length > 0 || attentionVehicles.length > 0) && (
+                <section className="mb-4 space-y-3" aria-labelledby="efficiency-spotlight-heading">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 id="efficiency-spotlight-heading" className="type-section-title text-slate-900">
+                                Vehicle Efficiency Spotlight
+                            </h2>
+                            <p className="text-xs text-slate-500 mt-0.5">
+                                Verified fuel efficiency performance benchmarked across active fleet units
+                            </p>
+                        </div>
+                    </div>
 
-            {/* ─── 3. MAIN FUEL / DISTANCE / COST TREND CHART ──────────── */}
-            <FuelTrendChart key={`trend-${dataVersion}`} />
-
-            {/* ─── 4. FUEL TYPE BREAKDOWN & FLEET EFFICIENCY ──────────── */}
-            <div className="mb-5 grid grid-cols-1 gap-4 lg:grid-cols-2">
-                <FuelTypeDonut />
-                <FleetEfficiencyGauge efficiencyData={efficiency} loading={loadingEfficiency} />
-            </div>
-
-            {/* ─── 5. VEHICLES NEEDING ATTENTION (OUTLIERS) ────────────── */}
-            {attentionVehicles.length > 0 && (
-                <section className="mb-5" aria-labelledby="fuel-attention-heading">
-                    <h2 id="fuel-attention-heading" className="mb-2 type-section-title text-slate-900">
-                        Needs attention <span className="font-normal text-slate-500">· highest L/100 km in period</span>
-                    </h2>
-                    <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-2 lg:grid-cols-4">
-                        {attentionVehicles.map((v) => (
-                            <button
-                                type="button"
-                                key={v.vehicle_identifier}
-                                onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
-                                className="bg-white px-4 py-3 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-                            >
-                                <span className="block truncate font-mono text-xs font-semibold text-slate-900">
-                                    {v.vehicle_identifier}
-                                </span>
-                                <span className="mt-1 flex items-baseline gap-1">
-                                    <span className="text-xl font-semibold tabular-nums text-amber-800">
-                                        {v.fuel_efficiency_l_per_100km?.toFixed(1)}
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                        {/* Best Performers */}
+                        {bestVehicles.length > 0 && (
+                            <div className="rounded-xl border border-slate-200/70 bg-white p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                                <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2.5">
+                                    <span className="text-xs font-semibold text-emerald-800 flex items-center gap-1.5">
+                                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                                        Best-Performing Vehicles (Highest km/L)
                                     </span>
-                                    <span className="text-xs text-slate-500">L/100 km</span>
-                                </span>
-                                <span className="mt-0.5 block text-xs tabular-nums text-slate-500">
-                                    {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
-                                    {" · "}{Math.round(v.litres).toLocaleString()} L
-                                    {" · "}{v.distance_km != null ? `${Math.round(v.distance_km).toLocaleString()} km` : "— km"}
-                                </span>
-                            </button>
-                        ))}
+                                    <span className="text-[11px] text-slate-400">Top {bestVehicles.length}</span>
+                                </div>
+                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    {bestVehicles.map((v) => {
+                                        const kmPerL = v.distance_km && v.litres && v.litres > 0
+                                            ? (v.distance_km / v.litres)
+                                            : (v.fuel_efficiency_l_per_100km ? 100 / v.fuel_efficiency_l_per_100km : null)
+                                        return (
+                                            <button
+                                                type="button"
+                                                key={v.vehicle_identifier}
+                                                onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
+                                                className="rounded-md border border-slate-100 bg-slate-50/60 p-2.5 text-left transition-colors hover:border-emerald-300 hover:bg-emerald-50/40 cursor-pointer"
+                                            >
+                                                <span className="block truncate font-mono text-xs font-semibold text-slate-900">
+                                                    {v.vehicle_identifier}
+                                                </span>
+                                                <span className="mt-1 flex items-baseline gap-1">
+                                                    <span className="text-base font-semibold tabular-nums text-emerald-700">
+                                                        {kmPerL !== null ? `${kmPerL.toFixed(2)} km/L` : "—"}
+                                                    </span>
+                                                    <span className="text-[11px] text-slate-500">
+                                                        ({v.fuel_efficiency_l_per_100km?.toFixed(1)} L/100)
+                                                    </span>
+                                                </span>
+                                                <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500 truncate">
+                                                    {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
+                                                    {" · "}{Math.round(v.distance_km || 0).toLocaleString()} km
+                                                </span>
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Attention Required (Lowest Efficiency) */}
+                        {attentionVehicles.length > 0 && (
+                            <div className="rounded-xl border border-slate-200/70 bg-white p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                                <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2.5">
+                                    <span className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
+                                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                                        Attention Required (Lowest Efficiency)
+                                    </span>
+                                    <span className="text-[11px] text-slate-400">Lowest {attentionVehicles.length}</span>
+                                </div>
+                                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                                    {attentionVehicles.map((v) => {
+                                        const kmPerL = v.distance_km && v.litres && v.litres > 0
+                                            ? (v.distance_km / v.litres)
+                                            : (v.fuel_efficiency_l_per_100km ? 100 / v.fuel_efficiency_l_per_100km : null)
+                                        return (
+                                            <button
+                                                type="button"
+                                                key={v.vehicle_identifier}
+                                                onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
+                                                className="rounded-md border border-slate-100 bg-slate-50/60 p-2.5 text-left transition-colors hover:border-amber-300 hover:bg-amber-50/40 cursor-pointer"
+                                            >
+                                                <span className="block truncate font-mono text-xs font-semibold text-slate-900">
+                                                    {v.vehicle_identifier}
+                                                </span>
+                                                <span className="mt-1 flex items-baseline gap-1">
+                                                    <span className="text-base font-semibold tabular-nums text-amber-800">
+                                                        {kmPerL !== null ? `${kmPerL.toFixed(2)} km/L` : "—"}
+                                                    </span>
+                                                    <span className="text-[11px] text-slate-500">
+                                                        ({v.fuel_efficiency_l_per_100km?.toFixed(1)} L/100)
+                                                    </span>
+                                                </span>
+                                                <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500 truncate">
+                                                    {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
+                                                    {" · "}{Math.round(v.distance_km || 0).toLocaleString()} km
+                                                </span>
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </section>
             )}
 
-            {/* ─── 6. VEHICLE PERFORMANCE RANKINGS ─────────────────────── */}
-            <section className="mb-5 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                <div className="flex flex-col gap-2.5 border-b border-slate-200 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
-                    <h2 className="type-section-title text-slate-900">Vehicle rankings</h2>
+            {/* ─── 5. PROMINENT VEHICLE EFFICIENCY LEADERBOARD ────────────── */}
+            <div className="mb-4">
+                <VehicleLeaderboard
+                    vehiclesData={vehiclesData}
+                    loading={loadingRankings}
+                    error={rankingsError}
+                    onRetry={loadRankingsData}
+                    sortBy={sortBy}
+                    setSortBy={setSortBy}
+                    sortOrder={sortOrder}
+                    setSortOrder={setSortOrder}
+                    searchQuery={searchQuery}
+                    setSearchQuery={setSearchQuery}
+                    statusFilter={statusFilter}
+                    setStatusFilter={setStatusFilter}
+                    page={page}
+                    setPage={setPage}
+                    pageSize={pageSize}
+                    onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                />
+            </div>
 
-                    <div className="flex flex-wrap items-center gap-2">
-                        <SearchInput
-                            value={searchQuery}
-                            onChange={(val) => {
-                                setSearchQuery(val)
-                                setPage(1)
-                            }}
-                            placeholder="Search plate…"
-                            className="w-full sm:w-44"
-                        />
-                        <label className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-brand/15">
-                            <span className="text-xs text-slate-500">Rank by</span>
-                            <select
-                                value={sortBy}
-                                onChange={(e) => {
-                                    setSortBy(e.target.value)
-                                    setPage(1)
-                                }}
-                                aria-label="Rank by"
-                                className="cursor-pointer bg-transparent text-xs font-medium text-slate-800 outline-none"
-                            >
-                                {SORT_OPTIONS.map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                    </option>
-                                ))}
-                            </select>
-                        </label>
+            {/* ─── 6. DRIVING VS. IDLING ANALYSIS & IDLE WASTE SPOTLIGHT ─── */}
+            <div className="mb-4">
+                <DrivingVsIdlingChart
+                    efficiencyData={efficiency}
+                    vehicles={vehiclesData.data}
+                    loading={loadingEfficiency || loadingRankings}
+                    idleRate={idleRate}
+                    onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                />
+            </div>
 
-                        <div role="group" aria-label="Sort order" className="inline-flex h-8 rounded-md bg-slate-100 p-0.5 text-xs font-medium">
-                            {["desc", "asc"].map((order) => (
-                                <button
-                                    key={order}
-                                    type="button"
-                                    onClick={() => setSortOrder(order)}
-                                    aria-pressed={sortOrder === order}
-                                    className={`rounded px-2.5 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                                        sortOrder === order
-                                            ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]"
-                                            : "text-slate-600 hover:text-slate-900"
-                                    }`}
-                                >
-                                    {sortOrderLabels(sortBy)[order]}
-                                </button>
-                            ))}
-                        </div>
+            {/* ─── 7. FUEL PRODUCTS & FLEET EFFICIENCY BREAKDOWN ─────────── */}
+            <div className="mb-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <FuelTypeDonut />
+                <FleetEfficiencyGauge efficiencyData={efficiency} loading={loadingEfficiency} />
+            </div>
 
-                        <select
-                            value={statusFilter}
-                            onChange={(e) => {
-                                setStatusFilter(e.target.value)
-                                setPage(1)
-                            }}
-                            aria-label="Filter by telemetry status"
-                            className="h-8 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-800 cursor-pointer focus:border-brand focus:outline-hidden"
-                        >
-                            <option value="">All Matched Vehicles</option>
-                            <option value="matched">Active Telemetry</option>
-                            <option value="no_distance_data">Zero Distance in Period</option>
-                        </select>
+            {/* ─── 8. FUEL & EFFICIENCY TREND CHART ──────────────────────── */}
+            <div className="mb-4">
+                <FuelTrendChart key={`trend-${dataVersion}`} />
+            </div>
+
+            {/* ─── 9. OPERATIONAL ANOMALY & WASTE INTELLIGENCE (COLLAPSIBLE) ── */}
+            <section className="mb-5 rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                <div
+                    onClick={() => setShowWastePanel(!showWastePanel)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setShowWastePanel(!showWastePanel) }}
+                    className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-slate-50 transition-colors"
+                >
+                    <div className="flex items-center gap-2">
+                        <ShieldAlert className="h-4 w-4 text-slate-500" />
+                        <h2 className="type-section-title text-slate-900">
+                            Fuel Waste & Anomaly Intelligence
+                        </h2>
+                        {wasteData?.anomalies_count !== undefined && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900 tabular-nums">
+                                {wasteData.anomalies_count} findings
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
+                        <span>{showWastePanel ? "Collapse" : "Expand audit findings"}</span>
+                        {showWastePanel ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                     </div>
                 </div>
 
-                <div className="overflow-x-auto">
-                    <table className="w-full min-w-[920px] text-left text-xs">
-                        <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
-                            <tr>
-                                <th scope="col" className="w-10 px-4 py-2 text-right font-medium">#</th>
-                                <th scope="col" className="px-3 py-2 font-medium">Vehicle</th>
-                                <th scope="col" className="px-3 py-2 text-right font-medium">Fuel</th>
-                                <th scope="col" className="px-3 py-2 text-right font-medium">Distance</th>
-                                <th scope="col" className="px-3 py-2 text-right font-medium">Efficiency</th>
-                                <th scope="col" className="px-3 py-2 text-right font-medium">Driving</th>
-                                <th scope="col" className="px-3 py-2 text-right font-medium">Idling</th>
-                                <th scope="col" className="min-w-[120px] px-3 py-2 font-medium">Relative</th>
-                                <th scope="col" className="px-4 py-2"><span className="sr-only">Action</span></th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                            {loadingRankings ? (
-                                <tr>
-                                    <td colSpan={9} role="status" className="py-12 text-center text-xs text-slate-500">
-                                        <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                                        Loading vehicle rankings…
-                                    </td>
-                                </tr>
-                            ) : rankingsError ? (
-                                <tr>
-                                    <td colSpan={9} role="alert" className="py-10 text-center text-xs text-rose-700">
-                                        {rankingsError}
-                                        <button
-                                            type="button"
-                                            onClick={loadRankingsData}
-                                            className="ml-2 font-medium text-brand underline-offset-2 hover:underline cursor-pointer"
-                                        >
-                                            Retry
-                                        </button>
-                                    </td>
-                                </tr>
-                            ) : vehiclesData.data.length === 0 ? (
-                                <tr>
-                                    <td colSpan={9} className="py-10 text-center text-xs text-slate-500">
-                                        No vehicles match the current filters.
-                                    </td>
-                                </tr>
-                            ) : (
-                                vehiclesData.data.map((v, idx) => {
-                                    const rankNum = (page - 1) * pageSize + idx + 1
-
-                                    let currentMetricVal = v.litres || 0
-                                    if (sortBy === "cost") currentMetricVal = v.total_cost || 0
-                                    if (sortBy === "distance") currentMetricVal = v.distance_km || 0
-                                    if (sortBy === "efficiency") currentMetricVal = v.fuel_efficiency_l_per_100km || 0
-                                    if (sortBy === "cost_per_km") currentMetricVal = v.fuel_cost_per_km || 0
-                                    if (sortBy === "transactions") currentMetricVal = v.transaction_count || 0
-
-                                    const progressPercent = Math.min(Math.max((currentMetricVal / maxSortMetric) * 100, 4), 100)
-                                    const sub = "block text-[11px] text-slate-500"
-
-                                    return (
-                                        <tr key={v.vehicle_identifier} className="transition-colors hover:bg-slate-50">
-                                            <td className="px-4 py-2 text-right tabular-nums text-slate-400">{rankNum}</td>
-                                            <td className="whitespace-nowrap px-3 py-2">
-                                                <div className="flex items-center gap-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
-                                                        className="font-mono text-xs font-semibold text-slate-900 transition-colors hover:text-brand cursor-pointer"
-                                                    >
-                                                        {v.vehicle_identifier}
-                                                    </button>
-                                                    <VehicleStatusBadge status={v.status} />
-                                                    {v.estimation_status && (
-                                                        <span className="rounded-sm border border-slate-200 px-1 text-[10px] text-slate-500">
-                                                            {v.estimation_status}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                {v.wialon_unit_name && <span className={sub}>{v.wialon_unit_name}</span>}
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                                                <span className="block font-semibold text-slate-900">{Math.round(v.litres).toLocaleString()} L</span>
-                                                <span className={sub}>AED {Math.round(v.total_cost || 0).toLocaleString()}</span>
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                                                <span className="block font-semibold text-slate-900">
-                                                    {v.distance_km !== null ? `${Math.round(v.distance_km).toLocaleString()} km` : "—"}
-                                                </span>
-                                                <span className={sub}>{v.transaction_count} refuels</span>
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                                                <span className="block font-semibold text-slate-900">
-                                                    {v.fuel_efficiency_l_per_100km !== null ? `${v.fuel_efficiency_l_per_100km.toFixed(1)} L/100` : "—"}
-                                                </span>
-                                                <span className={sub}>
-                                                    {v.fuel_cost_per_km !== null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
-                                                </span>
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                                                <span className="block font-semibold text-slate-900">
-                                                    {v.driving_duration_hours !== null && v.driving_duration_hours !== undefined ? `${v.driving_duration_hours.toFixed(1)} h` : "—"}
-                                                </span>
-                                                <span className={sub}>
-                                                    {v.estimated_driving_fuel_litres !== null && v.estimated_driving_fuel_litres !== undefined ? `${v.estimated_driving_fuel_litres.toFixed(1)} L` : "In motion"}
-                                                </span>
-                                            </td>
-                                            <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
-                                                <span className="block font-semibold text-slate-900">
-                                                    {v.idle_duration_hours !== null && v.idle_duration_hours !== undefined ? `${v.idle_duration_hours.toFixed(1)} h` : "—"}
-                                                </span>
-                                                <span className="block text-[11px] text-amber-800">
-                                                    {v.estimated_idle_fuel_litres !== null && v.estimated_idle_fuel_litres !== undefined ? `${v.estimated_idle_fuel_litres.toFixed(1)} L waste` : "—"}
-                                                </span>
-                                            </td>
-                                            <td className="min-w-[120px] px-3 py-2">
-                                                <div className="flex items-center gap-2">
-                                                    <div className="h-1 flex-1 overflow-hidden rounded-full bg-slate-100">
-                                                        <div className="h-full rounded-full bg-brand" style={{ width: `${progressPercent}%` }} />
-                                                    </div>
-                                                    <span className="w-8 text-right text-[11px] tabular-nums text-slate-500">{Math.round(progressPercent)}%</span>
-                                                </div>
-                                            </td>
-                                            <td className="whitespace-nowrap px-4 py-2 text-right">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
-                                                    className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-xs font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 cursor-pointer"
-                                                >
-                                                    Inspect
-                                                    <ArrowUpRight className="h-3 w-3 text-slate-400" />
-                                                </button>
-                                            </td>
-                                        </tr>
-                                    )
-                                })
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-
-                {vehiclesData.total > 0 && (
-                    <Pagination
-                        page={page}
-                        totalPages={totalPages}
-                        onPageChange={setPage}
-                        start={(page - 1) * pageSize + 1}
-                        end={Math.min(page * pageSize, vehiclesData.total)}
-                        total={vehiclesData.total}
-                        noun="vehicles"
-                    />
+                {showWastePanel && (
+                    <div className="border-t border-slate-100 p-4">
+                        <FuelWasteIntelligence
+                            wasteData={wasteData}
+                            loading={loadingWaste}
+                            error={wasteError}
+                            onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                            idleThreshold={idleThreshold}
+                            onIdleThresholdChange={setIdleThreshold}
+                        />
+                    </div>
                 )}
             </section>
 
-            {/* ─── IMPORT MODAL ────────────────────────────────────────── */}
+            {/* ─── IMPORT MODAL ──────────────────────────────────────────── */}
             {isImportModalOpen && createPortal(
                 <div className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4" onClick={() => setIsImportModalOpen(false)}>
                     <div
@@ -733,15 +596,13 @@ export default function FuelPerformance() {
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-                            <div className="flex items-center gap-2.5">
-                                <div>
-                                    <h3 id="fuel-import-title" className="text-[15px] font-semibold text-slate-900">
-                                        Import fuel data
-                                    </h3>
-                                    <p className="text-xs text-slate-500">
-                                        Excel statement (.xlsx)
-                                    </p>
-                                </div>
+                            <div>
+                                <h3 id="fuel-import-title" className="text-[15px] font-semibold text-slate-900">
+                                    Import fuel data
+                                </h3>
+                                <p className="text-xs text-slate-500">
+                                    Excel statement (.xlsx)
+                                </p>
                             </div>
 
                             <button
@@ -927,7 +788,7 @@ export default function FuelPerformance() {
                                         className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                                     >
                                         {importing ? (
-                                            <>
+                                             <>
                                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                                 <span>Importing…</span>
                                             </>
@@ -1015,7 +876,6 @@ export default function FuelPerformance() {
                 <VehicleFuelDetailModal
                     vehicleIdentifier={selectedVehicleDetail}
                     onClose={() => setSelectedVehicleDetail(null)}
-                    // Same period as the fleet KPIs (with "All", the fleet's own data range)
                     dateFrom={queryParams.date_from || efficiency?.excluded_scope?.period?.date_from}
                     dateTo={queryParams.date_to || efficiency?.excluded_scope?.period?.date_to}
                     idleRate={idleRate}

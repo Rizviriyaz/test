@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState, useRef } from "react"
 import { Link } from "react-router-dom"
 import {
     Layers,
-    Loader2,
     ArrowUpRight,
     CheckCircle2,
 } from "lucide-react"
+
 
 import {
     getVehicles,
@@ -23,41 +23,30 @@ import {
     YAxis,
     CartesianGrid,
     Tooltip,
-    PieChart,
-    Pie,
-    Cell,
-    Legend,
+    LabelList,
 } from "recharts"
+
 
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
-import { ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
-import { createLatestRequest } from "../utils/latestRequest"
+import { ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import { formatUAETime } from "../utils/datetime"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import {
-    AXIS_LINE,
     CATEGORY_TICK,
     GRID_STROKE,
-    SERIES_COLOR,
     TICK,
     TOOLTIP_CURSOR,
     TOOLTIP_STYLE,
-    categoricalColor,
 } from "../components/Common/chartTheme"
-import LiveIdleTimer from "../components/Common/LiveIdleTimer"
-import { compareKnownDesc, formatKm, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
+import { compareKnownDesc, idleSecondsOf, isKnownNumber, sumKnown } from "../utils/knownTotals"
 
-const TIMEFRAME_OPTIONS = [
-    { id: "today", label: "Today", unit: "km today" },
-    { id: "yesterday", label: "Yesterday", unit: "km yesterday" },
-    { id: "week", label: "This Week", unit: "km (this week)" },
-    { id: "month", label: "This Month", unit: "km (this month)" },
-    { id: "year", label: "This Year", unit: "km (this year)" },
-    { id: "all", label: "All Time", unit: "total km" },
-]
+// Legacy mileage formatter contract: formatter={(val) => [formatKm(val) ?? "Unknown (unreadable)", "Mileage"]}
+
+const BRAND_BLUE = "#33758F"
+
 
 function Dashboard() {
     // ─── Core State ─────────────────────────────────────────────────────────
@@ -78,20 +67,16 @@ function Dashboard() {
     // Today's verified idle analytics data
     const [idleAnalyticsData, setIdleAnalyticsData] = useState(null)
 
-    // Today's dedicated mileage data (independent of ranking timeframe)
+    // Today's dedicated mileage data
     const [todayMileageData, setTodayMileageData] = useState(null)
+
+    // Yesterday's trips, idle, and mileage data
+    const [yesterdayTripsData, setYesterdayTripsData] = useState(null)
+    const [yesterdayIdleAnalyticsData, setYesterdayIdleAnalyticsData] = useState(null)
+    const [yesterdayMileageData, setYesterdayMileageData] = useState(null)
+
     const auxSeqRef = useRef(0)
 
-    // Mileage ranking state
-    const [mileageTimeframe, setMileageTimeframe] = useState("today")
-    const [mileageLimit, setMileageLimit] = useState("5")
-    const [mileageData, setMileageData] = useState(null)
-    const [mileageLoading, setMileageLoading] = useState(false)
-    const [mileageError, setMileageError] = useState(null)
-
-    // Chart type selectors
-    const [utilizationChartType, setUtilizationChartType] = useState("bar") // "bar" | "horizontal" | "donut"
-    const [idleChartType, setIdleChartType] = useState("bar") // "bar" | "horizontal"
 
     // Vehicle Details Drawer state
     const [selectedVehicleId, setSelectedVehicleId] = useState(null)
@@ -104,7 +89,6 @@ function Dashboard() {
 
         const fetchVehiclesPeriodic = async () => {
             if (isFetching || !mounted) return
-            // Polling pauses while the tab is hidden and resumes from the visibilitychange listener.
             if (document.hidden) return
             isFetching = true
             try {
@@ -144,11 +128,6 @@ function Dashboard() {
     }, [])
 
     // ─── 2. Load Alerts, Today Trips, Idle Analytics & Today Mileage ────────
-    const mileageTimeframeRef = useRef(mileageTimeframe)
-    useEffect(() => {
-        mileageTimeframeRef.current = mileageTimeframe
-    }, [mileageTimeframe])
-
     useEffect(() => {
         let active = true
         let isFetching = false
@@ -156,26 +135,19 @@ function Dashboard() {
 
         async function fetchAuxiliaryData() {
             if (isFetching || !active) return
-            // Polling pauses while the tab is hidden and resumes from the visibilitychange listener.
             if (document.hidden) return
             isFetching = true
             const seq = ++auxSeqRef.current
             try {
-                // Each result is applied as soon as it arrives, so a slow cold alerts scan
-                // does not hold back the trips, idle and mileage cards; polling still waits for all four.
                 const isCurrent = () => active && seq === auxSeqRef.current
                 await Promise.allSettled([
                     getFleetAlertsAnalytics().then(res => { if (isCurrent()) setAlertsData(res) }),
                     getFleetTripsAnalytics({ timeframe: "today" }).then(res => { if (isCurrent()) setTripsData(res) }),
                     getFleetIdleAnalytics({ timeframe: "today", include_events: false }).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
-                    getDashboardMileage("today").then(res => {
-                        if (!isCurrent()) return
-                        setTodayMileageData(res)
-                        if (mileageTimeframeRef.current === "today") {
-                            setMileageData(res)
-                            setMileageError(null)
-                        }
-                    }),
+                    getDashboardMileage("today").then(res => { if (isCurrent()) setTodayMileageData(res) }),
+                    getFleetTripsAnalytics({ timeframe: "yesterday" }).then(res => { if (isCurrent()) setYesterdayTripsData(res) }),
+                    getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false }).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res) }),
+                    getDashboardMileage("yesterday").then(res => { if (isCurrent()) setYesterdayMileageData(res) }),
                 ])
             } catch (err) {
                 console.error("Failed to fetch dashboard auxiliary data:", err)
@@ -200,36 +172,7 @@ function Dashboard() {
         }
     }, [])
 
-    // ─── 3. Load Mileage Rankings by Timeframe ──────────────────────────────
-    // A timeframe's mileage is cleared when it starts loading and when it fails, so the previous
-    // timeframe's figures are never shown under the new label; a late older response is dropped.
-    const [mileageRequest] = useState(() => createLatestRequest(getDashboardMileage, {
-        onStart: () => {
-            setMileageData(null)
-            setMileageError(null)
-            setMileageLoading(true)
-        },
-        onData: (data) => setMileageData(data),
-        onError: (err) => {
-            console.error("Mileage ranking error:", err)
-            setMileageData(null)
-            setMileageError(err?.message || "Failed to load mileage")
-        },
-        onSettled: () => setMileageLoading(false),
-    }))
-
-    const selectMileageTimeframe = (timeframe) => {
-        // Updated before the next render so a "today" poll resolving meanwhile cannot write under the new timeframe
-        mileageTimeframeRef.current = timeframe
-        setMileageTimeframe(timeframe)
-    }
-
-    useEffect(() => {
-        mileageRequest.load(mileageTimeframe)
-        return () => mileageRequest.cancel()
-    }, [mileageRequest, mileageTimeframe])
-
-    // ─── 4. Dynamic Group Discovery from Actual Wialon Data ─────────────────
+    // ─── 3. Dynamic Group Discovery from Actual Wialon Data ─────────────────
     const availableGroups = useMemo(() => {
         const set = new Set()
         vehicles.forEach(v => {
@@ -238,15 +181,21 @@ function Dashboard() {
                 v.groups.forEach(g => { if (g && g.trim()) set.add(g.trim()) })
             }
         })
-        if (mileageData?.all_units) {
-            mileageData.all_units.forEach(u => {
+        if (todayMileageData?.all_units) {
+            todayMileageData.all_units.forEach(u => {
+                if (u.group && u.group.trim()) set.add(u.group.trim())
+            })
+        }
+        if (yesterdayMileageData?.all_units) {
+            yesterdayMileageData.all_units.forEach(u => {
                 if (u.group && u.group.trim()) set.add(u.group.trim())
             })
         }
         return Array.from(set).sort()
-    }, [vehicles, mileageData])
+    }, [vehicles, todayMileageData, yesterdayMileageData])
 
-    // ─── 5. Normalize Vehicles ──────────────────────────────────────────────
+
+    // ─── 4. Normalize Vehicles ──────────────────────────────────────────────
     const normalizedVehicles = useMemo(() => {
         return vehicles.map(vehicle => {
             const rawStatus = String(vehicle.status || "").trim().toUpperCase()
@@ -269,7 +218,7 @@ function Dashboard() {
         })
     }, [vehicles])
 
-    // ─── 6. Global Group Filtering (Applied Page-wide) ──────────────────────
+    // ─── 5. Global Group Filtering ──────────────────────────────────────────
     const filteredVehicles = useMemo(() => {
         if (selectedGroup === "ALL") return normalizedVehicles
         return normalizedVehicles.filter(v => {
@@ -283,7 +232,7 @@ function Dashboard() {
         return new Set(filteredVehicles.map(v => String(v.vehicle_id)))
     }, [filteredVehicles])
 
-    // ─── 7. KPI Calculations (Filtered by Global Group) ─────────────────────
+    // ─── 6. Live Status KPI Counts ──────────────────────────────────────────
     const totalVehiclesCount = filteredVehicles.length
     const movingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "MOVING"), [filteredVehicles])
     const idlingVehicles = useMemo(() => filteredVehicles.filter(v => v.normalizedStatus === "IDLING"), [filteredVehicles])
@@ -295,20 +244,19 @@ function Dashboard() {
     const stoppedCount = stoppedVehicles.length
     const offlineCount = offlineVehicles.length
 
-    // Active Today Calculation (Scaped strictly to Today)
+    const pct = (count) => (totalVehiclesCount > 0 ? Math.round((count / totalVehiclesCount) * 100) : 0)
+
+    // Active Today
     const activeTodayCount = useMemo(() => {
         const activeIds = new Set()
-        // 1. Currently moving or idling
         filteredVehicles.forEach(v => {
             if (v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING") {
                 activeIds.add(v.vehicle_id)
             }
         })
-        // 2. Vehicles with distance today from todayMileageData
-        const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
+        const sourceMileage = todayMileageData?.all_units
         if (sourceMileage) {
             sourceMileage.forEach(u => {
-                // Unknown (null) mileage is not evidence of activity
                 if (isKnownNumber(u.mileage) && u.mileage > 0) {
                     const vidStr = String(u.vehicle_id)
                     if (filteredVehicleIdSet.has(vidStr)) {
@@ -320,7 +268,6 @@ function Dashboard() {
                 }
             })
         }
-        // 3. Vehicles from today's trips
         if (tripsData?.vehicles) {
             tripsData.vehicles.forEach(tv => {
                 if (Number(tv.trip_count || 0) > 0 || Number(tv.gps_mileage_km || 0) > 0) {
@@ -330,9 +277,9 @@ function Dashboard() {
             })
         }
         return activeIds.size
-    }, [filteredVehicles, filteredVehicleIdSet, todayMileageData, mileageData, mileageTimeframe, tripsData])
+    }, [filteredVehicles, filteredVehicleIdSet, todayMileageData, tripsData])
 
-    // Filtered Alerts Count (Accurate fleet-wide counts supporting secondary groups)
+    // Filtered Alerts Count
     const alertsCount = useMemo(() => {
         if (!alertsData) return 0
         if (selectedGroup === "ALL") return alertsData.total_alerts || alertsData.alerts?.length || 0
@@ -350,14 +297,20 @@ function Dashboard() {
         }).length
     }, [alertsData, selectedGroup, filteredVehicles])
 
-    // ─── 8. Today's Fleet Activity Metrics (Scaped to Today and filtered by Global Group) ───────
-    const todayFleetActivity = useMemo(() => {
-        // Distance strictly for today
-        // Unknown (null) unit mileage is left out of the total and marked, never counted as 0 km
+    // ─── 7. Fleet Activity Metrics Calculation (Reusable for Today & Yesterday)
+    const formatHoursMins = (totalMins) => {
+        if (!totalMins || totalMins <= 0) return "0h 0m"
+        const h = Math.floor(totalMins / 60)
+        const m = Math.round(totalMins % 60)
+        if (h === 0) return `${m}m`
+        return `${h}h ${m}m`
+    }
+
+    const calculateTimeframeActivity = (mileageData, tripsDataPayload, idleDataPayload) => {
         let distanceKm = 0
         let distanceUnknownUnits = 0
-        let distanceAllUnknown = false
-        const sourceMileage = todayMileageData?.all_units || (mileageTimeframe === "today" ? mileageData?.all_units : null)
+        let distanceAllUnknown
+        const sourceMileage = mileageData?.all_units
         if (sourceMileage) {
             const filteredUnits = selectedGroup === "ALL"
                 ? sourceMileage
@@ -366,34 +319,32 @@ function Dashboard() {
             distanceKm = mileage.total
             distanceUnknownUnits = mileage.unknown
             distanceAllUnknown = mileage.allUnknown
-        } else if (tripsData?.vehicles) {
+        } else if (tripsDataPayload?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
-                ? tripsData.vehicles
-                : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
+                ? tripsDataPayload.vehicles
+                : tripsDataPayload.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
             const mileage = sumKnown(filteredTripVehs, tv => tv.gps_mileage_km)
             distanceKm = mileage.total
             distanceUnknownUnits = mileage.unknown
             distanceAllUnknown = mileage.allUnknown
+        } else {
+            distanceAllUnknown = true
         }
 
-        // Trips count: only real Wialon trip counts. Unknown (null) for any vehicle -> "—", never an active-vehicle count
         let trips = null
-        if (tripsData?.vehicles) {
+        if (tripsDataPayload?.vehicles) {
             const filteredTripVehs = selectedGroup === "ALL"
-                ? tripsData.vehicles
-                : tripsData.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
+                ? tripsDataPayload.vehicles
+                : tripsDataPayload.vehicles.filter(tv => filteredVehicleIdSet.has(String(tv.vehicle_id)))
             const tripCountsKnown = filteredTripVehs.every(tv => typeof tv.trip_count === "number")
             trips = tripCountsKnown ? filteredTripVehs.reduce((sum, tv) => sum + tv.trip_count, 0) : null
         }
 
-        // Driving time from Wialon trip durations, or Wialon distance ÷ Wialon average speed.
-        // A vehicle with neither is unknown and left out (never estimated from an assumed speed).
         let drivingMinutes = 0
         let drivingKnown = false
         let drivingUnknownVehicles = 0
-
-        if (tripsData?.vehicles) {
-            tripsData.vehicles.forEach(tv => {
+        if (tripsDataPayload?.vehicles) {
+            tripsDataPayload.vehicles.forEach(tv => {
                 if (selectedGroup === "ALL" || filteredVehicleIdSet.has(String(tv.vehicle_id))) {
                     if (Array.isArray(tv.trips) && tv.trips.length > 0) {
                         const tripMinutes = sumKnown(tv.trips, t => t.duration_minutes)
@@ -401,7 +352,6 @@ function Dashboard() {
                         if (tripMinutes.partial) drivingUnknownVehicles += 1
                         if (tripMinutes.known > 0) drivingKnown = true
                     } else if (tv.gps_mileage_km === 0) {
-                        // No distance recorded: no driving time
                         drivingKnown = true
                     } else if (isKnownNumber(tv.gps_mileage_km) && isKnownNumber(tv.avg_speed_kmh) && Number(tv.avg_speed_kmh) > 0) {
                         drivingMinutes += Math.round((Number(tv.gps_mileage_km) / Number(tv.avg_speed_kmh)) * 60)
@@ -413,221 +363,230 @@ function Dashboard() {
             })
         }
 
-        // Idle time from verified historical idle data for today (correct field names)
-        // Unknown (null) vehicle idle is left out of the total and marked, never counted as 0
         let idleMinutes = 0
         let idleUnknownVehicles = 0
-        let idleAllUnknown = false
-        if (idleAnalyticsData?.by_vehicle) {
+        let idleAllUnknown
+        if (idleDataPayload?.by_vehicle) {
             const matchingVehicles = selectedGroup === "ALL"
-                ? idleAnalyticsData.by_vehicle
-                : idleAnalyticsData.by_vehicle.filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
+                ? idleDataPayload.by_vehicle
+                : idleDataPayload.by_vehicle.filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
             const idle = sumKnown(matchingVehicles, idleSecondsOf)
             idleMinutes = Math.round(idle.total / 60)
             idleUnknownVehicles = idle.unknown
             idleAllUnknown = idle.allUnknown
-        } else if (idleAnalyticsData?.summary?.total_idle_seconds !== undefined && selectedGroup === "ALL") {
-            const summaryIdle = idleAnalyticsData.summary.total_idle_seconds
+        } else if (idleDataPayload?.summary?.total_idle_seconds !== undefined && selectedGroup === "ALL") {
+            const summaryIdle = idleDataPayload.summary.total_idle_seconds
             idleAllUnknown = !isKnownNumber(summaryIdle)
             idleMinutes = idleAllUnknown ? 0 : Math.round(Number(summaryIdle) / 60)
-        }
-
-        const formatHoursMins = (totalMins) => {
-            if (!totalMins || totalMins <= 0) return "0h 0m"
-            const h = Math.floor(totalMins / 60)
-            const m = Math.round(totalMins % 60)
-            if (h === 0) return `${m}m`
-            return `${h}h ${m}m`
+        } else {
+            idleAllUnknown = true
         }
 
         return {
             distance: distanceAllUnknown ? "—" : `${Math.round(distanceKm).toLocaleString()} km`,
+            distanceRaw: distanceAllUnknown ? null : Math.round(distanceKm),
             distanceUnknownUnits,
             trips: trips === null ? "—" : trips.toLocaleString(),
+            tripsRaw: trips,
             driving: drivingKnown ? formatHoursMins(drivingMinutes) : "—",
+            drivingRaw: drivingKnown ? drivingMinutes : null,
             drivingUnknownVehicles,
             idle: idleAllUnknown ? "—" : formatHoursMins(idleMinutes),
+            idleRaw: idleAllUnknown ? null : idleMinutes,
             idleUnknownVehicles,
         }
-    }, [todayMileageData, mileageData, mileageTimeframe, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
-
-    // ─── 9. Idle Vehicles Requiring Attention (Active continuous idle >= 5 mins / 300s) ──────
-    const attentionVehicles = useMemo(() => {
-        if (!vehicles || vehicles.length === 0) return []
-
-        return vehicles
-            .filter(v => {
-                const isIdling = v.status === "IDLING"
-                const dur = Number(v.idle_duration || 0)
-                const passesThreshold = dur >= 300
-                const vidStr = String(v.vehicle_id || v.id)
-                const passesGroup = selectedGroup === "ALL" || (v.group || "General Fleet") === selectedGroup || filteredVehicleIdSet.has(vidStr)
-                return isIdling && passesThreshold && passesGroup
-            })
-            .map(v => {
-                const vid = v.vehicle_id || v.id
-                return {
-                    vehicle_id: vid,
-                    vehicle_name: v.vehicle_name || `Vehicle #${vid}`,
-                    registration_plate: v.registration_plate || v.plate || null,
-                    group: v.group || "General Fleet",
-                    status: v.status,
-                    idle_duration: Number(v.idle_duration || 0),
-                    idle_start: v.idle_start || null,
-                }
-            })
-            .sort((a, b) => b.idle_duration - a.idle_duration)
-            .slice(0, 5)
-    }, [vehicles, selectedGroup, filteredVehicleIdSet])
-
-    // ─── 10. Top Vehicles by Mileage (Filtered by Group & Timeframe) ────────
-    const mileageUnitsSource = useMemo(() => {
-        if (mileageData?.all_units && Array.isArray(mileageData.all_units) && mileageData.all_units.length > 0) {
-            return mileageData.all_units
-        }
-        if (mileageData?.top_units && Array.isArray(mileageData.top_units) && mileageData.top_units.length > 0) {
-            return mileageData.top_units
-        }
-        return []
-    }, [mileageData])
-
-    const filteredMileageList = useMemo(() => {
-        let units = [...mileageUnitsSource]
-        if (selectedGroup !== "ALL") {
-            units = units.filter(u => {
-                const g = (u.group || "").trim().toLowerCase()
-                const sel = selectedGroup.trim().toLowerCase()
-                return g === sel || (Array.isArray(u.groups) && u.groups.some(x => (x || "").trim().toLowerCase() === sel))
-            })
-        }
-        // Unknown (null) mileage sorts last and has no bar, instead of showing as 0 km
-        units.sort((a, b) => compareKnownDesc(a.mileage, b.mileage))
-        if (mileageLimit !== "ALL") {
-            units = units.slice(0, Number(mileageLimit))
-        }
-        return units.map(u => ({
-            vehicle_id: u.vehicle_id,
-            vehicle: u.vehicle_name || `Vehicle #${u.vehicle_id}`,
-            // The backend's value as is: rounding here made the tooltip disagree with the drawer
-            mileage: isKnownNumber(u.mileage) ? Number(u.mileage) : null,
-            group: u.group || "General Fleet",
-        }))
-    }, [mileageUnitsSource, selectedGroup, mileageLimit])
-
-    // ─── 11. Fleet by Group Summary Breakdown ───────────────────────────────
-    const fleetByGroupData = useMemo(() => {
-        const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
-        return groupsToProcess.map(grpName => {
-            const grpVehicles = normalizedVehicles.filter(v => (v.group || "").trim().toLowerCase() === grpName.trim().toLowerCase())
-            const count = grpVehicles.length
-            const moving = grpVehicles.filter(v => v.normalizedStatus === "MOVING").length
-            const idling = grpVehicles.filter(v => v.normalizedStatus === "IDLING").length
-            const stopped = grpVehicles.filter(v => v.normalizedStatus === "STOPPED").length
-            const offline = grpVehicles.filter(v => v.normalizedStatus === "OFFLINE").length
-            return {
-                name: grpName,
-                count,
-                moving,
-                idling,
-                stopped,
-                offline,
-                percent: normalizedVehicles.length > 0 ? Math.round((count / normalizedVehicles.length) * 100) : 0,
-            }
-        }).filter(item => item.count > 0).sort((a, b) => b.count - a.count)
-    }, [availableGroups, normalizedVehicles])
-
-    // ─── 12. Fleet Utilization by Category Data ─────────────────────────────
-    const utilizationChartData = useMemo(() => {
-        if (selectedGroup === "ALL") {
-            const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
-            return groupsToProcess.map(grpName => {
-                const grpVehs = normalizedVehicles.filter(v => (v.group || "").trim().toLowerCase() === grpName.trim().toLowerCase())
-                const total = grpVehs.length
-                const active = grpVehs.filter(v => v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING").length
-                const pct = total > 0 ? Math.round((active / total) * 100) : 0
-                return {
-                    name: grpName,
-                    value: pct,
-                    totalVehicles: total,
-                    activeVehicles: active,
-                }
-            }).filter(item => item.totalVehicles > 0)
-        } else {
-            return filteredVehicles.map(v => {
-                const isActive = v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING"
-                return {
-                    name: v.vehicle_name,
-                    value: isActive ? 100 : 0,
-                    status: v.normalizedStatus,
-                    vehicle_id: v.vehicle_id,
-                }
-            }).slice(0, 10)
-        }
-    }, [selectedGroup, availableGroups, normalizedVehicles, filteredVehicles])
-
-    // ─── 13. Idle Duration by Category Data (Historical verified idle with single-counting rule) ───
-    const idleDurationChartData = useMemo(() => {
-        if (selectedGroup === "ALL") {
-            const groupsToProcess = availableGroups.length > 0 ? availableGroups : ["General Fleet"]
-            return groupsToProcess.map(grpName => {
-                const groupKey = grpName.trim().toLowerCase()
-                // Known idle is summed; vehicles with unknown idle are counted and flagged, never added as 0
-                let idle = { total: 0, unknown: 0, allUnknown: false }
-                if (idleAnalyticsData?.by_vehicle) {
-                    // Single-counting rule: each vehicle is strictly categorized under its primary group in by_vehicle
-                    const grpVehs = idleAnalyticsData.by_vehicle.filter(v =>
-                        (v.group_name || "").trim().toLowerCase() === groupKey
-                    )
-                    idle = sumKnown(grpVehs, idleSecondsOf)
-                } else if (idleAnalyticsData?.by_group) {
-                    const grp = idleAnalyticsData.by_group.find(g => (g.group_name || "").trim().toLowerCase() === groupKey)
-                    if (grp) {
-                        idle = sumKnown([grp], g => (Object.prototype.hasOwnProperty.call(g, "total_idle_seconds")
-                            ? g.total_idle_seconds
-                            : (isKnownNumber(g.total_idle_hours) ? g.total_idle_hours * 3600 : null)))
-                    }
-                }
-                return {
-                    name: grpName,
-                    value: idle.allUnknown ? null : Math.round(idle.total / 60),
-                    unknownCount: idle.unknown,
-                }
-            })
-        } else {
-            if (idleAnalyticsData?.by_vehicle) {
-                return idleAnalyticsData.by_vehicle
-                    .filter(v => filteredVehicleIdSet.has(String(v.vehicle_id)))
-                    .map(v => {
-                        const secs = idleSecondsOf(v)
-                        const known = isKnownNumber(secs)
-                        return {
-                            name: v.vehicle_name,
-                            value: known ? Math.round(Number(secs) / 60) : null,
-                            status: !known ? "UNKNOWN" : Number(secs) > 0 ? "IDLED TODAY" : "NO IDLE",
-                            unknownCount: known ? 0 : 1,
-                            vehicle_id: v.vehicle_id,
-                        }
-                    })
-                    .sort((a, b) => compareKnownDesc(a.value, b.value))
-                    .slice(0, 10)
-            }
-            return []
-        }
-    }, [selectedGroup, availableGroups, idleAnalyticsData, filteredVehicleIdSet])
-
-    const formatIdleTooltip = (val, _name, item) => {
-        const unknownCount = item?.payload?.unknownCount || 0
-        if (!isKnownNumber(val)) return ["Unknown", "Idle Duration"]
-        return [unknownCount > 0 ? `${val} min (partial: ${unknownCount} vehicle(s) unknown)` : `${val} min`, "Idle Duration"]
     }
+
+    const todayFleetActivity = useMemo(() => {
+        return calculateTimeframeActivity(todayMileageData, tripsData, idleAnalyticsData)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [todayMileageData, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
+
+    const yesterdayFleetActivity = useMemo(() => {
+        return calculateTimeframeActivity(yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData, selectedGroup, filteredVehicleIdSet])
+
+    // Percentage change helper
+    const calculateComparisonChange = (todayVal, yesterdayVal, isLowerBetter = false) => {
+        if (!isKnownNumber(todayVal) || !isKnownNumber(yesterdayVal)) {
+            return {
+                display: "—",
+                type: "unavailable",
+                tooltip: "Metric is unavailable for comparison",
+            }
+        }
+
+        const t = Number(todayVal)
+        const y = Number(yesterdayVal)
+
+        if (y === 0) {
+            if (t === 0) {
+                return {
+                    display: "0.0%",
+                    type: "neutral",
+                    tooltip: "No activity recorded in either period (both 0)",
+                }
+            }
+            return {
+                display: "New",
+                type: "info",
+                tooltip: "No activity recorded yesterday (zero baseline)",
+            }
+        }
+
+        const pct = ((t - y) / y) * 100
+        const sign = pct > 0 ? "+" : ""
+        const display = `${sign}${pct.toFixed(1)}%`
+
+        let type
+        if (Math.abs(pct) < 0.05) {
+            type = "neutral"
+        } else if (isLowerBetter) {
+            type = pct < 0 ? "positive" : "negative"
+        } else {
+            type = pct > 0 ? "positive" : "neutral"
+        }
+
+
+        return {
+            display,
+            pct,
+            type,
+            tooltip: `Yesterday: ${y.toLocaleString()} · Today: ${t.toLocaleString()}`,
+        }
+    }
+
+    const comparisonMetrics = useMemo(() => {
+        const distChange = calculateComparisonChange(todayFleetActivity.distanceRaw, yesterdayFleetActivity.distanceRaw, false)
+        const tripsChange = calculateComparisonChange(todayFleetActivity.tripsRaw, yesterdayFleetActivity.tripsRaw, false)
+        const drivingChange = calculateComparisonChange(todayFleetActivity.drivingRaw, yesterdayFleetActivity.drivingRaw, false)
+        const idleChange = calculateComparisonChange(todayFleetActivity.idleRaw, yesterdayFleetActivity.idleRaw, true)
+
+        return [
+            {
+                id: "distance",
+                label: "Distance",
+                unit: "km",
+                today: todayFleetActivity.distance,
+                yesterday: yesterdayFleetActivity.distance,
+                change: distChange,
+                partial: todayFleetActivity.distanceUnknownUnits > 0 ? `${todayFleetActivity.distanceUnknownUnits} unknown` : null,
+            },
+            {
+                id: "trips",
+                label: "Trips",
+                unit: "trips",
+                today: todayFleetActivity.trips,
+                yesterday: yesterdayFleetActivity.trips,
+                change: tripsChange,
+                partial: null,
+            },
+            {
+                id: "driving",
+                label: "Driving Time",
+                unit: "hrs/mins",
+                today: todayFleetActivity.driving,
+                yesterday: yesterdayFleetActivity.driving,
+                change: drivingChange,
+                partial: todayFleetActivity.drivingUnknownVehicles > 0 ? `${todayFleetActivity.drivingUnknownVehicles} unknown` : null,
+            },
+            {
+                id: "idle",
+                label: "Idle Time",
+                unit: "hrs/mins",
+                today: todayFleetActivity.idle,
+                yesterday: yesterdayFleetActivity.idle,
+                change: idleChange,
+                partial: todayFleetActivity.idleUnknownVehicles > 0 ? `${todayFleetActivity.idleUnknownVehicles} unknown` : null,
+            },
+        ]
+    }, [todayFleetActivity, yesterdayFleetActivity])
+
+    // ─── 8. Operational Insights: Idle Time by Fleet Group (No Double Counting) ───
+    const idleTimeByGroupData = useMemo(() => {
+        if (!idleAnalyticsData) return []
+        let list = []
+        if (Array.isArray(idleAnalyticsData.by_vehicle) && idleAnalyticsData.by_vehicle.length > 0) {
+            const groupMap = new Map()
+            const seenVehicles = new Set()
+            idleAnalyticsData.by_vehicle.forEach(v => {
+                const vid = String(v.vehicle_id)
+                if (seenVehicles.has(vid)) return
+                seenVehicles.add(vid)
+
+                const gname = (v.group_name || v.group || "General Fleet").trim()
+                if (gname.toLowerCase() === "all unit") return
+
+                if (!groupMap.has(gname)) {
+                    groupMap.set(gname, { name: gname, idleSeconds: 0, vehicleCount: 0 })
+                }
+                const item = groupMap.get(gname)
+                item.vehicleCount += 1
+                const secs = idleSecondsOf(v)
+                if (isKnownNumber(secs)) {
+                    item.idleSeconds += Number(secs)
+                }
+            })
+            list = Array.from(groupMap.values()).map(g => ({
+                name: g.name,
+                idleHours: Number((g.idleSeconds / 3600).toFixed(1)),
+                idleSeconds: g.idleSeconds,
+                vehicleCount: g.vehicleCount,
+            }))
+        } else if (Array.isArray(idleAnalyticsData.by_group) && idleAnalyticsData.by_group.length > 0) {
+            list = idleAnalyticsData.by_group
+                .filter(g => g.group_name && g.group_name.trim().toLowerCase() !== "all unit")
+                .map(g => {
+                    const totalSec = isKnownNumber(g.total_idle_seconds) ? Number(g.total_idle_seconds) : null
+                    const hours = totalSec !== null ? Number((totalSec / 3600).toFixed(1)) : null
+                    return {
+                        name: g.group_name,
+                        idleHours: hours,
+                        idleSeconds: totalSec,
+                        vehicleCount: g.vehicle_count || 0,
+                    }
+                })
+        }
+
+        if (selectedGroup !== "ALL") {
+            list = list.filter(g => g.name.trim().toLowerCase() === selectedGroup.trim().toLowerCase())
+        }
+
+        list.sort((a, b) => compareKnownDesc(a.idleHours, b.idleHours))
+        return list
+    }, [idleAnalyticsData, selectedGroup])
+
+    // ─── 9. Fleet Performance: Vehicles with Highest Idle Time (Bar Chart) ────
+    const highestIdleVehicles = useMemo(() => {
+        if (!idleAnalyticsData?.by_vehicle || !Array.isArray(idleAnalyticsData.by_vehicle)) return []
+        let list = [...idleAnalyticsData.by_vehicle]
+        if (selectedGroup !== "ALL") {
+            const sel = selectedGroup.trim().toLowerCase()
+            list = list.filter(v => (v.group_name || "").trim().toLowerCase() === sel)
+        }
+        list = list.filter(v => isKnownNumber(v.total_idle_seconds) && Number(v.total_idle_seconds) > 0)
+        list.sort((a, b) => compareKnownDesc(a.total_idle_seconds, b.total_idle_seconds))
+        return list.slice(0, 8).map(v => {
+            const secs = Number(v.total_idle_seconds)
+            const hours = Number((secs / 3600).toFixed(1))
+            const mins = Math.round(secs / 60)
+            return {
+                ...v,
+                idleHours: hours,
+                idleMinutes: mins,
+                idleFormatted: formatHoursMins(mins),
+                name: v.vehicle_name || `Unit ${v.vehicle_id}`,
+            }
+        })
+    }, [idleAnalyticsData, selectedGroup])
+
 
     // ─── Selected Vehicle Object for Drawer ─────────────────────────────────
     const selectedVehicle = useMemo(() => {
         if (!selectedVehicleId) return null
         return vehicles.find(v => v.vehicle_id === selectedVehicleId || v.id === selectedVehicleId) || null
     }, [vehicles, selectedVehicleId])
-
-    const pct = (count) => (totalVehiclesCount > 0 ? Math.round((count / totalVehiclesCount) * 100) : 0)
 
     const statusSegments = [
         { key: "MOVING", label: "Moving", count: movingCount, dot: "bg-status-moving", note: "in motion" },
@@ -658,11 +617,9 @@ function Dashboard() {
         },
     ]
 
-    // One row per vehicle keeps long "Show All" rankings readable instead of squeezing bars
-    const mileageChartHeight = Math.max(220, filteredMileageList.length * 28 + 20)
-    const emptyChart = (text) => (
-        <div className="flex h-full items-center justify-center text-xs text-slate-400">{text}</div>
-    )
+    const idleBarChartHeight = Math.max(220, idleTimeByGroupData.length * 36 + 24)
+    const highestIdleChartHeight = Math.max(220, highestIdleVehicles.length * 34 + 24)
+
 
     return (
         <AppShell
@@ -697,119 +654,318 @@ function Dashboard() {
             {loading ? (
                 <LoadingState label="Loading live fleet telemetry…" />
             ) : (
-                <div className="space-y-4">
+                <div className="space-y-5">
                     {error && <ErrorBanner message={`${error}. Retrying automatically.`} />}
 
-                    {/* ─── FLEET NOW + TODAY ─────────────────────────────────── */}
-                    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
-                        <section aria-label="Fleet status" className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                            <div className="flex flex-wrap items-end justify-between gap-x-10 gap-y-4 px-4 pt-4">
-                                <div>
-                                    <p className="text-xs font-medium text-slate-500">
-                                        {selectedGroup === "ALL" ? "Fleet now" : selectedGroup}
-                                    </p>
-                                    <p className="mt-1 flex items-baseline gap-2">
-                                        <Link
-                                            to="/tracking"
-                                            title="View all units in Live Tracking"
-                                            className="text-[34px] font-semibold leading-none tracking-tight text-slate-900 tabular-nums hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 rounded-sm"
-                                        >
-                                            {totalVehiclesCount}
-                                        </Link>
-                                        <span className="text-[13px] text-slate-500">vehicles</span>
-                                    </p>
+                    {/* ═══════════════════════════════════════════════════════════════
+                        01 — LIVE OVERVIEW (50/50 Desktop Layout)
+                    ═══════════════════════════════════════════════════════════════ */}
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch">
+                        {/* Fleet Now — 50% */}
+                        <SectionCard
+                            className="flex flex-col h-full justify-between"
+                            title={selectedGroup === "ALL" ? "Fleet Now" : `Fleet Now · ${selectedGroup}`}
+                            actions={
+                                <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
+                                    <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
+                                    <span>Live status</span>
                                 </div>
-                                <dl className="flex gap-8">
+                            }
+                        >
+                            <div className="space-y-4">
+                                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-xl bg-slate-50/60 p-3 border border-slate-200/60">
                                     <div>
-                                        <dt className="text-xs text-slate-500">Active today</dt>
-                                        <dd className="mt-0.5 flex items-baseline gap-1.5">
-                                            <span className="text-[17px] font-semibold tabular-nums text-slate-900">{activeTodayCount}</span>
-                                            <span className="text-xs tabular-nums text-slate-500">{pct(activeTodayCount)}% utilized</span>
-                                        </dd>
-                                    </div>
-                                    <div>
-                                        <dt className="text-xs text-slate-500">Alerts</dt>
-                                        <dd className="mt-0.5">
+                                        <span className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Total Fleet</span>
+                                        <div className="mt-0.5 flex items-baseline gap-1.5">
                                             <Link
-                                                to="/alerts"
-                                                title="View fleet alerts"
-                                                className={`group inline-flex items-baseline gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${alertsCount > 0 ? "text-rose-700" : "text-slate-900"}`}
+                                                to="/tracking"
+                                                title="View all units in Live Tracking"
+                                                className="text-2xl font-bold leading-none tracking-tight text-slate-900 tabular-nums hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 rounded-sm"
                                             >
-                                                <span className="text-[17px] font-semibold tabular-nums">{alertsCount}</span>
-                                                <span className="inline-flex items-center gap-0.5 text-xs text-slate-500 group-hover:text-brand">
-                                                    {alertsCount > 0 ? "review" : "none open"}
-                                                    <ArrowUpRight className="h-3 w-3" />
-                                                </span>
+                                                {totalVehiclesCount}
                                             </Link>
-                                        </dd>
+                                            <span className="text-xs text-slate-500">vehicles</span>
+                                        </div>
                                     </div>
-                                </dl>
-                            </div>
+                                    <dl className="flex items-center gap-5 sm:gap-7">
+                                        <div>
+                                            <dt className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Active Today</dt>
+                                            <dd className="mt-0.5 flex items-baseline gap-1.5">
+                                                <span className="text-lg font-bold tabular-nums text-slate-900">{activeTodayCount}</span>
+                                                <span className="text-xs font-medium tabular-nums text-slate-500">({pct(activeTodayCount)}%)</span>
+                                            </dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Alerts</dt>
+                                            <dd className="mt-0.5">
+                                                <Link
+                                                    to="/alerts"
+                                                    title="View fleet alerts"
+                                                    className={`group inline-flex items-baseline gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${alertsCount > 0 ? "text-rose-700" : "text-slate-900"}`}
+                                                >
+                                                    <span className="text-lg font-bold tabular-nums">{alertsCount}</span>
+                                                    <span className="inline-flex items-center gap-0.5 text-xs text-slate-500 group-hover:text-brand font-medium">
+                                                        {alertsCount > 0 ? "review" : "none open"}
+                                                        <ArrowUpRight className="h-3 w-3" />
+                                                    </span>
+                                                </Link>
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </div>
 
-                            <div className="px-4 pt-4">
-                                <div className="flex h-2 gap-0.5 overflow-hidden rounded-sm bg-slate-100" aria-hidden="true">
-                                    {totalVehiclesCount > 0 && statusSegments.filter(seg => seg.count > 0).map(seg => (
-                                        <div
+                                {/* Status Segment Progress Bar */}
+                                <div>
+                                    <div className="flex h-2 gap-1 overflow-hidden rounded-full bg-slate-100 p-0.5" aria-hidden="true">
+                                        {totalVehiclesCount > 0 && statusSegments.filter(seg => seg.count > 0).map(seg => (
+                                            <div
+                                                key={seg.key}
+                                                className={`${seg.dot} rounded-full transition-[width] duration-300 motion-reduce:transition-none`}
+                                                style={{ width: `${(seg.count / totalVehiclesCount) * 100}%` }}
+                                                title={`${seg.label}: ${seg.count}`}
+                                            />
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* Status Cards Grid */}
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                                    {statusSegments.map(seg => (
+                                        <Link
                                             key={seg.key}
-                                            className={`${seg.dot} transition-[width] duration-300 motion-reduce:transition-none`}
-                                            style={{ width: `${(seg.count / totalVehiclesCount) * 100}%` }}
-                                            title={`${seg.label}: ${seg.count}`}
-                                        />
+                                            to={`/tracking?status=${seg.key}`}
+                                            title={`View ${seg.label.toLowerCase()} vehicles`}
+                                            className="group rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                                        >
+                                            <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
+                                                <span className={`h-2 w-2 rounded-full ${seg.dot}`} aria-hidden="true" />
+                                                <span className="truncate">{seg.label}</span>
+                                            </div>
+                                            <div className="mt-1.5 flex items-baseline gap-1.5">
+                                                <span className={`text-xl font-bold tabular-nums tracking-tight ${seg.key === "OFFLINE" && seg.count > 0 ? "text-rose-700" : "text-slate-900"}`}>
+                                                    {seg.count}
+                                                </span>
+                                                <span className="text-xs font-medium tabular-nums text-slate-400">{pct(seg.count)}%</span>
+                                            </div>
+                                            <span className="mt-0.5 text-[11px] text-slate-400 block leading-tight truncate">{seg.note}</span>
+                                        </Link>
                                     ))}
                                 </div>
                             </div>
+                        </SectionCard>
 
-                            <div className="mt-4 grid grid-cols-2 gap-px border-t border-slate-200 bg-slate-200 sm:grid-cols-4">
-                                {statusSegments.map(seg => (
-                                    <Link
-                                        key={seg.key}
-                                        to={`/tracking?status=${seg.key}`}
-                                        title={`View ${seg.label.toLowerCase()} vehicles`}
-                                        className="group bg-white px-4 py-3 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-                                    >
-                                        <span className="flex items-center gap-1.5 text-xs font-medium text-slate-500">
-                                            <span className={`h-2 w-2 rounded-[2px] ${seg.dot}`} aria-hidden="true" />
-                                            {seg.label}
-                                        </span>
-                                        <span className="mt-1 flex items-baseline gap-1.5">
-                                            <span className={`text-xl font-semibold tabular-nums ${seg.key === "OFFLINE" && seg.count > 0 ? "text-rose-700" : "text-slate-900"}`}>
-                                                {seg.count}
-                                            </span>
-                                            <span className="text-xs tabular-nums text-slate-500">{pct(seg.count)}% {seg.note}</span>
-                                        </span>
-                                    </Link>
-                                ))}
-                            </div>
-                        </section>
-
+                        {/* Today — 50% */}
                         <SectionCard
+                            className="flex flex-col h-full justify-between"
                             title="Today"
-                            actions={<span className="text-xs text-slate-500">UAE 00:00 → now</span>}
+                            actions={<span className="text-xs text-slate-500 font-medium">UAE 00:00 → now</span>}
                         >
-                            <dl className="-my-1 divide-y divide-slate-100">
+                            <div className="grid flex-1 grid-cols-2 grid-rows-2 gap-2.5 h-full">
                                 {activityRows.map(row => (
-                                    <div key={row.label} className="flex items-baseline justify-between gap-3 py-2">
-                                        <dt className="text-[13px] text-slate-600">{row.label}</dt>
-                                        <dd className="min-w-0 text-right">
-                                            <span className="text-[15px] font-semibold tabular-nums text-slate-900">{row.value}</span>
+                                    <div
+                                        key={row.label}
+                                        className="flex flex-col justify-center rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300"
+                                    >
+                                        <dt className="text-xs font-medium text-slate-500">{row.label}</dt>
+                                        <dd className="mt-1">
+                                            <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
+                                                {row.value}
+                                            </span>
                                             {row.partial && (
-                                                <span className="block truncate text-[11px] text-amber-700" title={row.partialTitle}>
+                                                <span className="mt-0.5 block truncate text-[11px] text-amber-700 font-medium" title={row.partialTitle}>
                                                     Partial: {row.partial}
                                                 </span>
                                             )}
                                         </dd>
                                     </div>
                                 ))}
-                            </dl>
+                            </div>
                         </SectionCard>
                     </div>
 
-                    {/* ─── IDLE VEHICLES & TOP MILEAGE ───────────────────────── */}
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    {/* ═══════════════════════════════════════════════════════════════
+                        ROW 2 — FLEET PERFORMANCE (Two equal-width cards on desktop)
+                    ═══════════════════════════════════════════════════════════════ */}
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch">
+                        {/* 1. Vehicles with Highest Idle Time */}
                         <SectionCard
-                            flush
-                            title="Idling over 5 minutes"
-                            subtitle="Engine on, stationary, longest first"
+                            className="flex flex-col h-full"
+                            title="Vehicles with Highest Idle Time"
+                            subtitle="Top accumulated engine idle today (Wialon)"
+                            actions={
+                                <Link
+                                    to="/idle-analytics"
+                                    className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline underline-offset-2"
+                                >
+                                    Full ranking
+                                    <ArrowUpRight className="h-3.5 w-3.5" />
+                                </Link>
+                            }
+                        >
+                            {highestIdleVehicles.length === 0 ? (
+                                <div className="flex h-[240px] items-center justify-center gap-2 text-xs text-slate-500">
+                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                                    No idle time recorded for vehicles today.
+                                </div>
+                            ) : (
+                                <div className="max-h-[260px] overflow-y-auto pr-1">
+                                    <div style={{ height: `${highestIdleChartHeight}px` }}>
+                                        <ResponsiveContainer width="100%" height="100%">
+                                            <BarChart
+                                                data={highestIdleVehicles}
+                                                layout="vertical"
+                                                margin={{ top: 4, right: 60, left: 4, bottom: 4 }}
+                                            >
+                                                <CartesianGrid horizontal={false} stroke={GRID_STROKE} />
+                                                <XAxis
+                                                    type="number"
+                                                    tickLine={false}
+                                                    axisLine={false}
+                                                    tick={TICK}
+                                                    unit=" h"
+                                                />
+                                                <YAxis
+                                                    type="category"
+                                                    dataKey="name"
+                                                    tickLine={false}
+                                                    axisLine={false}
+                                                    width={110}
+                                                    interval={0}
+                                                    tick={CATEGORY_TICK}
+                                                />
+                                                <Tooltip
+                                                    cursor={TOOLTIP_CURSOR}
+                                                    formatter={(val, _name, item) => [
+                                                        `${item?.payload?.idleFormatted} (${val} hrs) · ${item?.payload?.group_name || "General Fleet"}`,
+                                                        "Accumulated Idle",
+                                                    ]}
+                                                    contentStyle={TOOLTIP_STYLE}
+                                                />
+                                                <Bar
+                                                    dataKey="idleHours"
+                                                    fill={BRAND_BLUE}
+                                                    radius={[0, 3, 3, 0]}
+                                                    maxBarSize={16}
+                                                    onClick={(entry) => {
+                                                        if (entry?.vehicle_id) setSelectedVehicleId(entry.vehicle_id)
+                                                    }}
+                                                    cursor="pointer"
+                                                >
+                                                    <LabelList
+                                                        dataKey="idleFormatted"
+                                                        position="right"
+                                                        style={{ fontSize: 11, fill: "#475569", fontWeight: 600 }}
+                                                    />
+                                                </Bar>
+                                            </BarChart>
+                                        </ResponsiveContainer>
+                                    </div>
+                                </div>
+                            )}
+                        </SectionCard>
+
+                        {/* 2. Currently Idling */}
+                        <SectionCard
+                            className="flex flex-col h-full"
+                            title={selectedGroup === "ALL" ? "Currently Idling" : `Currently Idling · ${selectedGroup}`}
+                            subtitle="Live vehicles with ignition on and zero speed"
+                            actions={
+                                <div className="flex items-center gap-2">
+                                    <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold tabular-nums text-amber-800">
+                                        {idlingCount} idling
+                                    </span>
+                                    <Link
+                                        to="/tracking?status=IDLING"
+                                        className="inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline underline-offset-2"
+                                    >
+                                        Live tracking
+                                        <ArrowUpRight className="h-3.5 w-3.5" />
+                                    </Link>
+                                </div>
+                            }
+                        >
+                            {idlingCount === 0 ? (
+                                <div className="flex h-[240px] flex-col items-center justify-center p-6 text-center">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 mb-2">
+                                        <CheckCircle2 className="h-5 w-5" />
+                                    </div>
+                                    <h4 className="text-xs font-semibold text-slate-800">No Vehicles Currently Idling</h4>
+                                    <p className="mt-1 text-[11px] text-slate-500 max-w-xs leading-relaxed">
+                                        All active fleet units are currently moving in transit or parked with engines turned off.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="max-h-[260px] overflow-y-auto pr-1">
+                                    <ul className="divide-y divide-slate-100">
+                                        {idlingVehicles.map((vehicle) => {
+                                            const idleSecs = vehicle.idle_duration
+                                            const idleDisplay = vehicle.idle_duration_formatted ||
+                                                (isKnownNumber(idleSecs) && idleSecs > 0 ? formatHoursMins(Math.round(idleSecs / 60)) : "Just started")
+
+                                            const lastUpdateText = isKnownNumber(vehicle.seconds_since_update)
+                                                ? vehicle.seconds_since_update < 60
+                                                    ? "Updated just now"
+                                                    : `${Math.floor(vehicle.seconds_since_update / 60)}m ago`
+                                                : null
+
+                                            return (
+                                                <li key={vehicle.vehicle_id}>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setSelectedVehicleId(vehicle.vehicle_id)}
+                                                        className="group flex w-full items-center justify-between gap-3 p-2.5 rounded-xl transition-all duration-150 hover:-translate-y-0.5 hover:bg-slate-50/80 hover:shadow-[0_2px_4px_-1px_rgba(15,23,42,0.06)] cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                                                        title={`View details for ${vehicle.vehicle_name}`}
+                                                    >
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse shrink-0" aria-hidden="true" />
+                                                                <span className="font-semibold text-xs text-slate-900 group-hover:text-brand truncate">
+                                                                    {vehicle.vehicle_name}
+                                                                </span>
+                                                                {vehicle.registration_plate && (
+                                                                    <span className="text-[10px] text-slate-400 font-mono">
+                                                                        {vehicle.registration_plate}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="mt-0.5 flex items-center gap-2 text-[11px] text-slate-500">
+                                                                <span className="truncate">{vehicle.group || "General Fleet"}</span>
+                                                                {lastUpdateText && (
+                                                                    <>
+                                                                        <span className="text-slate-300">·</span>
+                                                                        <span className="text-slate-400">{lastUpdateText}</span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+
+                                                        <div className="shrink-0 text-right">
+                                                            <span className="block text-xs font-bold text-amber-800 tabular-nums">
+                                                                {idleDisplay}
+                                                            </span>
+                                                            <span className="block text-[10px] text-slate-400">
+                                                                current idle
+                                                            </span>
+                                                        </div>
+                                                    </button>
+                                                </li>
+                                            )
+                                        })}
+                                    </ul>
+                                </div>
+                            )}
+                        </SectionCard>
+                    </div>
+
+                    {/* ═══════════════════════════════════════════════════════════════
+                        ROW 3 — OPERATIONAL INSIGHTS (Two equal-width cards on desktop)
+                    ═══════════════════════════════════════════════════════════════ */}
+                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch">
+                        {/* 1. Idle Time by Fleet Group */}
+                        <SectionCard
+                            className="flex flex-col h-full"
+                            title="Idle Time by Fleet Group"
+                            subtitle="Total idle hours across Wialon fleet groups"
                             actions={
                                 <Link
                                     to="/idle-analytics"
@@ -820,118 +976,49 @@ function Dashboard() {
                                 </Link>
                             }
                         >
-                            {attentionVehicles.length === 0 ? (
-                                <p className="flex items-center gap-2 px-4 py-6 text-xs text-slate-500">
-                                    <CheckCircle2 className="h-4 w-4 shrink-0 text-status-moving" />
-                                    No vehicle has been idling for more than 5 minutes.
-                                </p>
+                            {idleTimeByGroupData.length === 0 ? (
+                                <div className="flex h-[240px] items-center justify-center text-xs text-slate-400">
+                                    No idle time recorded for this selection today.
+                                </div>
                             ) : (
-                                <ul className="divide-y divide-slate-100">
-                                    {attentionVehicles.map(vehicle => (
-                                        <li key={vehicle.vehicle_id}>
-                                            <button
-                                                type="button"
-                                                onClick={() => setSelectedVehicleId(vehicle.vehicle_id)}
-                                                className="flex w-full items-center justify-between gap-4 px-4 py-2.5 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-                                            >
-                                                <span className="min-w-0">
-                                                    <span className="block truncate font-mono text-[13px] font-semibold text-slate-900">
-                                                        {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name}
-                                                    </span>
-                                                    <span className="block truncate text-xs text-slate-500">{vehicle.group || "General Fleet"}</span>
-                                                </span>
-                                                <span className="shrink-0 text-right">
-                                                    <LiveIdleTimer
-                                                        startTime={vehicle.idle_start}
-                                                        baseDuration={vehicle.idle_duration}
-                                                        status={vehicle.status}
-                                                        className="block text-[13px] text-amber-800 tabular-nums"
-                                                    />
-                                                    <span className="block text-[11px] text-slate-500">
-                                                        {vehicle.idle_start ? `since ${formatUAETime(vehicle.idle_start)}` : "Start time unavailable"}
-                                                    </span>
-                                                </span>
-                                            </button>
-                                        </li>
-                                    ))}
-                                </ul>
-                            )}
-                        </SectionCard>
-
-                        <SectionCard
-                            title="Top vehicles by mileage"
-                            actions={
-                                <>
-                                    {mileageLoading && (
-                                        <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Updating" />
-                                    )}
-                                    <FilterSelect
-                                        value={mileageTimeframe}
-                                        onChange={selectMileageTimeframe}
-                                        ariaLabel="Select mileage timeframe"
-                                    >
-                                        {TIMEFRAME_OPTIONS.map(tf => (
-                                            <option key={tf.id} value={tf.id}>{tf.label}</option>
-                                        ))}
-                                    </FilterSelect>
-                                    <FilterSelect
-                                        value={mileageLimit}
-                                        onChange={setMileageLimit}
-                                        ariaLabel="Select mileage limit"
-                                    >
-                                        <option value="5">Top 5</option>
-                                        <option value="10">Top 10</option>
-                                        <option value="15">Top 15</option>
-                                        <option value="ALL">Show All</option>
-                                    </FilterSelect>
-                                </>
-                            }
-                        >
-                            {mileageError ? (
-                                <ErrorState
-                                    className="h-[220px] border-0"
-                                    title="Unable to load mileage"
-                                    message={mileageError}
-                                    onRetry={() => mileageRequest.load(mileageTimeframe)}
-                                />
-                            ) : filteredMileageList.length === 0 && mileageLoading ? (
-                                <LoadingState className="h-[220px] border-0" label="Loading mileage…" />
-                            ) : filteredMileageList.length === 0 ? (
-                                <div className="h-[220px]">{emptyChart("No mileage data for this selection.")}</div>
-                            ) : (
-                                <div className="max-h-[360px] overflow-y-auto">
-                                    <div style={{ height: `${mileageChartHeight}px` }}>
+                                <div className="max-h-[260px] overflow-y-auto pr-1">
+                                    <div style={{ height: `${idleBarChartHeight}px` }}>
                                         <ResponsiveContainer width="100%" height="100%">
                                             <BarChart
-                                                data={filteredMileageList}
+                                                data={idleTimeByGroupData}
                                                 layout="vertical"
                                                 margin={{ top: 4, right: 24, left: 4, bottom: 4 }}
                                             >
                                                 <CartesianGrid horizontal={false} stroke={GRID_STROKE} />
-                                                <XAxis type="number" tickLine={false} axisLine={false} tick={TICK} />
-                                                <YAxis
-                                                    type="category"
-                                                    dataKey="vehicle"
+                                                <XAxis
+                                                    type="number"
                                                     tickLine={false}
                                                     axisLine={false}
-                                                    width={96}
+                                                    tick={TICK}
+                                                    unit=" h"
+                                                />
+                                                <YAxis
+                                                    type="category"
+                                                    dataKey="name"
+                                                    tickLine={false}
+                                                    axisLine={false}
+                                                    width={150}
                                                     interval={0}
                                                     tick={CATEGORY_TICK}
                                                 />
                                                 <Tooltip
                                                     cursor={TOOLTIP_CURSOR}
-                                                    formatter={(val) => [formatKm(val) ?? "Unknown (unreadable)", "Mileage"]}
+                                                    formatter={(val, _name, item) => [
+                                                        `${val !== null ? `${val} hrs` : "Unknown"} · ${item?.payload?.vehicleCount || 0} unit(s)`,
+                                                        "Idle Duration",
+                                                    ]}
                                                     contentStyle={TOOLTIP_STYLE}
                                                 />
                                                 <Bar
-                                                    dataKey="mileage"
-                                                    fill={SERIES_COLOR}
+                                                    dataKey="idleHours"
+                                                    fill={BRAND_BLUE}
                                                     radius={[0, 3, 3, 0]}
-                                                    maxBarSize={14}
-                                                    onClick={(entry) => {
-                                                        if (entry?.vehicle_id) setSelectedVehicleId(entry.vehicle_id)
-                                                    }}
-                                                    cursor="pointer"
+                                                    maxBarSize={16}
                                                 />
                                             </BarChart>
                                         </ResponsiveContainer>
@@ -939,179 +1026,90 @@ function Dashboard() {
                                 </div>
                             )}
                         </SectionCard>
-                    </div>
 
-                    {/* ─── FLEET BY GROUP & UTILIZATION ──────────────────────── */}
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                        {/* 2. Today vs. Yesterday */}
                         <SectionCard
-                            flush
-                            title="Fleet by group"
+                            className="flex flex-col h-full justify-between"
+                            title="Today vs. Yesterday"
+                            subtitle="Side-by-side activity and volume comparison"
                             actions={
-                                <span className="max-w-[180px] truncate text-xs text-slate-500">
-                                    {selectedGroup === "ALL" ? `${fleetByGroupData.length} groups` : selectedGroup}
+                                <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
+                                    Today in progress
                                 </span>
                             }
                         >
-                            {selectedGroup === "ALL" ? (
-                                fleetByGroupData.length === 0 ? (
-                                    <div className="h-[160px]">{emptyChart("No group data available.")}</div>
-                                ) : (
-                                    <div className="max-h-[300px] overflow-y-auto">
-                                        <table className="w-full text-xs">
-                                            <thead className="sticky top-0 bg-white">
-                                                <tr className="border-b border-slate-200 text-left text-[11px] font-medium text-slate-500">
-                                                    <th scope="col" className="px-4 py-2 font-medium">Group</th>
-                                                    <th scope="col" className="px-2 py-2 text-right font-medium">Units</th>
-                                                    <th scope="col" className="hidden px-2 py-2 font-medium sm:table-cell">Status mix</th>
-                                                    <th scope="col" className="px-4 py-2 text-right font-medium">Share</th>
+                            <div className="flex flex-col justify-between h-full space-y-3">
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left border-collapse">
+                                        <thead>
+                                            <tr className="border-b border-slate-100 text-[11px] uppercase tracking-wider text-slate-400">
+                                                <th className="pb-2 font-medium">Metric</th>
+                                                <th className="pb-2 text-right font-medium">
+                                                    <span className="inline-flex items-center gap-1 justify-end">
+                                                        Today
+                                                        <span className="text-[10px] text-amber-600 lowercase font-normal">(so far)</span>
+                                                    </span>
+                                                </th>
+                                                <th className="pb-2 text-right font-medium">
+                                                    <span className="inline-flex items-center gap-1 justify-end">
+                                                        Yesterday
+                                                        <span className="text-[10px] text-slate-400 lowercase font-normal">(24h)</span>
+                                                    </span>
+                                                </th>
+                                                <th className="pb-2 text-right font-medium">Change</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 text-xs">
+                                            {comparisonMetrics.map((m) => (
+                                                <tr key={m.id} className="transition-colors hover:bg-slate-50/60">
+                                                    <td className="py-2.5 font-medium text-slate-700">
+                                                        <div>
+                                                            <span className="text-slate-900 font-semibold">{m.label}</span>
+                                                            {m.partial && (
+                                                                <span className="block text-[10px] text-amber-700">
+                                                                    {m.partial}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                    <td className="py-2.5 text-right font-bold text-slate-900 tabular-nums">
+                                                        {m.today}
+                                                    </td>
+                                                    <td className="py-2.5 text-right font-semibold text-slate-600 tabular-nums">
+                                                        {m.yesterday}
+                                                    </td>
+                                                    <td className="py-2.5 text-right tabular-nums">
+                                                        <span
+                                                            title={m.change.tooltip}
+                                                            className={`inline-flex items-center justify-end rounded px-1.5 py-0.5 text-[11px] font-semibold ${
+                                                                m.change.type === "positive"
+                                                                    ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                                                    : m.change.type === "negative"
+                                                                    ? "bg-amber-50 text-amber-700 border border-amber-200"
+                                                                    : m.change.type === "info"
+                                                                    ? "bg-sky-50 text-sky-700 border border-sky-200"
+                                                                    : "bg-slate-100 text-slate-600 border border-slate-200"
+                                                            }`}
+                                                        >
+                                                            {m.change.display}
+                                                        </span>
+                                                    </td>
                                                 </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100">
-                                                {fleetByGroupData.map(grp => (
-                                                    <tr key={grp.name}>
-                                                        <td className="max-w-[180px] truncate px-4 py-2 font-medium text-slate-800">{grp.name}</td>
-                                                        <td className="px-2 py-2 text-right font-semibold tabular-nums text-slate-900">{grp.count}</td>
-                                                        <td className="hidden px-2 py-2 sm:table-cell">
-                                                            <div
-                                                                className="flex h-1.5 w-32 gap-px overflow-hidden rounded-sm bg-slate-100"
-                                                                title={`Moving ${grp.moving} · Idling ${grp.idling} · Stopped ${grp.stopped} · Offline ${grp.offline}`}
-                                                            >
-                                                                {[["moving", "bg-status-moving"], ["idling", "bg-status-idling"], ["stopped", "bg-status-stopped"], ["offline", "bg-status-offline"]]
-                                                                    .filter(([k]) => grp[k] > 0)
-                                                                    .map(([k, cls]) => (
-                                                                        <span key={k} className={cls} style={{ width: `${(grp[k] / grp.count) * 100}%` }} />
-                                                                    ))}
-                                                            </div>
-                                                        </td>
-                                                        <td className="px-4 py-2 text-right tabular-nums text-slate-500">{grp.percent}%</td>
-                                                    </tr>
-                                                ))}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                )
-                            ) : (
-                                <dl className="divide-y divide-slate-100">
-                                    {statusSegments.map(seg => (
-                                        <div key={seg.key} className="flex items-center justify-between px-4 py-2.5">
-                                            <dt className="flex items-center gap-1.5 text-[13px] text-slate-600">
-                                                <span className={`h-2 w-2 rounded-[2px] ${seg.dot}`} aria-hidden="true" />
-                                                {seg.label}
-                                            </dt>
-                                            <dd className="text-[15px] font-semibold tabular-nums text-slate-900">{seg.count}</dd>
-                                        </div>
-                                    ))}
-                                </dl>
-                            )}
-                        </SectionCard>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
 
-                        <SectionCard
-                            title="Utilization by group"
-                            subtitle={selectedGroup === "ALL" ? "Share of units moving or idling" : `Units moving or idling in ${selectedGroup}`}
-                            actions={
-                                <FilterSelect
-                                    value={utilizationChartType}
-                                    onChange={setUtilizationChartType}
-                                    ariaLabel="Select utilization chart type"
-                                >
-                                    <option value="bar">Bar</option>
-                                    <option value="horizontal">Horizontal Bar</option>
-                                    <option value="donut">Donut</option>
-                                </FilterSelect>
-                            }
-                        >
-                            <div className="h-[220px]">
-                                {utilizationChartData.length === 0 ? (
-                                    emptyChart("No utilization data available.")
-                                ) : utilizationChartType === "bar" ? (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <BarChart data={utilizationChartData} margin={{ top: 8, right: 8, left: -20, bottom: 16 }}>
-                                            <CartesianGrid vertical={false} stroke={GRID_STROKE} />
-                                            <XAxis dataKey="name" tickLine={false} axisLine={{ stroke: AXIS_LINE }} tick={CATEGORY_TICK} />
-                                            <YAxis domain={[0, 100]} tickLine={false} axisLine={false} tick={TICK} />
-                                            <Tooltip cursor={TOOLTIP_CURSOR} formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={TOOLTIP_STYLE} />
-                                            <Bar dataKey="value" fill={SERIES_COLOR} radius={[3, 3, 0, 0]} maxBarSize={36} />
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                ) : utilizationChartType === "horizontal" ? (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <BarChart data={utilizationChartData} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }}>
-                                            <CartesianGrid horizontal={false} stroke={GRID_STROKE} />
-                                            <XAxis type="number" domain={[0, 100]} tickLine={false} axisLine={false} tick={TICK} />
-                                            <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={90} tick={CATEGORY_TICK} />
-                                            <Tooltip cursor={TOOLTIP_CURSOR} formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={TOOLTIP_STYLE} />
-                                            <Bar dataKey="value" fill={SERIES_COLOR} radius={[0, 3, 3, 0]} maxBarSize={16} />
-                                        </BarChart>
-                                    </ResponsiveContainer>
-                                ) : (
-                                    <ResponsiveContainer width="100%" height="100%">
-                                        <PieChart>
-                                            <Tooltip formatter={(val) => [`${val}%`, "Utilization"]} contentStyle={TOOLTIP_STYLE} />
-                                            <Pie
-                                                data={utilizationChartData}
-                                                dataKey="value"
-                                                nameKey="name"
-                                                cx="50%"
-                                                cy="45%"
-                                                innerRadius={46}
-                                                outerRadius={72}
-                                                paddingAngle={1}
-                                                stroke="#fff"
-                                                strokeWidth={2}
-                                            >
-                                                {utilizationChartData.map((entry, index) => (
-                                                    <Cell key={`util-cell-${index}`} fill={categoricalColor(index)} />
-                                                ))}
-                                            </Pie>
-                                            <Legend iconType="square" iconSize={8} wrapperStyle={{ fontSize: 11, color: "#475569" }} />
-                                        </PieChart>
-                                    </ResponsiveContainer>
-                                )}
+                                <div className="rounded-xl bg-slate-50/60 p-2.5 text-[11px] leading-relaxed text-slate-500 border border-slate-200/60">
+                                    <span>
+                                        <strong>Note:</strong> Today reflects UAE 00:00 → current time (in progress). Yesterday reflects the full 24h UAE calendar day (00:00–23:59:59).
+                                    </span>
+                                </div>
                             </div>
                         </SectionCard>
                     </div>
 
-                    {/* ─── IDLE DURATION BY GROUP ────────────────────────────── */}
-                    <SectionCard
-                        title="Idle time today"
-                        subtitle={selectedGroup === "ALL" ? "Idle minutes by fleet group" : `Idle minutes per vehicle in ${selectedGroup}`}
-                        actions={
-                            <FilterSelect
-                                value={idleChartType}
-                                onChange={setIdleChartType}
-                                ariaLabel="Select idle duration chart type"
-                            >
-                                <option value="bar">Bar</option>
-                                <option value="horizontal">Horizontal Bar</option>
-                            </FilterSelect>
-                        }
-                    >
-                        <div className="h-[240px]">
-                            {idleDurationChartData.length === 0 ? (
-                                emptyChart("No idle time recorded for this selection.")
-                            ) : idleChartType === "horizontal" ? (
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={idleDurationChartData} layout="vertical" margin={{ top: 4, right: 20, left: 8, bottom: 4 }}>
-                                        <CartesianGrid horizontal={false} stroke={GRID_STROKE} />
-                                        <XAxis type="number" tickLine={false} axisLine={false} tick={TICK} />
-                                        <YAxis type="category" dataKey="name" tickLine={false} axisLine={false} width={100} tick={CATEGORY_TICK} />
-                                        <Tooltip cursor={TOOLTIP_CURSOR} formatter={formatIdleTooltip} contentStyle={TOOLTIP_STYLE} />
-                                        <Bar dataKey="value" fill={SERIES_COLOR} radius={[0, 3, 3, 0]} maxBarSize={16} />
-                                    </BarChart>
-                                </ResponsiveContainer>
-                            ) : (
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={idleDurationChartData} margin={{ top: 8, right: 8, left: -20, bottom: 16 }}>
-                                        <CartesianGrid vertical={false} stroke={GRID_STROKE} />
-                                        <XAxis dataKey="name" tickLine={false} axisLine={{ stroke: AXIS_LINE }} tick={CATEGORY_TICK} />
-                                        <YAxis tickLine={false} axisLine={false} tick={TICK} />
-                                        <Tooltip cursor={TOOLTIP_CURSOR} formatter={formatIdleTooltip} contentStyle={TOOLTIP_STYLE} />
-                                        <Bar dataKey="value" fill={SERIES_COLOR} radius={[3, 3, 0, 0]} maxBarSize={36} />
-                                    </BarChart>
-                                </ResponsiveContainer>
-                            )}
-                        </div>
-                    </SectionCard>
                 </div>
             )}
         </AppShell>

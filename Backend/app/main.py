@@ -96,9 +96,22 @@ elif os.getenv("ENVIRONMENT", "development").lower() != "production":
     allowed_origins = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
     ]
 else:
     allowed_origins = []
+
+# In development, guarantee that active local Vite dev ports (5173, 5174) are included
+if os.getenv("ENVIRONMENT", "development").lower() != "production":
+    for dev_origin in [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
+    ]:
+        if dev_origin not in allowed_origins:
+            allowed_origins.append(dev_origin)
 
 # Deployed Vercel frontend; always allowed in addition to the env-configured origins.
 VERCEL_FRONTEND_ORIGIN = "https://test-eta-pink-edg2397shy.vercel.app"
@@ -110,7 +123,12 @@ if "*" in allowed_origins:
 
 # Vercel gives every deployment its own hashed URL (test-<hash>-ats-5a9e.vercel.app); match only this
 # project's deployments in its team scope. Starlette full-matches the pattern against the Origin header.
-allowed_origin_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or r"https://test-[a-z0-9]+-ats-5a9e\.vercel\.app"
+default_origin_regex = (
+    r"^(https://test-[a-z0-9]+-ats-5a9e\.vercel\.app|http://(localhost|127\.0\.0\.1):(517[3-9]|3000))$"
+    if os.getenv("ENVIRONMENT", "development").lower() != "production"
+    else r"https://test-[a-z0-9]+-ats-5a9e\.vercel\.app"
+)
+allowed_origin_regex = os.getenv("CORS_ORIGIN_REGEX", "").strip() or default_origin_regex
 
 
 @app.exception_handler(WialonAPIError)

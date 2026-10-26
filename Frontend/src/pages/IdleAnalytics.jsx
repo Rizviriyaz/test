@@ -465,7 +465,7 @@ export default function IdleAnalytics() {
 
             <div className="space-y-4">
                 {/* ── Filter toolbar ── */}
-                <section aria-label="Filters" className="flex flex-wrap items-end gap-2 rounded-lg border border-slate-200 bg-white p-2">
+                <section aria-label="Filters" className="flex flex-wrap items-end gap-2 rounded-xl border border-slate-200/70 bg-white p-2.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
                     <fieldset className="flex min-w-0 max-w-full flex-col gap-1.5">
                         <legend className="sr-only">Date range</legend>
                         <div role="group" aria-label="Date range presets" className="flex h-8 max-w-full items-center self-start overflow-x-auto rounded-md bg-slate-100 p-0.5">
@@ -635,8 +635,8 @@ export default function IdleAnalytics() {
 
                         {/* ── Customer groups (select a row to drill down) ── */}
                         {byGroup.length > 0 && (
-                            <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                                <div className="flex items-baseline justify-between gap-2 border-b border-slate-200 px-4 py-3">
+                            <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                                <div className="flex items-baseline justify-between gap-2 border-b border-slate-100 px-4 py-3">
                                     <h2 className="type-section-title text-slate-900">Customer groups</h2>
                                     <p className="text-xs text-slate-500">Select a group to list its vehicles</p>
                                 </div>
@@ -800,8 +800,8 @@ export default function IdleAnalytics() {
                         </section>
 
                         {/* ── Idle events table ── */}
-                        <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200 px-4 py-3">
+                        <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                            <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 px-4 py-3">
                                 <h2 className="type-section-title text-slate-900">Idle events</h2>
                                 <p className="text-xs tabular-nums text-slate-500">
                                     <span className="font-medium text-slate-800">{filteredEvents.length}</span> events
@@ -953,8 +953,8 @@ export default function IdleAnalytics() {
 
                         {/* ── Location hotspots ── */}
                         {byLocation.length > 0 && (
-                            <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                                <div className="border-b border-slate-200 px-4 py-3">
+                            <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                                <div className="border-b border-slate-100 px-4 py-3">
                                     <h2 className="type-section-title text-slate-900">Location hotspots</h2>
                                     {eventsNote && <p className="mt-0.5 text-xs text-amber-700">{eventsNote}</p>}
                                 </div>

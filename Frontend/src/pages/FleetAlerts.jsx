@@ -226,8 +226,8 @@ export default function FleetAlerts() {
                     />
                 </KpiStrip>
 
-                <section className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-                    <div className="flex flex-col gap-2 border-b border-slate-200 px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                <section className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
+                    <div className="flex flex-col gap-2 border-b border-slate-100 px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                         <SearchInput
                             id="alerts-search"
                             value={search}

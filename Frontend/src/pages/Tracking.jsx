@@ -257,7 +257,7 @@ function Tracking() {
                 <Sidebar />
 
                 <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                    <div className="shrink-0 border-b border-slate-200 bg-white px-4 py-3 sm:px-6">
+                    <div className="shrink-0 border-b border-slate-200/70 bg-canvas px-4 py-3 sm:px-6">
                         <PageHeader
                             title="Live Tracking"
                             subtitle="Real-time vehicle location and status"
@@ -280,14 +280,14 @@ function Tracking() {
                         </PageHeader>
                     </div>
 
-                    <main className="flex min-h-0 flex-1 overflow-hidden">
+                    <main className="flex min-h-0 flex-1 overflow-hidden p-3 pt-0 gap-3">
                         {/* ─── VEHICLE LIST ─────────────────────────────────────────── */}
                         <aside
-                            className={`h-full w-full shrink-0 flex-col overflow-hidden border-r border-slate-200 bg-white lg:w-[380px] xl:w-[420px] ${
+                            className={`h-full w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] lg:w-[380px] xl:w-[420px] ${
                                 mobileTab === "list" ? "flex" : "hidden lg:flex"
                             }`}
                         >
-                            <div className="shrink-0 space-y-2.5 border-b border-slate-200 p-3">
+                            <div className="shrink-0 space-y-2.5 border-b border-slate-100 p-3">
                                 <SearchInput
                                     value={searchTerm}
                                     onChange={setSearchTerm}
@@ -456,7 +456,7 @@ function Tracking() {
 
                         {/* ─── MAP ──────────────────────────────────────────────────── */}
                         <div
-                            className={`relative h-full flex-1 overflow-hidden ${
+                            className={`relative h-full flex-1 overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] ${
                                 mobileTab === "map" ? "flex" : "hidden lg:flex"
                             }`}
                         >
@@ -470,7 +470,7 @@ function Tracking() {
                             />
 
                             {/* Map coverage (bottom left) */}
-                            <div className="absolute bottom-3 left-3 z-[400] rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs tabular-nums text-slate-700 shadow-pop">
+                            <div className="absolute bottom-3 left-3 z-[400] rounded-xl border border-slate-200/70 bg-white px-2.5 py-1 text-xs tabular-nums text-slate-700 shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)]">
                                 <span className="font-medium text-slate-900">{mapVehicles.length}</span> of {vehicles.length} on map
                                 {statusFilter !== "ALL" && (
                                     <span className="text-slate-500"> · {statusFilter.toLowerCase()}</span>
@@ -479,7 +479,7 @@ function Tracking() {
 
                             {/* Selected vehicle (top left) */}
                             {selectedVehicle && (
-                                <div className="absolute left-3 right-3 top-3 z-[400] rounded-lg border border-slate-200 bg-white p-3 shadow-pop sm:right-auto sm:w-80">
+                                <div className="absolute left-3 right-3 top-3 z-[400] rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_16px_-4px_rgba(15,23,42,0.1)] sm:right-auto sm:w-80">
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="min-w-0">
                                             <h4 className="truncate font-mono text-[13px] font-semibold text-slate-900">

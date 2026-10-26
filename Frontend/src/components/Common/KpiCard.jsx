@@ -61,7 +61,7 @@ export function KpiStrip({ children, className = "", label }) {
     return (
         <section
             aria-label={label}
-            className={`grid gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 ${className}`}
+            className={`grid gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] ${className}`}
         >
             {children}
         </section>

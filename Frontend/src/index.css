@@ -15,7 +15,7 @@
   --color-brand-hover: #285E73;
   --color-brand-light: #F0F6F9;
   --color-brand-border: #D1E2EA;
-  --color-canvas: #F4F6F8;
+  --color-canvas: #F4F7F9;
   --color-status-moving: #059669;
   --color-status-idling: #D97706;
   --color-status-stopped: #94A3B8;
@@ -27,6 +27,11 @@
   --font-outfit: "Outfit", ui-sans-serif, system-ui, sans-serif;
   --font-jakarta: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-space: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background-color: var(--color-canvas);
+  color: #0f172a;
 }
 
 /* ── Heading typography (size, weight, leading, tracking only; color stays in markup) ── */

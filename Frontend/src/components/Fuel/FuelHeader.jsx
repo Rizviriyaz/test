@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react"
-import { Calendar, ChevronDown, Check, X, RotateCcw } from "lucide-react"
+import { Calendar, ChevronDown, Check, X, RotateCcw, Sliders } from "lucide-react"
 import { useFuelFilters } from "../../context/useFuelFilters"
 import PageHeader from "../Common/PageHeader"
 
@@ -11,16 +11,25 @@ const PERIOD_OPTIONS = [
     { id: "all", label: "All Historical Data", dividerBefore: true },
 ]
 
+const IDLE_PRESETS = [
+    { label: "1.5", val: 1.5 },
+    { label: "2.0 std", val: 2.0 },
+    { label: "2.5", val: 2.5 },
+    { label: "3.0 AC", val: 3.0 },
+]
+
 const controlBase = "h-8 rounded-md border text-xs font-medium transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30"
 const controlState = (active) => active
     ? "border-brand/50 bg-brand-light text-slate-900"
     : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
 
 export default function FuelHeader({
-    title = "ATS Fleet Fuel Performance",
+    title = "Fuel & Performance",
     subtitle,
     showFilters = true,
     actions,
+    idleRate = 2.0,
+    setIdleRate,
 }) {
     const {
         period,
@@ -40,34 +49,40 @@ export default function FuelHeader({
 
     const [isPeriodOpen, setIsPeriodOpen] = useState(false)
     const [isCustomModalOpen, setIsCustomModalOpen] = useState(false)
+    const [isIdleOpen, setIsIdleOpen] = useState(false)
     const [tempStart, setTempStart] = useState(dateFrom || "")
     const [tempEnd, setTempEnd] = useState(dateTo || "")
     const [rangeError, setRangeError] = useState(null)
 
     const periodRef = useRef(null)
+    const idleRef = useRef(null)
 
-    // Close period dropdown on click outside
+    // Close dropdowns on click outside
     useEffect(() => {
         function handleClickOutside(e) {
             if (periodRef.current && !periodRef.current.contains(e.target)) {
                 setIsPeriodOpen(false)
+            }
+            if (idleRef.current && !idleRef.current.contains(e.target)) {
+                setIsIdleOpen(false)
             }
         }
         document.addEventListener("mousedown", handleClickOutside)
         return () => document.removeEventListener("mousedown", handleClickOutside)
     }, [])
 
-    // Escape closes the open dropdown or custom range dialog
+    // Escape closes open dropdowns or modals
     useEffect(() => {
-        if (!isPeriodOpen && !isCustomModalOpen) return undefined
+        if (!isPeriodOpen && !isCustomModalOpen && !isIdleOpen) return undefined
         function handleKey(e) {
             if (e.key !== "Escape") return
             setIsPeriodOpen(false)
             setIsCustomModalOpen(false)
+            setIsIdleOpen(false)
         }
         document.addEventListener("keydown", handleKey)
         return () => document.removeEventListener("keydown", handleKey)
-    }, [isPeriodOpen, isCustomModalOpen])
+    }, [isPeriodOpen, isCustomModalOpen, isIdleOpen])
 
     const handleSelectPeriod = (p) => {
         if (p === "custom") {
@@ -91,7 +106,12 @@ export default function FuelHeader({
         setIsCustomModalOpen(false)
     }
 
-    const hasActiveFilters = Boolean(vehicle || fuelType || period !== "today")
+    const hasActiveFilters = Boolean(vehicle || fuelType || period !== "today" || (idleRate && idleRate !== 2.0))
+
+    const handleResetAll = () => {
+        resetFilters()
+        if (setIdleRate) setIdleRate(2.0)
+    }
 
     return (
         <>
@@ -149,7 +169,7 @@ export default function FuelHeader({
                                 value={vehicle}
                                 onChange={(e) => setVehicle(e.target.value)}
                                 aria-label="Filter by vehicle"
-                                className={`${controlBase} ${controlState(Boolean(vehicle))} max-w-[180px] appearance-none truncate pl-2.5 pr-7`}
+                                className={`${controlBase} ${controlState(Boolean(vehicle))} max-w-[170px] appearance-none truncate pl-2.5 pr-7`}
                             >
                                 <option value="">All Vehicles ({vehiclesList.length > 0 ? vehiclesList.length : "…"})</option>
                                 {vehiclesList.map((v) => (
@@ -179,12 +199,87 @@ export default function FuelHeader({
                             <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
                         </div>
 
-                        {/* Reset Filters button */}
+                        {/* 4. Compact Collapsible Idle Rate Control */}
+                        {setIdleRate && (
+                            <div className="relative" ref={idleRef}>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsIdleOpen(!isIdleOpen)}
+                                    aria-haspopup="dialog"
+                                    aria-expanded={isIdleOpen}
+                                    title="Configure idle burn rate assumption"
+                                    className={`${controlBase} ${controlState(idleRate !== 2.0)} inline-flex items-center gap-1.5 px-2.5`}
+                                >
+                                    <Sliders className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                    <span>Idle: {idleRate.toFixed(1)} L/h</span>
+                                    <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                                </button>
+
+                                {isIdleOpen && (
+                                    <div
+                                        role="dialog"
+                                        aria-label="Idle burn rate configuration"
+                                        className="absolute right-0 top-full z-40 mt-1 w-64 rounded-lg border border-slate-200 bg-white p-3 shadow-pop"
+                                    >
+                                        <div className="mb-2 flex items-center justify-between border-b border-slate-100 pb-1.5">
+                                            <span className="text-xs font-semibold text-slate-900">
+                                                Idle Burn Rate
+                                            </span>
+                                            <span className="font-mono text-xs font-bold text-brand">
+                                                {idleRate.toFixed(1)} L/h
+                                            </span>
+                                        </div>
+                                        <p className="mb-2.5 text-[11px] leading-relaxed text-slate-500">
+                                            Basis for stationary idle fuel and cost estimates.
+                                        </p>
+
+                                        {/* Presets */}
+                                        <div className="mb-2.5 flex items-center justify-between gap-1">
+                                            {IDLE_PRESETS.map((preset) => (
+                                                <button
+                                                    key={preset.val}
+                                                    type="button"
+                                                    onClick={() => setIdleRate(preset.val)}
+                                                    className={`flex-1 rounded py-1 text-[11px] font-medium transition-colors cursor-pointer ${
+                                                        idleRate === preset.val
+                                                            ? "bg-brand text-white font-semibold"
+                                                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                                                    }`}
+                                                >
+                                                    {preset.label}
+                                                </button>
+                                            ))}
+                                        </div>
+
+                                        {/* Slider */}
+                                        <div className="space-y-1">
+                                            <input
+                                                type="range"
+                                                min="0.5"
+                                                max="5.0"
+                                                step="0.1"
+                                                value={idleRate}
+                                                onChange={(e) => setIdleRate(parseFloat(e.target.value))}
+                                                className="w-full accent-brand cursor-pointer"
+                                                aria-label="Idle burn rate (litres per hour)"
+                                            />
+                                            <div className="flex justify-between font-mono text-[10px] text-slate-400">
+                                                <span>0.5 L/h</span>
+                                                <span className="text-slate-600">Default: 2.0</span>
+                                                <span>5.0 L/h</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* 5. Reset Filters button */}
                         {hasActiveFilters && (
                             <button
                                 type="button"
-                                onClick={resetFilters}
-                                title="Reset all filters to Today / All"
+                                onClick={handleResetAll}
+                                title="Reset all filters to default"
                                 className={`${controlBase} inline-flex items-center gap-1.5 border-slate-200 bg-white px-2.5 text-slate-500 hover:bg-slate-50 hover:text-slate-800`}
                             >
                                 <RotateCcw className="h-3.5 w-3.5 text-slate-400" />
