@@ -6,14 +6,12 @@ import {
     useMap,
     ZoomControl,
 } from "react-leaflet"
-import { ArrowUpRight, Maximize2 } from "lucide-react"
+import { Maximize2 } from "lucide-react"
 
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
-import FleetStatusBadge from "./Common/FleetStatusBadge"
-import { MorphingDialogTrigger } from "./core/morphing-dialog"
 import { isValidCoordinate } from "../utils/coordinates"
-import { lastSeenLabel, normalizeVehicleStatus } from "../utils/vehicleStatus"
+import { normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function getMarkerIcon(status, selected = false) {
     // Same status colors as the rest of the UI (index.css --color-status-*)
@@ -85,7 +83,7 @@ function SelectedVehicleFocus({ selectedVehicle, isPanelOpen = true, isDrawerOpe
 
         const visibleWidth = W - paddingLeft - paddingRight
 
-        let targetCenterX = W / 2
+        let targetCenterX
         let targetCenterY = H / 2
 
         // Position vehicle in center of unobstructed space
@@ -192,85 +190,11 @@ function FleetMapControls({ vehicles, isPanelOpen = true, isDrawerOpen = false }
     )
 }
 
-function formatDriver(vehicle) {
-    const driverId = vehicle.driver?.name ?? vehicle.driver?.id ?? vehicle.driver_id ?? vehicle.sensors?.driver_id
-    return driverId ? String(driverId) : "Unassigned"
-}
-
-function VehiclePopupCard({ vehicle, onInspect }) {
-    const statusStr = normalizeVehicleStatus(vehicle)
-    // Stale telemetry: speed and ignition are the last reported values, and no idle timer is running
-    const lastSeen = lastSeenLabel(vehicle)
-    const driverName = formatDriver(vehicle)
-    const hasCoords = isValidCoordinate(vehicle.latitude, vehicle.longitude)
-
-    const rows = [
-        [lastSeen ? "Last speed" : "Speed", <span key="s" className="tabular-nums">{Math.round(Number(vehicle.speed) || 0)} km/h</span>],
-        [lastSeen ? "Last ignition" : "Ignition", vehicle.ignition ? "On" : "Off"],
-        ["Idle time", <span key="i" className="tabular-nums">{lastSeen ? "—" : (vehicle.idle_duration_formatted || "00:00:00")}</span>],
-        ["Driver", <span key="d" className="block max-w-[140px] truncate" title={driverName}>{driverName}</span>],
-    ]
-
-    return (
-        <div className="min-w-[240px] select-none p-3 text-slate-900">
-            <div className="flex items-start justify-between gap-3 border-b border-slate-100 pb-2.5">
-                <div className="min-w-0">
-                    <h4 className="truncate font-mono text-[13px] font-semibold leading-tight text-slate-900">
-                        {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vehicle.vehicle_id}`}
-                    </h4>
-                    <p className="mt-0.5 truncate text-[11px] text-slate-500">
-                        {vehicle.vehicle_name ? `${vehicle.vehicle_name} · ` : ""}{vehicle.group || "General Fleet"} · ID {vehicle.vehicle_id}
-                    </p>
-                </div>
-                <FleetStatusBadge status={statusStr} size="xs" />
-            </div>
-            {lastSeen && <p className="pt-1.5 text-[11px] font-medium text-violet-800">{lastSeen}</p>}
-
-            <dl className="divide-y divide-slate-100 text-xs">
-                {rows.map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between gap-3 py-1.5">
-                        <dt className="text-slate-500">{label}</dt>
-                        <dd className="font-medium text-slate-900">{value}</dd>
-                    </div>
-                ))}
-                {hasCoords && (
-                    <div className="flex items-center justify-between gap-3 py-1.5">
-                        <dt className="font-mono text-[11px] text-slate-500">
-                            {Number(vehicle.latitude).toFixed(4)}, {Number(vehicle.longitude).toFixed(4)}
-                        </dt>
-                        <dd>
-                            <a
-                                href={`https://www.google.com/maps?q=${vehicle.latitude},${vehicle.longitude}`}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center gap-0.5 font-medium text-brand hover:underline underline-offset-2"
-                            >
-                                Google Maps <ArrowUpRight className="h-3 w-3" />
-                            </a>
-                        </dd>
-                    </div>
-                )}
-            </dl>
-
-            {onInspect && (
-                <MorphingDialogTrigger
-                    layoutId={`vehicle-${vehicle.vehicle_id || vehicle.id}`}
-                    onClick={() => onInspect(vehicle)}
-                    className="mt-2 flex w-full items-center justify-center rounded-md bg-brand py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer"
-                >
-                    View vehicle details
-                </MorphingDialogTrigger>
-            )}
-        </div>
-    )
-}
-
 function FleetMap({
     vehicles = [],
     selectedVehicleId = null,
     selectedVehicle = null,
     onVehicleSelect = () => {},
-    onInspectVehicle = null,
     isPanelOpen = true,
     isDrawerOpen = false,
     className = "",

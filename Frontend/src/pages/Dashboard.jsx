@@ -32,7 +32,8 @@ import PageHeader from "../components/Common/PageHeader"
 import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
 import { ErrorBanner, LoadingState } from "../components/Common/StateViews"
-import { formatUAETime } from "../utils/datetime"
+import { formatUAETime, getUAETodayBounds } from "../utils/datetime"
+import { groupNamesOf, idleDurationLabel, inGroup } from "../utils/fleetRules"
 import { normalizeVehicleStatus } from "../utils/vehicleStatus"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import {
@@ -83,6 +84,9 @@ function Dashboard() {
     const [yesterdayMileageData, setYesterdayMileageData] = useState(null)
 
     const auxSeqRef = useRef(0)
+    // UAE day (its 00:00 epoch) whose "yesterday" reports were loaded: a closed day does not change, so its three
+    // reports are read once per day instead of on every 30 s poll
+    const yesterdayLoadedForRef = useRef(null)
 
 
     // Vehicle Details Drawer state
@@ -147,15 +151,24 @@ function Dashboard() {
             const seq = ++auxSeqRef.current
             try {
                 const isCurrent = () => active && seq === auxSeqRef.current
-                await Promise.allSettled([
+                const dayKey = getUAETodayBounds().from_time
+                const loadYesterday = yesterdayLoadedForRef.current !== dayKey
+                const yesterdayRequests = loadYesterday ? [
+                    getFleetTripsAnalytics({ timeframe: "yesterday" }).then(res => { if (isCurrent()) setYesterdayTripsData(res) }),
+                    getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false }).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res) }),
+                    getDashboardMileage("yesterday").then(res => { if (isCurrent()) setYesterdayMileageData(res) }),
+                ] : []
+                const results = await Promise.allSettled([
                     getFleetAlertsAnalytics().then(res => { if (isCurrent()) setAlertsData(res) }),
                     getFleetTripsAnalytics({ timeframe: "today" }).then(res => { if (isCurrent()) setTripsData(res) }),
                     getFleetIdleAnalytics({ timeframe: "today", include_events: false }).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
                     getDashboardMileage("today").then(res => { if (isCurrent()) setTodayMileageData(res) }),
-                    getFleetTripsAnalytics({ timeframe: "yesterday" }).then(res => { if (isCurrent()) setYesterdayTripsData(res) }),
-                    getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false }).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res) }),
-                    getDashboardMileage("yesterday").then(res => { if (isCurrent()) setYesterdayMileageData(res) }),
+                    ...yesterdayRequests,
                 ])
+                // Marked loaded only when every yesterday report succeeded; a failed one is retried on the next poll
+                if (loadYesterday && isCurrent() && results.slice(4).every(r => r.status === "fulfilled")) {
+                    yesterdayLoadedForRef.current = dayKey
+                }
             } catch (err) {
                 console.error("Failed to fetch dashboard auxiliary data:", err)
             } finally {
@@ -217,11 +230,7 @@ function Dashboard() {
     // ─── 5. Global Group Filtering ──────────────────────────────────────────
     const filteredVehicles = useMemo(() => {
         if (selectedGroup === "ALL") return normalizedVehicles
-        return normalizedVehicles.filter(v => {
-            const primaryMatch = (v.group || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase()
-            const secondaryMatch = Array.isArray(v.groups) && v.groups.some(g => (g || "").trim().toLowerCase() === selectedGroup.trim().toLowerCase())
-            return primaryMatch || secondaryMatch
-        })
+        return normalizedVehicles.filter(v => inGroup(v, selectedGroup))
     }, [normalizedVehicles, selectedGroup])
 
     const filteredVehicleIdSet = useMemo(() => {
@@ -511,17 +520,19 @@ function Dashboard() {
                 if (seenVehicles.has(vid)) return
                 seenVehicles.add(vid)
 
-                const gname = (v.group_name || v.group || "General Fleet").trim()
-                if (gname.toLowerCase() === "all unit") return
-
-                if (!groupMap.has(gname)) {
-                    groupMap.set(gname, { name: gname, idleSeconds: 0, vehicleCount: 0 })
-                }
-                const item = groupMap.get(gname)
-                item.vehicleCount += 1
-                const secs = idleSecondsOf(v)
-                if (isKnownNumber(secs)) {
-                    item.idleSeconds += Number(secs)
+                // Group-membership totals: a vehicle in several groups counts in each (like Fleet Now's group filter)
+                const names = groupNamesOf(v)
+                for (const gname of names.length ? names : ["General Fleet"]) {
+                    if (gname.toLowerCase() === "all unit") continue
+                    if (!groupMap.has(gname)) {
+                        groupMap.set(gname, { name: gname, idleSeconds: 0, vehicleCount: 0 })
+                    }
+                    const item = groupMap.get(gname)
+                    item.vehicleCount += 1
+                    const secs = idleSecondsOf(v)
+                    if (isKnownNumber(secs)) {
+                        item.idleSeconds += Number(secs)
+                    }
                 }
             })
             list = Array.from(groupMap.values()).map(g => ({
@@ -558,8 +569,7 @@ function Dashboard() {
         if (!idleAnalyticsData?.by_vehicle || !Array.isArray(idleAnalyticsData.by_vehicle)) return []
         let list = [...idleAnalyticsData.by_vehicle]
         if (selectedGroup !== "ALL") {
-            const sel = selectedGroup.trim().toLowerCase()
-            list = list.filter(v => (v.group_name || "").trim().toLowerCase() === sel)
+            list = list.filter(v => inGroup(v, selectedGroup))
         }
         list = list.filter(v => isKnownNumber(v.total_idle_seconds) && Number(v.total_idle_seconds) > 0)
         list.sort((a, b) => compareKnownDesc(a.total_idle_seconds, b.total_idle_seconds))
@@ -896,9 +906,8 @@ function Dashboard() {
                                 <div className="max-h-[260px] overflow-y-auto pr-1">
                                     <ul className="divide-y divide-slate-100">
                                         {idlingVehicles.map((vehicle) => {
-                                            const idleSecs = vehicle.idle_duration
-                                            const idleDisplay = vehicle.idle_duration_formatted ||
-                                                (isKnownNumber(idleSecs) && idleSecs > 0 ? formatHoursMins(Math.round(idleSecs / 60)) : "Just started")
+                                            // Unknown / lower-bound durations are labelled, never shown as measured
+                                            const idleDisplay = idleDurationLabel(vehicle, secs => formatHoursMins(Math.max(1, Math.round(secs / 60))))
 
                                             const lastUpdateText = isKnownNumber(vehicle.seconds_since_update)
                                                 ? vehicle.seconds_since_update < 60
@@ -963,7 +972,7 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col h-full"
                             title="Idle Time by Fleet Group"
-                            subtitle="Total idle hours across Wialon fleet groups"
+                            subtitle="Group-membership totals: a vehicle in several groups counts in each"
                             actions={
                                 <Link
                                     to="/idle-analytics"

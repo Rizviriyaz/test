@@ -102,7 +102,8 @@
     "vehicle_name": "UNIT-C"
    }
   ],
-  "total_km": 1485.25
+  "total_km": 1485.25,
+  "unmatched_report_rows": []
  },
  "GET /api/fleet/trips": {
   "by_group": [
@@ -121,6 +122,7 @@
   ],
   "from_time": 1785715200,
   "period_hours": 71,
+  "source": "wialon_group_trips_report",
   "summary": {
    "average_trip_distance_km": null,
    "average_trip_duration_minutes": null,
@@ -130,7 +132,8 @@
    "total_distance_km": 1485.25,
    "total_distance_partial": false,
    "total_hardware_distance_km": null,
-   "total_trips": null
+   "total_trips": null,
+   "unmatched_report_rows": []
   },
   "to_time": 1785974399,
   "vehicles": [
@@ -177,6 +180,7 @@
   "fleet_utilization_pct": 17.4,
   "hours": 24,
   "partial": false,
+  "source": "wialon_group_engine_report",
   "total_driving_hours": 12.5,
   "total_engine_on_hours": 15.3,
   "total_idle_hours": 2.8,
@@ -265,6 +269,7 @@
     "vehicle_count": 1
    }
   ],
+  "by_group_basis": "group_membership",
   "by_location": [
    {
     "event_count": 1,
@@ -322,10 +327,21 @@
   "by_vehicle": [
    {
     "engine_hours_seconds": 21600,
+    "engine_mileage_km": 180.25,
     "group_id": 7,
+    "group_ids": [
+     7
+    ],
     "group_name": "Logistics",
+    "group_names": [
+     "Logistics"
+    ],
+    "idle_duration": 600,
+    "idle_duration_status": "known",
     "idle_events": 3,
     "idle_minutes": 90.0,
+    "idle_start": null,
+    "in_motion_seconds": 16200,
     "longest_idle_seconds": 1800,
     "registration_plate": "DXB 101",
     "status": "IDLING",
@@ -336,10 +352,21 @@
    },
    {
     "engine_hours_seconds": 33330,
+    "engine_mileage_km": 640.0,
     "group_id": 7,
+    "group_ids": [
+     7
+    ],
     "group_name": "Logistics",
+    "group_names": [
+     "Logistics"
+    ],
+    "idle_duration": 0,
+    "idle_duration_status": "known",
     "idle_events": 1,
     "idle_minutes": 75.5,
+    "idle_start": null,
+    "in_motion_seconds": 28800,
     "longest_idle_seconds": 4530,
     "registration_plate": "DXB 102",
     "status": "MOVING",
@@ -350,10 +377,21 @@
    },
    {
     "engine_hours_seconds": 0,
+    "engine_mileage_km": 0.0,
     "group_id": 8,
+    "group_ids": [
+     8
+    ],
     "group_name": "Contracts",
+    "group_names": [
+     "Contracts"
+    ],
+    "idle_duration": 0,
+    "idle_duration_status": "known",
     "idle_events": 0,
     "idle_minutes": 0.0,
+    "idle_start": null,
+    "in_motion_seconds": 0,
     "longest_idle_seconds": 0,
     "registration_plate": "DXB 103",
     "status": "STOPPED",
@@ -363,6 +401,7 @@
     "vehicle_name": "UNIT-C"
    }
   ],
+  "event_location_unverified": false,
   "events": [
    {
     "address": "Hotspot 2",
@@ -449,6 +488,7 @@
     "vehicle_name": "UNIT-B"
    }
   ],
+  "events_complete": true,
   "groups": [
    {
     "id": 7,
@@ -580,14 +620,26 @@
     "vehicle_count": 1
    }
   ],
+  "by_group_basis": "group_membership",
   "by_location": [],
   "by_vehicle": [
    {
     "engine_hours_seconds": 21600,
+    "engine_mileage_km": 180.25,
     "group_id": 7,
+    "group_ids": [
+     7
+    ],
     "group_name": "Logistics",
+    "group_names": [
+     "Logistics"
+    ],
+    "idle_duration": 600,
+    "idle_duration_status": "known",
     "idle_events": null,
     "idle_minutes": 90.0,
+    "idle_start": null,
+    "in_motion_seconds": 16200,
     "longest_idle_seconds": null,
     "registration_plate": "DXB 101",
     "status": "IDLING",
@@ -598,10 +650,21 @@
    },
    {
     "engine_hours_seconds": 33330,
+    "engine_mileage_km": 640.0,
     "group_id": 7,
+    "group_ids": [
+     7
+    ],
     "group_name": "Logistics",
+    "group_names": [
+     "Logistics"
+    ],
+    "idle_duration": 0,
+    "idle_duration_status": "known",
     "idle_events": null,
     "idle_minutes": 75.5,
+    "idle_start": null,
+    "in_motion_seconds": 28800,
     "longest_idle_seconds": null,
     "registration_plate": "DXB 102",
     "status": "MOVING",
@@ -612,10 +675,21 @@
    },
    {
     "engine_hours_seconds": 0,
+    "engine_mileage_km": 0.0,
     "group_id": 8,
+    "group_ids": [
+     8
+    ],
     "group_name": "Contracts",
+    "group_names": [
+     "Contracts"
+    ],
+    "idle_duration": 0,
+    "idle_duration_status": "known",
     "idle_events": null,
     "idle_minutes": 0.0,
+    "idle_start": null,
+    "in_motion_seconds": 0,
     "longest_idle_seconds": null,
     "registration_plate": "DXB 103",
     "status": "STOPPED",
@@ -625,7 +699,9 @@
     "vehicle_name": "UNIT-C"
    }
   ],
+  "event_location_unverified": false,
   "events": [],
+  "events_complete": false,
   "groups": [
    {
     "id": 7,
@@ -695,41 +771,46 @@
  },
  "GET /api/vehicles/101/idle": {
   "column_warnings": [],
+  "event_location_unverified": true,
+  "events_complete": true,
   "from_time": 1785715200,
   "hours": 24,
   "incomplete_fields": [],
   "periods": [
    {
-    "address": "Idle spot 0",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785717600,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.3
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785715800
    },
    {
-    "address": "Idle spot 1",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785722000,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.300999999999995
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785720200
    },
    {
-    "address": "Idle spot 2",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785804300,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.302
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785802500
    }
   ],
@@ -822,6 +903,7 @@
  },
  "execute_wialon_group_engine_idle_report(events)": {
   "column_warnings": [],
+  "event_location_unverified": false,
   "events": [
    {
     "address": "Hotspot 0",
@@ -832,6 +914,7 @@
      "latitude": 25.1,
      "longitude": 55.4
     },
+    "location_verified": true,
     "start_time": 1785718800,
     "vehicle_name": "UNIT-A"
    },
@@ -844,6 +927,7 @@
      "latitude": 25.1,
      "longitude": 55.41
     },
+    "location_verified": true,
     "start_time": 1785722400,
     "vehicle_name": "UNIT-A"
    },
@@ -856,6 +940,7 @@
      "latitude": 25.1,
      "longitude": 55.42
     },
+    "location_verified": true,
     "start_time": 1785726000,
     "vehicle_name": "UNIT-A"
    },
@@ -868,12 +953,14 @@
      "latitude": 25.2,
      "longitude": 55.27
     },
+    "location_verified": true,
     "start_time": 1785715200,
     "vehicle_name": "UNIT-B"
    }
   ],
   "events_incomplete": [],
   "rows_total": 3,
+  "unlocated_fields": [],
   "vehicles": [
    {
     "engine_hours_seconds": 21600,
@@ -888,6 +975,7 @@
        "latitude": 25.1,
        "longitude": 55.4
       },
+      "location_verified": true,
       "start_time": 1785718800,
       "vehicle_name": "UNIT-A"
      },
@@ -900,6 +988,7 @@
        "latitude": 25.1,
        "longitude": 55.41
       },
+      "location_verified": true,
       "start_time": 1785722400,
       "vehicle_name": "UNIT-A"
      },
@@ -912,6 +1001,7 @@
        "latitude": 25.1,
        "longitude": 55.42
       },
+      "location_verified": true,
       "start_time": 1785726000,
       "vehicle_name": "UNIT-A"
      }
@@ -943,6 +1033,7 @@
        "latitude": 25.2,
        "longitude": 55.27
       },
+      "location_verified": true,
       "start_time": 1785715200,
       "vehicle_name": "UNIT-B"
      }
@@ -983,9 +1074,11 @@
  },
  "execute_wialon_group_engine_idle_report(summary)": {
   "column_warnings": [],
+  "event_location_unverified": false,
   "events": [],
   "events_incomplete": [],
   "rows_total": 3,
+  "unlocated_fields": [],
   "vehicles": [
    {
     "engine_hours_seconds": 21600,
@@ -1051,6 +1144,7 @@
    "max_speed": "110 km/h",
    "mileage_km": 250.75,
    "total_time": "10:00:00",
+   "trip_count": null,
    "vehicle_name": "UNIT-A"
   },
   {
@@ -1060,6 +1154,7 @@
    "max_speed": "110 km/h",
    "mileage_km": 1234.5,
    "total_time": "10:00:00",
+   "trip_count": null,
    "vehicle_name": "UNIT-B"
   },
   {
@@ -1069,43 +1164,48 @@
    "max_speed": "110 km/h",
    "mileage_km": 0.0,
    "total_time": "10:00:00",
+   "trip_count": null,
    "vehicle_name": "UNIT-C"
   }
  ],
  "execute_wialon_unit_engine_report": {
   "column_warnings": [],
+  "event_location_unverified": true,
   "idle_events": [
    {
-    "address": "Idle spot 0",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785717600,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.3
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785715800
    },
    {
-    "address": "Idle spot 1",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785722000,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.300999999999995
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785720200
    },
    {
-    "address": "Idle spot 2",
+    "address": "Unknown Location",
     "duration": 1800,
     "duration_minutes": 30.0,
     "end_time": 1785804300,
     "location": {
-     "latitude": 25.3,
-     "longitude": 55.302
+     "latitude": null,
+     "longitude": null
     },
+    "location_verified": false,
     "start_time": 1785802500
    }
   ],
@@ -1115,7 +1215,8 @@
   "total_engine_seconds": 30600,
   "total_idle_minutes": 90.0,
   "total_idle_seconds": 5400,
-  "total_in_motion_seconds": 25200
+  "total_in_motion_seconds": 25200,
+  "unlocated_fields": []
  },
  "execute_wialon_unit_trips_report": {
   "column_warnings": [],
@@ -1186,6 +1287,7 @@
     "start_time": 1785736800,
     "start_time_str": "start-3"
    }
-  ]
+  ],
+  "unlocated_fields": []
  }
 }

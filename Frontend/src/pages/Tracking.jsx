@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
     Truck,
-    ChevronRight,
     X,
     Search,
 } from "lucide-react"
@@ -71,24 +70,27 @@ function Tracking() {
     const [error, setError] = useState(null)
     const [lastSyncTime, setLastSyncTime] = useState(null)
 
-    // Synchronize query parameters without re-opening a closed drawer
-    const lastVehicleParamRef = useRef(searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v"))
-    useEffect(() => {
+    // Synchronize query parameters without re-opening a closed drawer. Adjusted during render (React's pattern for
+    // state derived from changing input), not in an effect, so a URL change never renders the stale state first.
+    const [lastVehicleParam, setLastVehicleParam] = useState(() => searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v"))
+    const [lastParamsKey, setLastParamsKey] = useState(() => searchParams.toString())
+    const paramsKey = searchParams.toString()
+    if (paramsKey !== lastParamsKey) {
+        setLastParamsKey(paramsKey)
         const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
-        if (param && param !== lastVehicleParamRef.current) {
-            lastVehicleParamRef.current = param
+        if (param && param !== lastVehicleParam) {
+            setLastVehicleParam(param)
             const numeric = Number(param)
             setSelectedVehicleId(Number.isNaN(numeric) ? param : numeric)
             setIsDrawerOpen(true)
-            window.dispatchEvent(new CustomEvent("ats:drawer-change", { detail: { open: true } }))
-        } else if (!param && lastVehicleParamRef.current) {
-            lastVehicleParamRef.current = null
+        } else if (!param && lastVehicleParam) {
+            setLastVehicleParam(null)
         }
         const sParam = searchParams.get("status")
         if (sParam && ["ALL", ...LIVE_STATUSES].includes(sParam.toUpperCase())) {
             setStatusFilter(sParam.toUpperCase())
         }
-    }, [searchParams])
+    }
 
     /*
         Load fleet vehicles
@@ -169,11 +171,9 @@ function Tracking() {
 
     // Keep cached vehicle telemetry so drawer and focus transitions are smooth during polling
     const [cachedVehicle, setCachedVehicle] = useState(null)
-    useEffect(() => {
-        if (selectedVehicle) {
-            setCachedVehicle(selectedVehicle)
-        }
-    }, [selectedVehicle])
+    if (selectedVehicle && selectedVehicle !== cachedVehicle) {
+        setCachedVehicle(selectedVehicle)
+    }
     const activeVehicle = selectedVehicle || cachedVehicle
 
     /*
@@ -436,7 +436,11 @@ function Tracking() {
                                 )}
 
                                 {error && (
-                                    <ErrorBanner message={error} onRetry={() => loadVehicles(true)} className="m-3" />
+                                    <ErrorBanner
+                                        message={vehicles.length > 0 ? `${error} Showing the last loaded data${lastSyncTime ? ` (${lastSyncTime})` : ""}.` : error}
+                                        onRetry={() => loadVehicles(true)}
+                                        className="m-3"
+                                    />
                                 )}
 
                                 {!loading && !error && filteredVehicles.length === 0 && (
@@ -459,7 +463,7 @@ function Tracking() {
                                     />
                                 )}
 
-                                {!loading && !error && filteredVehicles.map(vehicle => {
+                                {!loading && (!error || vehicles.length > 0) && filteredVehicles.map(vehicle => {
                                     const vid = vehicle.vehicle_id || vehicle.id
                                     const isSelected = String(vid) === String(selectedVehicleId)
                                     const lastUpdatedText = formatLastUpdate(vehicle) || "Recent"

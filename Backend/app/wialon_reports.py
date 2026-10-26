@@ -299,6 +299,70 @@ def _column_index(header: Any, names: Tuple[str, ...], default: int, warnings: L
     return default
 
 
+def _header_index(header: Any, name: str) -> Optional[int]:
+    """Position of a header column by name, or None when there is no header or the name is absent (never guessed)."""
+    if not isinstance(header, list):
+        return None
+    wanted = _normalize_header_name(name)
+    for idx, col in enumerate(header):
+        if _normalize_header_name(col) == wanted:
+            return idx
+    return None
+
+
+def _time_cell_value(cell: Any) -> Optional[int]:
+    """Epoch of a Wialon time cell ({"t": text, "v": epoch, ...}), or None when the cell is not time-shaped."""
+    if isinstance(cell, dict):
+        v = cell.get("v")
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+            return int(v)
+    return None
+
+
+def _location_cell(cell: Any) -> Optional[Tuple[Any, Any, Optional[str]]]:
+    """(lat, lng, address) of a Wialon location cell ({"t": address, "x", "y"}, no epoch), else None."""
+    if isinstance(cell, dict) and _time_cell_value(cell) is None and cell.get("x") is not None and cell.get("y") is not None:
+        return cell.get("y"), cell.get("x"), cell.get("t")
+    return None
+
+
+def _interval_event(cells: List[Any], interval: Dict[str, Any], idle_sec: int, cols: Dict[str, Optional[int]]) -> Dict[str, Any]:
+    """
+    One idle interval of an engine report row or sub-row. Start/end come from the header-located Beginning/End cells
+    when they are time cells, else from Wialon's own interval bounds (t1/t2). The location comes only from the
+    header-located "Initial location" cell when it is a location cell; otherwise the coordinates fall back to the
+    Beginning time cell's position and the address is unknown (`location_verified` False). No position is guessed.
+    """
+    def at(key):
+        idx = cols.get(key)
+        return cells[idx] if idx is not None and len(cells) > idx else None
+
+    begin_cell, end_cell = at("begin"), at("end")
+    st_ts = _time_cell_value(begin_cell) or interval.get("t1") or 0
+    et_ts = _time_cell_value(end_cell) or interval.get("t2") or (st_ts + idle_sec)
+    loc = _location_cell(at("location"))
+    if loc is not None:
+        lat, lng, addr = loc
+    else:
+        lat = begin_cell.get("y") if isinstance(begin_cell, dict) else None
+        lng = begin_cell.get("x") if isinstance(begin_cell, dict) else None
+        addr = None
+    return {
+        "start_time": st_ts,
+        "end_time": et_ts,
+        "duration": idle_sec,
+        "duration_minutes": round(idle_sec / 60.0, 2),
+        "location": {"latitude": lat, "longitude": lng},
+        "address": addr or "Unknown Location",
+        "location_verified": loc is not None,
+    }
+
+
+def _interval_columns(header: Any) -> Dict[str, Optional[int]]:
+    return {"begin": _header_index(header, "Beginning"), "end": _header_index(header, "End"),
+            "location": _header_index(header, "Initial location")}
+
+
 def _fetch_all_rows(sid: str, total_rows: int, what: str, table_index: int = 0) -> List[Dict[str, Any]]:
     """Read all `total_rows` rows of a report table in pages; raise if any page comes back short."""
     rows: List[Dict[str, Any]] = []
@@ -627,6 +691,7 @@ def execute_wialon_unit_engine_report(
                 engine_idx = _column_index(header, ("Engine hours",), 6, column_warnings, unlocated)
                 motion_idx = _column_index(header, ("In motion",), 7, column_warnings, unlocated)
                 idling_idx = _column_index(header, ("Idling",), 8, column_warnings, unlocated)
+                interval_cols = _interval_columns(header)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"engine report of vehicle {vehicle_id}")
                     for row_idx, r in enumerate(row_res):
@@ -658,29 +723,11 @@ def execute_wialon_unit_engine_report(
                                     incomplete_fields.add("idle_events")
                                 for s in sub:
                                     sc = s.get("c", [])
-                                    if len(sc) >= 9:
-                                        s_idle_sec = parse_duration_to_seconds(_cell_str(sc[8]).strip())
+                                    if len(sc) > idling_idx:
+                                        # Sub-rows share the table's columns: the idle cell is the header-located Idling
+                                        s_idle_sec = parse_duration_to_seconds(_cell_str(sc[idling_idx]).strip())
                                         if s_idle_sec > 0:
-                                            st_obj = sc[1] if isinstance(sc[1], dict) else {}
-                                            et_obj = sc[2] if isinstance(sc[2], dict) else {}
-                                            loc_obj = sc[3] if isinstance(sc[3], dict) else (sc[4] if isinstance(sc[4], dict) else {})
-                                            st_ts = st_obj.get("v") or s.get("t1") or 0
-                                            et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
-                                            lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
-                                            lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
-                                            addr = loc_obj.get("t") or "Unknown Location"
-
-                                            idle_events.append({
-                                                "start_time": st_ts,
-                                                "end_time": et_ts,
-                                                "duration": s_idle_sec,
-                                                "duration_minutes": round(s_idle_sec / 60.0, 2),
-                                                "location": {
-                                                    "latitude": lat,
-                                                    "longitude": lng,
-                                                },
-                                                "address": addr,
-                                            })
+                                            idle_events.append(_interval_event(sc, s, s_idle_sec, interval_cols))
                         else:
                             incomplete_fields.add("row_shape")
 
@@ -690,6 +737,8 @@ def execute_wialon_unit_engine_report(
                 "total_engine_seconds": total_engine_sec,
                 "total_engine_hours": round(total_engine_sec / 3600.0, 2),
                 "idle_events": idle_events,
+                # True when an idle event's address/position could not be read from a verified location cell
+                "event_location_unverified": any(not ev["location_verified"] for ev in idle_events),
                 "total_in_motion_seconds": total_in_motion_sec,
                 "rows_total": total_rows,
                 "incomplete_fields": sorted(incomplete_fields),
@@ -938,6 +987,7 @@ def execute_wialon_group_engine_idle_report(
                 motion_idx = _column_index(header, ("In motion",), 7, column_warnings, unlocated)
                 idling_idx = _column_index(header, ("Idling",), 8, column_warnings, unlocated)
                 mileage_idx = _column_index(header, ("Mileage",), 9, column_warnings, unlocated)
+                interval_cols = _interval_columns(header)
                 if total_rows > 0:
                     row_res = _fetch_all_rows(sid, total_rows, f"group engine report of group {group_id}")
                     # Sub-rows (discrete idle events) of exactly the rows read below, fetched up front in core/batch
@@ -976,7 +1026,8 @@ def execute_wialon_group_engine_idle_report(
                                                ("in_motion_seconds", motion_idx), ("total_idle_seconds", idling_idx)):
                                 if parse_duration_strict(cell(idx)) is None:
                                     row_incomplete.append(field)
-                            mileage_km = parse_float_safe(cell(mileage_idx), default=None)
+                            # Strict, like the Trips report: a cell whose separators read two ways ("1,234") is unknown
+                            mileage_km = parse_mileage_km(extract_cell_value(cell(mileage_idx)))
                             if mileage_km is None:
                                 row_incomplete.append("mileage_km")
 
@@ -992,56 +1043,16 @@ def execute_wialon_group_engine_idle_report(
                                     events_incomplete.append(vehicle_name)
                                 for s in sub:
                                     sc = s.get("c", [])
-                                    if len(sc) >= 9:
-                                        s_idle_str = _cell_str(sc[8]).strip()
-                                        s_idle_sec = parse_duration_to_seconds(s_idle_str)
+                                    if len(sc) > idling_idx:
+                                        # Sub-rows share the table's columns: the idle cell is the header-located Idling
+                                        s_idle_sec = parse_duration_to_seconds(_cell_str(sc[idling_idx]).strip())
                                         if s_idle_sec > 0:
-                                            st_obj = sc[1] if isinstance(sc[1], dict) else {}
-                                            loc_obj = sc[2] if isinstance(sc[2], dict) else (sc[4] if isinstance(sc[4], dict) else {})
-                                            et_obj = sc[3] if isinstance(sc[3], dict) else {}
-                                            st_ts = st_obj.get("v") or s.get("t1") or 0
-                                            et_ts = et_obj.get("v") or s.get("t2") or (st_ts + s_idle_sec)
-                                            lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
-                                            lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
-                                            addr = loc_obj.get("t") or "Unknown Location"
-
-                                            ev_item = {
-                                                "vehicle_name": vehicle_name,
-                                                "start_time": st_ts,
-                                                "end_time": et_ts,
-                                                "duration": s_idle_sec,
-                                                "duration_minutes": round(s_idle_sec / 60.0, 2),
-                                                "location": {
-                                                    "latitude": lat,
-                                                    "longitude": lng,
-                                                },
-                                                "address": addr,
-                                            }
+                                            ev_item = dict(_interval_event(sc, s, s_idle_sec, interval_cols), vehicle_name=vehicle_name)
                                             unit_events.append(ev_item)
                                             all_idle_events.append(ev_item)
                             elif row_events and idling_sec > 0 and r.get("d", 0) == 0:
                                 # When a vehicle has idling recorded in a single non-nested interval
-                                st_obj = cols[1] if len(cols) > 1 and isinstance(cols[1], dict) else {}
-                                loc_obj = cols[2] if len(cols) > 2 and isinstance(cols[2], dict) else (cols[4] if len(cols) > 4 and isinstance(cols[4], dict) else {})
-                                et_obj = cols[3] if len(cols) > 3 and isinstance(cols[3], dict) else {}
-                                st_ts = st_obj.get("v") or r.get("t1") or 0
-                                et_ts = et_obj.get("v") or r.get("t2") or (st_ts + idling_sec)
-                                lat = loc_obj.get("y") or st_obj.get("y") or et_obj.get("y")
-                                lng = loc_obj.get("x") or st_obj.get("x") or et_obj.get("x")
-                                addr = loc_obj.get("t") or "Unknown Location"
-
-                                ev_item = {
-                                    "vehicle_name": vehicle_name,
-                                    "start_time": st_ts,
-                                    "end_time": et_ts,
-                                    "duration": idling_sec,
-                                    "duration_minutes": round(idling_sec / 60.0, 2),
-                                    "location": {
-                                        "latitude": lat,
-                                        "longitude": lng,
-                                    },
-                                    "address": addr,
-                                }
+                                ev_item = dict(_interval_event(cols, r, idling_sec, interval_cols), vehicle_name=vehicle_name)
                                 unit_events.append(ev_item)
                                 all_idle_events.append(ev_item)
 
@@ -1071,6 +1082,8 @@ def execute_wialon_group_engine_idle_report(
             return {
                 "vehicles": unit_summaries,
                 "events": all_idle_events,
+                # True when an idle event's address/position could not be read from a verified location cell
+                "event_location_unverified": any(not ev["location_verified"] for ev in all_idle_events),
                 "rows_total": total_rows,
                 "column_warnings": column_warnings,
                 "events_incomplete": events_incomplete,

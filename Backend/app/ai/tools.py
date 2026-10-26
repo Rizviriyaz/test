@@ -29,6 +29,21 @@ def _format_duration(seconds: int) -> str:
     return f"{sec}s"
 
 
+def _idle_fields(v: dict) -> dict:
+    """Current idle duration of a live record: unknown when its idle start could not be read, a lower bound ("at
+    least") when the run started before the history searched."""
+    status = v.get("idle_duration_status", "known")
+    seconds = v.get("idle_duration", 0) or 0
+    if status == "unknown":
+        text = "unknown"
+    elif status == "lower_bound":
+        text = f"at least {_format_duration(seconds)}"
+    else:
+        text = _format_duration(seconds)
+    return {"idle_duration": text, "idle_seconds": None if status == "unknown" else seconds,
+            "idle_duration_status": status}
+
+
 def _resolve_unit(units: list, ref):
     """
     The raw Wialon unit whose ID equals `ref`, else whose name equals it exactly (case-insensitive), else None.
@@ -78,7 +93,9 @@ def tool_get_fleet_summary() -> dict:
     stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
     delayed = sum(1 for v in fleet if v.get("status") == "DELAYED")  # stale telemetry, not live
     offline = sum(1 for v in fleet if v.get("status") == "OFFLINE")
-    extended_idling = sum(1 for v in fleet if v.get("status") == "IDLING" and (v.get("idle_duration") or 0) >= 900)
+    extended_idling = sum(1 for v in fleet if v.get("status") == "IDLING" and v.get("idle_duration_status") != "unknown"
+                          and (v.get("idle_duration") or 0) >= 900)
+    idle_duration_unknown = sum(1 for v in fleet if v.get("status") == "IDLING" and v.get("idle_duration_status") == "unknown")
 
     return {
         "total_vehicles": total,
@@ -88,6 +105,8 @@ def tool_get_fleet_summary() -> dict:
         "delayed": delayed,
         "offline": offline,
         "vehicles_requiring_idle_attention": extended_idling,
+        # Idling units whose idle start could not be read (not counted above)
+        "idling_vehicles_with_unknown_duration": idle_duration_unknown,
     }
 
 
@@ -111,8 +130,7 @@ def tool_get_vehicles_by_status(status: str) -> dict:
             "status": v.get("status"),
             **_data_age_fields(v),
             "speed": v.get("speed", 0),
-            "idle_duration": _format_duration(v.get("idle_duration", 0)),
-            "idle_seconds": v.get("idle_duration", 0) or 0,
+            **_idle_fields(v),
             "group": v.get("group"),
             "latitude": v.get("latitude"),
             "longitude": v.get("longitude"),
@@ -121,8 +139,8 @@ def tool_get_vehicles_by_status(status: str) -> dict:
     ]
 
     if status == "IDLING":
-        # Sort longest idle time first
-        matched.sort(key=lambda x: x["idle_seconds"], reverse=True)
+        # Sort longest idle time first (unknown durations last)
+        matched.sort(key=lambda x: (x["idle_seconds"] is not None, x["idle_seconds"] or 0), reverse=True)
 
     return {
         "status": status,
@@ -153,8 +171,7 @@ def tool_get_vehicle_status(vehicle_id) -> dict:
         "status": vehicle.get("status"),
         **_data_age_fields(vehicle),
         "speed": vehicle.get("speed"),
-        "idle_duration": _format_duration(vehicle.get("idle_duration", 0)),
-        "idle_seconds": vehicle.get("idle_duration", 0) or 0,
+        **_idle_fields(vehicle),
         "latitude": vehicle.get("latitude"),
         "longitude": vehicle.get("longitude"),
         "group": vehicle.get("group"),
@@ -162,101 +179,60 @@ def tool_get_vehicle_status(vehicle_id) -> dict:
     }
 
 
-# Fleet-wide idle scans load each unit's history serially: one Wialon request at a time on the shared session
-# (no extra api_concurrent pressure), and message loads never take the wialon_reports report lock, so the scan
-# cannot block report-based endpoints. Every unit is eligible; the time budget bounds the total run and whatever
-# was not reached is reported explicitly.
-IDLE_SCAN_TIME_BUDGET_SECONDS = 45
-
-
-def _no_messages_in_window(vehicle: dict, window_from: int) -> bool:
-    """True when the unit's last message (core/search_items flag 1024) proves it has no messages in the window."""
-    if "lmsg" not in vehicle:
-        return False  # last-message data not available: the unit must be scanned
-    lmsg = vehicle.get("lmsg")
-    if lmsg is None:
-        return True  # unit has never reported
-    t = lmsg.get("t") if isinstance(lmsg, dict) else None
-    return isinstance(t, (int, float)) and t < window_from
-
-
 def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle_id: int = None) -> dict:
-    """Return idle events across the fleet or for a specific vehicle."""
-    sid = login()
-    vehicles = get_all_vehicles(sid)
+    """
+    Idle events across the fleet or for one vehicle: the Idle Analytics page's own data (Wialon Engine Hours report,
+    discrete idle intervals, same window clipping, vehicle attribution and completeness flags), so the assistant and
+    the page give the same numbers for the same window.
+    """
+    from app.main import get_fleet_idle_analytics
 
+    vid = None
     if vehicle_id:
-        unit = _resolve_unit(vehicles, vehicle_id)
-        target = [unit] if unit else []
-    else:
-        target = vehicles
+        sid = login()
+        unit = _resolve_unit(get_all_vehicles(sid), vehicle_id)
+        if not unit:
+            return {"hours_window": hours, "vehicle_found": False, "vehicle_id": vehicle_id, "event_count": 0,
+                    "events": [], "complete": True}
+        vid = unit.get("id")
 
-    all_events = []
+    data = get_fleet_idle_analytics(hours=hours, vehicle_id=vid, include_events=True)
     min_seconds = min_duration_minutes * 60
-    failed_units = []
-    scanned = 0
-    # One shared window for every unit, so results are comparable across the fleet.
-    window_to = int(time.time())
-    window_from = window_to - hours * 3600
-    deadline = time.monotonic() + IDLE_SCAN_TIME_BUDGET_SECONDS
-    # Units with no messages in the window cannot have idle periods: account for them without a Wialon call.
-    to_scan = [v for v in target if not _no_messages_in_window(v, window_from)]
-
-    for v in to_scan:
-        if time.monotonic() >= deadline:
-            break
-        scanned += 1
-        vid = v.get("id")
-        vname = v.get("nm", f"Vehicle {vid}")
-        sens = v.get("sens") or {}
-        try:
-            raw = get_vehicle_history(sid, vid, from_time=window_from, to_time=window_to)
-            telemetry = normalize_wialon_messages(raw, configured_sensors=sens)
-            activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
-            for p in activity.get("idle_periods", []):
-                dur = p.get("duration", 0)
-                if dur >= min_seconds:
-                    loc = p.get("location") or {}
-                    all_events.append({
-                        "vehicle_id": vid,
-                        "vehicle_name": vname,
-                        "idle_start": _format_ts(p.get("start_time")),
-                        "idle_end": _format_ts(p.get("end_time")),
-                        "duration": _format_duration(dur),
-                        "duration_seconds": dur,
-                        "latitude": loc.get("latitude"),
-                        "longitude": loc.get("longitude"),
-                    })
-        except Exception as e:
-            logging.getLogger(__name__).warning("Idle history load failed for unit %s: %s", vid, e)
-            failed_units.append({"vehicle_id": vid, "vehicle_name": vname})
-
-    # Sort longest first
-    all_events.sort(key=lambda x: x["duration_seconds"], reverse=True)
-
-    not_scanned = to_scan[scanned:]
+    events = [ev for ev in data.get("events") or [] if (ev.get("duration") or 0) >= min_seconds]
+    events.sort(key=lambda ev: ev.get("duration") or 0, reverse=True)
+    kpis = data.get("kpis") or {}
+    complete = bool(data.get("events_complete")) and not kpis.get("total_idle_partial")
+    unknown_vehicles = [v["vehicle_name"] for v in data.get("by_vehicle") or [] if v.get("idle_events") is None]
     result = {
         "hours_window": hours,
         "min_duration_minutes": min_duration_minutes,
-        "event_count": len(all_events),
-        "events": all_events[:50],  # cap response size
-        "vehicles_requested": len(target),
-        "vehicles_scanned": scanned - len(failed_units),
-        "vehicles_without_messages_in_window": len(target) - len(to_scan),
-        "failed_vehicle_count": len(failed_units),
-        "failed_vehicles": failed_units[:20],
-        "not_scanned_vehicle_count": len(not_scanned),
-        "not_scanned_vehicles": [
-            {"vehicle_id": v.get("id"), "vehicle_name": v.get("nm", f"Vehicle {v.get('id')}")} for v in not_scanned[:20]
+        "source": "Wialon Engine Hours report (same as the Idle Analytics page)",
+        "event_count": len(events),
+        "events": [
+            {
+                "vehicle_id": ev.get("vehicle_id"),
+                "vehicle_name": ev.get("vehicle_name"),
+                # Bounds of the engine-on interval (clipped to the window); the duration is the idling within it
+                "interval_start": _format_ts(ev.get("start_time")),
+                "interval_end": _format_ts(ev.get("end_time")),
+                "duration": _format_duration(ev.get("duration") or 0),
+                "duration_seconds": ev.get("duration") or 0,
+                "address": ev.get("address"),
+                "latitude": (ev.get("location") or {}).get("latitude"),
+                "longitude": (ev.get("location") or {}).get("longitude"),
+            }
+            for ev in events[:50]  # cap response size
         ],
-        "complete": not failed_units and not not_scanned,
+        "total_idle_seconds": kpis.get("total_idle_seconds"),
+        "total_idle_partial": bool(kpis.get("total_idle_partial")),
+        "vehicles_with_unknown_events": unknown_vehicles[:20],
+        "vehicles_with_unknown_events_count": len(unknown_vehicles),
+        "complete": complete,
     }
-    if vehicle_id and not target:
-        result["vehicle_found"] = False
-    if not result["complete"]:
+    if not complete:
         result["note"] = (
-            "Partial results: idle data is missing for the failed and not-scanned vehicles (time budget reached or load errors). "
-            "Say so in the answer; use get_fleet_utilization for fleet-wide idle totals or pass vehicle_id for one vehicle."
+            "Partial results: idle events or idle totals are unknown for some vehicles (listed). Say so in the answer; "
+            "never present the counts as complete."
         )
     return result
 
@@ -495,7 +471,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_idle_events",
-            "description": "Get idle events across the fleet or for a specific vehicle within a time window. Fleet-wide scans cover every vehicle within a 45-second budget; the result reports failed and not-scanned vehicles.",
+            "description": "Get idle events across the fleet or for a specific vehicle within a time window, from the Wialon Engine Hours report used by the Idle Analytics page. The result says whether it is complete and lists vehicles whose events are unknown.",
             "parameters": {
                 "type": "object",
                 "properties": {

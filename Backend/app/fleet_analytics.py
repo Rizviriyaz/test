@@ -21,7 +21,7 @@ from app.performance_diagnostics import log_cache_state, log_data_window, map_wi
 from collections import Counter, defaultdict
 from typing import Dict, List, Any, Optional
 
-from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups
+from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups, history_truncated
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
@@ -68,6 +68,11 @@ HEALTH_THRESHOLDS = {
     "BATTERY_12V_WARNING": _env_float("BATTERY_12V_WARNING", 12.2),
     "BATTERY_12V_HEALTHY": _env_float("BATTERY_12V_HEALTHY", 12.6),
 
+    # Readings from this voltage up to the 24V floor below fit neither system: a drained 24V battery or an
+    # overcharging 12V one. The system type is unknown, so the reading is never classified healthy.
+    "BATTERY_UNCLASSIFIED_MIN": _env_float("BATTERY_UNCLASSIFIED_MIN", 15.0),
+    "BATTERY_24V_MIN": _env_float("BATTERY_24V_MIN", 18.0),
+
     # GPS Quality
     "GPS_SATELLITES_EXCELLENT": _env_float("GPS_SATELLITES_EXCELLENT", 12),
     "GPS_SATELLITES_GOOD": _env_float("GPS_SATELLITES_GOOD", 8),
@@ -104,6 +109,19 @@ def _parse_speed_kmh(value: Any) -> Optional[float]:
     return float(match.group(0)) if match else None
 
 
+def _finite_number(value: Any) -> Optional[float]:
+    """A finite int/float (numeric strings accepted), else None; bools are not numbers here."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
+
+
 # ── Helper: Evaluate Single Vehicle Health ───────────────────────────────────
 def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = None, calc_data: Dict[str, Any] = None) -> Dict[str, Any]:
     """
@@ -132,7 +150,12 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
         voltage = None
 
     if voltage is not None and voltage > 0:
-        if voltage > 18.0:
+        if HEALTH_THRESHOLDS["BATTERY_UNCLASSIFIED_MIN"] <= voltage <= HEALTH_THRESHOLDS["BATTERY_24V_MIN"]:
+            # Neither a healthy 12V nor a healthy 24V reading: system type unknown, flagged for review (never Optimal)
+            system_type = "Unknown"
+            battery_status = "WARNING"
+            battery_level_label = f"Unclassified ({voltage:.1f}V, system voltage unknown)"
+        elif voltage > HEALTH_THRESHOLDS["BATTERY_24V_MIN"]:
             system_type = "24V Commercial"
             if voltage < HEALTH_THRESHOLDS["BATTERY_24V_CRITICAL"]:
                 battery_status = "CRITICAL"
@@ -165,11 +188,11 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
     pwr_int = prms.get("pwr_int")
     battery_charge = prms.get("battery_charge")
 
-    # GPS Quality
+    # GPS Quality. A non-numeric satellite count or DOP is unknown, never a crash of the fleet response.
     loc = vehicle.get("location") or {}
-    sats = loc.get("satellites")
-    hdop = prms.get("hdop")
-    pdop = prms.get("pdop")
+    sats = _finite_number(loc.get("satellites"))
+    hdop = _finite_number(prms.get("hdop"))
+    pdop = _finite_number(prms.get("pdop"))
 
     gps_status = "GOOD"
     if sats is None:
@@ -236,6 +259,8 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
         score -= 15
 
     health_score = max(0, min(100, score))
+    # The battery value is the last one reported: not current once telemetry is delayed or offline
+    battery_stale = voltage is not None and conn_status in ("DELAYED", "OFFLINE")
 
     return {
         "vehicle_id": vid,
@@ -247,7 +272,8 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
             "status": battery_status,
             "label": battery_level_label,
             "system_type": system_type,
-            "internal_voltage": round(float(pwr_int), 2) if pwr_int is not None else None,
+            "stale": battery_stale,
+            "internal_voltage": round(_finite_number(pwr_int), 2) if _finite_number(pwr_int) is not None else None,
             "charge_percent": battery_charge if battery_charge is not None else None,
         },
         "gps": {
@@ -317,6 +343,8 @@ def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
             healthy_vehicles += 1
 
     result = {
+        # When this data was read from Wialon (UTC epoch seconds); a cached response keeps its original time
+        "generated_at": now_timestamp(),
         "total_vehicles": len(fleet),
         "healthy_vehicles": healthy_vehicles,
         "battery_warnings": battery_warnings,
@@ -365,6 +393,7 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         group_engine = None
 
     if group_engine is not None and group_engine.get("vehicles"):
+        source = "wialon_group_engine_report"
         engine_by_name = {uv["vehicle_name"]: uv for uv in group_engine.get("vehicles", [])}
         ambiguous_names = _ambiguous_report_names(fleet, group_engine.get("vehicles", []))
         # A row naming no fleet unit is left out of the totals (as /api/fleet/trips): partial and not cached
@@ -429,14 +458,35 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                 "trip_count": None
             })
     else:
-        report_incomplete = False
+        # Fallback: segmented from raw messages, a different method from the engine report. Labelled as such and
+        # never cached, so it cannot stand in for the authoritative report on later requests.
+        source = "raw_message_fallback"
+        report_incomplete = True
         unmatched_rows = []
+
+        def _unknown_utilization(v_record):
+            return {
+                "vehicle_id": v_record["vehicle_id"],
+                "vehicle_name": v_record["vehicle_name"],
+                "group": v_record.get("group", "General Fleet"),
+                "status": v_record.get("status", "STOPPED"),
+                "connection_status": v_record.get("connection_status", "STABLE"),
+                "is_offline": v_record.get("is_offline", False),
+                "driving_minutes": None, "idle_minutes": None, "stopped_minutes": None, "engine_on_minutes": None,
+                "driving_seconds": None, "idle_seconds": None, "stopped_seconds": None, "engine_on_seconds": None,
+                "utilization_percentage": None,
+                "driving_to_idle_ratio": None,
+                "trip_count": None,
+            }
 
         def _process_unit_utilization(v_record):
             vid = v_record["vehicle_id"]
             sens = next((u.get("sens") or {} for u in vehicles if u.get("id") == vid), {})
             try:
                 raw_msgs = get_vehicle_history(sid, vid, hours=hours)
+                if history_truncated(raw_msgs):
+                    # A partial message list would understate driving and idle time: unknown, not a lower bound
+                    return _unknown_utilization(v_record)
                 telemetry = normalize_wialon_messages(raw_msgs, configured_sensors=sens)
                 activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
 
@@ -472,9 +522,9 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                     "trip_count": len(trips)
                 }
             except Exception as exc:
-                # The route handler logs the traceback when this propagates; keep the vehicle context here
-                logging.error("Wialon utilization data failed for vehicle %s: %s", vid, exc)
-                raise
+                # One unit's failure leaves that unit unknown; the fleet response still loads (and is not cached)
+                logging.warning("Wialon utilization data failed for vehicle %s; unknown: %s", vid, exc)
+                return _unknown_utilization(v_record)
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             unit_results = list(map_with_request_context(executor, _process_unit_utilization, fleet))
@@ -494,12 +544,14 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
 
     result = {
         "hours": hours,
+        # wialon_group_engine_report (authoritative) or raw_message_fallback (segmented messages; partial, uncached)
+        "source": source,
         "fleet_utilization_pct": None if all_unknown else fleet_util_pct,
         "total_driving_hours": None if all_unknown else round(total_driving_sec / 3600, 1),
         "total_idle_hours": None if all_unknown else round(total_idle_sec / 3600, 1),
         "total_engine_on_hours": None if all_unknown else round(total_engine_sec / 3600, 1),
         "driving_to_idle_ratio": None if all_unknown else fleet_ratio,
-        "partial": bool(unknown_vehicles or unmatched_rows),
+        "partial": bool(unknown_vehicles or unmatched_rows or source != "wialon_group_engine_report"),
         "unknown_vehicles": unknown_vehicles,
         # Unknown (None) utilization sorts after all known values
         "vehicles": sorted(unit_results, key=lambda x: (x["utilization_percentage"] is not None, x["utilization_percentage"] or 0), reverse=True)
@@ -586,6 +638,8 @@ def get_trips_mileage_analytics(
 
     report_incomplete = False
     unmatched_rows: List[str] = []
+    # wialon_group_trips_report, or unit_trips_reports (one Trips Report per unit when the group report failed)
+    source = "wialon_group_trips_report" if group_report is not None else "unit_trips_reports"
     if group_report is not None:
         rep_by_name = {item["vehicle_name"]: item for item in group_report}
         # Report rows carry only the unit name: a name shared by several units (or rows) cannot be attributed
@@ -761,6 +815,7 @@ def get_trips_mileage_analytics(
         "period_hours": eff_hours,
         "from_time": eff_from,
         "to_time": eff_to,
+        "source": source,
         "summary": {
             "total_trips": total_trips,
             "total_distance_km": total_gps_dist,
@@ -815,6 +870,8 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         brake_sid = next((str(k) for k, sc in sens_cfg.items() if sc and ("brake" in str(sc.get("n", "")).lower() or "braking" in str(sc.get("n", "")).lower()) and ("event" in str(sc.get("n", "")).lower() or "harsh" in str(sc.get("n", "")).lower())), None)
         corner_sid = next((str(k) for k, sc in sens_cfg.items() if sc and "corner" in str(sc.get("n", "")).lower() and ("event" in str(sc.get("n", "")).lower() or sc.get("p") == "io_253")), None)
         gforce_sid = next((str(k) for k, sc in sens_cfg.items() if sc and ("g-force" in str(sc.get("n", "")).lower() or "green value" in str(sc.get("n", "")).lower() or sc.get("p") == "io_254")), None)
+        # A harsh-driving source: a configured harsh sensor, or the io_253 parameter in the unit's messages
+        has_source = bool(accel_sid or brake_sid or corner_sid)
 
         try:
             raw_msgs = get_vehicle_history(sid, vid, hours=hours)
@@ -830,6 +887,8 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
 
                 # Check parameter or dynamic sensor flags
                 raw_io_253 = p.get("io_253")
+                if "io_253" in p:
+                    has_source = True
                 accel_flag = (sens.get(accel_sid, {}).get("value") == 1) if is_valid_sensor_value(sens.get(accel_sid, {}).get("value")) else False
                 brake_flag = (sens.get(brake_sid, {}).get("value") == 1) if is_valid_sensor_value(sens.get(brake_sid, {}).get("value")) else False
                 corner_flag = (sens.get(corner_sid, {}).get("value") == 1) if is_valid_sensor_value(sens.get(corner_sid, {}).get("value")) else False
@@ -871,15 +930,23 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
                 else:
                     prev_active_event = None
 
-            return events
+            return {"vehicle": v_record, "events": events, "failed": False,
+                    "truncated": history_truncated(raw_msgs), "has_source": has_source}
         except Exception as exc:
-            logging.error("Wialon safety data failed for vehicle %s: %s", vid, exc)
-            raise
+            # One unit's history failure leaves that unit's events unknown; the fleet result is partial, not failed
+            logging.warning("Wialon safety data failed for vehicle %s; its events are unknown: %s", vid, exc)
+            return {"vehicle": v_record, "events": [], "failed": True, "truncated": False, "has_source": has_source}
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        nested_events = list(map_with_request_context(executor, _fetch_safety_events, fleet))
+        per_vehicle = list(map_with_request_context(executor, _fetch_safety_events, fleet))
 
-    all_events = [ev for sub in nested_events for ev in sub]
+    all_events = [ev for res in per_vehicle for ev in res["events"]]
+    failed_vehicles = sorted(res["vehicle"]["vehicle_name"] for res in per_vehicle if res["failed"])
+    truncated_vehicles = sorted(res["vehicle"]["vehicle_name"] for res in per_vehicle if res["truncated"])
+    # Units without any harsh-driving source report no events because they cannot, not because they drove safely
+    without_source = sorted(res["vehicle"]["vehicle_name"] for res in per_vehicle
+                            if not res["failed"] and not res["has_source"])
+    partial = bool(failed_vehicles or truncated_vehicles)
     all_events.sort(key=lambda x: x["timestamp"], reverse=True)
 
     braking_count = sum(1 for e in all_events if e["event_type"] == "Harsh Braking")
@@ -910,18 +977,27 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
     result = {
         "period_hours": hours,
         "summary": {
+            # Counts cover the units that could be read; `partial` lists the ones that could not
             "total_events": len(all_events),
             "harsh_braking": braking_count,
             "harsh_acceleration": accel_count,
             "harsh_cornering": corner_count,
             "vehicles_affected": len(by_veh)
         },
+        "generated_at": now_timestamp(),
+        "partial": partial,
+        "failed_vehicles": failed_vehicles,
+        "truncated_vehicles": truncated_vehicles,
+        "vehicles_without_safety_source": len(without_source),
+        "vehicles_without_safety_source_names": without_source[:50],
         "by_vehicle": sorted(list(by_veh.values()), key=lambda x: x["total"], reverse=True),
         "by_group": sorted(list(by_grp.values()), key=lambda x: x["total"], reverse=True),
         "events": all_events[:100]  # Cap for snappy JSON response
     }
 
-    set_cached(cache_key, result)
+    # A partial result is not cached; the next request re-reads the failed or truncated units
+    if not partial:
+        set_cached(cache_key, result)
     return result
 
 
@@ -938,6 +1014,8 @@ _ALERTS_CACHE_KEY = "fleet_alerts_analytics"
 _ALERTS_TTL_SECONDS = 180
 _ALERTS_REFRESH_AHEAD_SECONDS = 120
 _ALERTS_REFRESH_RETRY_SECONDS = 30
+# A build whose safety scan was partial is served for at most this long (see _build_fleet_alerts)
+_ALERTS_PARTIAL_TTL_SECONDS = 30
 _alerts_build_lock = threading.Lock()
 _alerts_refresh_failed_at = 0.0
 _alerts_build_seq = 0  # foreground builds finished, success or failure
@@ -1037,7 +1115,24 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
     for v in health["vehicles"]:
         b_status = v["battery"]["status"]
         v_volt = v["battery"]["voltage"]
-        if b_status == "CRITICAL":
+        last_reported = " (last reported)" if v["battery"].get("stale") else ""
+        if b_status == "WARNING" and v["battery"].get("system_type") == "Unknown":
+            alerts.append({
+                "id": f"alt-{alert_counter}",
+                "vehicle_id": v["vehicle_id"],
+                "vehicle_name": v["vehicle_name"],
+                "group": v["group"],
+                "severity": "WARNING",
+                "alert_type": "BATTERY_UNCLASSIFIED",
+                "title": f"Unclassified Battery Voltage: {v_volt}V{last_reported}",
+                "message": f"{v['vehicle_name']} reports {v_volt}V{last_reported}, which fits neither a healthy 12V nor a "
+                           f"healthy 24V system. Check the battery and the vehicle's system voltage.",
+                "value": f"{v_volt}V",
+                "timestamp": v["connectivity"]["last_message_ts"],
+                "location": {"latitude": v["gps"]["latitude"], "longitude": v["gps"]["longitude"]}
+            })
+            alert_counter += 1
+        elif b_status == "CRITICAL":
             alerts.append({
                 "id": f"alt-{alert_counter}",
                 "vehicle_id": v["vehicle_id"],
@@ -1045,8 +1140,8 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
                 "group": v["group"],
                 "severity": "CRITICAL",
                 "alert_type": "BATTERY_CRITICAL",
-                "title": f"Critical Battery Voltage: {v_volt}V",
-                "message": f"{v['vehicle_name']} has dangerously low battery level ({v_volt}V). Risk of vehicle shutdown.",
+                "title": f"Critical Battery Voltage: {v_volt}V{last_reported}",
+                "message": f"{v['vehicle_name']} has dangerously low battery level ({v_volt}V{last_reported}). Risk of vehicle shutdown.",
                 "value": f"{v_volt}V",
                 "timestamp": v["connectivity"]["last_message_ts"],
                 "location": {"latitude": v["gps"]["latitude"], "longitude": v["gps"]["longitude"]}
@@ -1060,8 +1155,8 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
                 "group": v["group"],
                 "severity": "WARNING",
                 "alert_type": "BATTERY_LOW",
-                "title": f"Low Battery Warning: {v_volt}V",
-                "message": f"{v['vehicle_name']} battery voltage is below recommended threshold ({v_volt}V).",
+                "title": f"Low Battery Warning: {v_volt}V{last_reported}",
+                "message": f"{v['vehicle_name']} battery voltage is below recommended threshold ({v_volt}V{last_reported}).",
                 "value": f"{v_volt}V",
                 "timestamp": v["connectivity"]["last_message_ts"],
                 "location": {"latitude": v["gps"]["latitude"], "longitude": v["gps"]["longitude"]}
@@ -1153,6 +1248,7 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
             "group": ev["group"],
             "severity": sev,
             "alert_type": "HARSH_DRIVING",
+            "event_id": ev.get("id"),
             "title": f"{ev['event_type']} Detected",
             "message": f"{ev['vehicle_name']} registered a {ev['event_type']} event at {ev['speed_kmh']} km/h{f' ({g_force}G)' if g_force else ''}.",
             "value": f"{g_force}G" if g_force else f"{ev['speed_kmh']} km/h",
@@ -1160,6 +1256,17 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
             "location": ev["location"]
         })
         alert_counter += 1
+
+    # Stable ids (the sequential alt-N ids changed on every rebuild): one alert per condition and vehicle, plus the
+    # event id for harsh driving. A repeated key gets a numeric suffix, so ids stay unique in every response.
+    seen_ids: Dict[str, int] = {}
+    for a in alerts:
+        base = f"{a['alert_type']}-{a.get('vehicle_id')}"
+        if a.get("event_id"):
+            base = f"{base}-{a['event_id']}"
+        n = seen_ids.get(base, 0)
+        seen_ids[base] = n + 1
+        a["id"] = base if n == 0 else f"{base}-{n + 1}"
 
     # Sort: CRITICAL first, then WARNING, then by timestamp
     order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
@@ -1179,17 +1286,33 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
         if grp:
             by_group[grp] += 1
 
+    safety_partial = bool(safety.get("partial"))
     result = {
+        # When the underlying health/safety data was read (UTC epoch seconds); `timestamp` on an alert is the
+        # vehicle's last reported message (or GPS fix), not when the condition began
+        "generated_at": min(filter(None, [health.get("generated_at"), safety.get("generated_at")]), default=now_timestamp()),
         "total_alerts": len(alerts),
         "critical_count": critical_count,
         "warning_count": warning_count,
         "info_count": info_count,
         "by_vehicle": dict(by_vehicle),
         "by_group": dict(by_group),
+        # Harsh-driving alerts are missing for these units (their history could not be read completely)
+        "safety_partial": safety_partial,
+        "safety_unavailable_vehicles": sorted(set(safety.get("failed_vehicles") or []) | set(safety.get("truncated_vehicles") or [])),
         "alerts": alerts
     }
 
-    set_cached(_ALERTS_CACHE_KEY, result)
+    if safety_partial:
+        # Kept only briefly: the entry counts as old enough that the next hit starts a background rebuild, and it
+        # stops being served after _ALERTS_PARTIAL_TTL_SECONDS
+        _analytics_cache.set(
+            _ALERTS_CACHE_KEY,
+            {"data": result, "time": time.time() - (_ALERTS_TTL_SECONDS - _ALERTS_PARTIAL_TTL_SECONDS)},
+            _ANALYTICS_CACHE_RETENTION_SECONDS,
+        )
+    else:
+        set_cached(_ALERTS_CACHE_KEY, result)
     return result
 
 
@@ -1213,7 +1336,8 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
     trips_data = get_trips_mileage_analytics(hours=24)
     trips_by_veh = {v["vehicle_id"]: v for v in trips_data.get("vehicles", [])}
     safety_data = get_safety_analytics(hours=24)
-    safety_by_grp = {g["group"]: g["total"] for g in safety_data.get("by_group", [])}
+    safety_by_vehicle = {v["vehicle_id"]: v["total"] for v in safety_data.get("by_vehicle", [])}
+    safety_unknown = set(safety_data.get("failed_vehicles") or []) | set(safety_data.get("truncated_vehicles") or [])
 
     groups_summary = []
     for g in raw_groups:
@@ -1236,7 +1360,10 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         total_distance = None if any(d is None for d in distances) else sum(distances)
         trip_counts = [trips_by_veh.get(v["vehicle_id"], {}).get("trip_count") for v in g_vehicles]
         total_trips = None if any(c is None for c in trip_counts) else sum(trip_counts)
-        total_safety = safety_by_grp.get(gname, 0)
+        # Every member counts, as for distance (a vehicle in several groups counts in each); unknown when a member's
+        # history could not be read
+        total_safety = None if any(v["vehicle_name"] in safety_unknown for v in g_vehicles) else sum(
+            safety_by_vehicle.get(v["vehicle_id"], 0) for v in g_vehicles)
 
         groups_summary.append({
             "group_id": gid,
@@ -1268,11 +1395,13 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
 
     result = {
         "count": len(groups_summary),
+        # Group-membership totals: a vehicle in several groups counts in each, so they do not add up to the fleet
+        "totals_basis": "group_membership",
         "groups": sorted(groups_summary, key=lambda x: x["total_vehicles"], reverse=True)
     }
 
-    # Built on a partial trips report: not cached, so the unknown distances are re-read on the next request
-    if not trips_data.get("summary", {}).get("total_distance_partial"):
+    # Built on a partial trips report or safety scan: not cached, so the unknown values are re-read next time
+    if not trips_data.get("summary", {}).get("total_distance_partial") and not safety_data.get("partial"):
         set_cached("fleet_groups_analytics", result)
     return result
 
@@ -1280,6 +1409,13 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
 # =============================================================================
 # 7. SINGLE VEHICLE DETAILS & ROUTE REPLAY
 # =============================================================================
+
+def _rounded_counter(calc_data: List[Dict[str, Any]], key: str) -> Optional[float]:
+    if not calc_data or not isinstance(calc_data[0], dict):
+        return None
+    value = _finite_number((calc_data[0].get(key) or {}).get("value"))
+    return round(value, 1) if value is not None else None
+
 
 def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[str, Any]:
     cache_key = f"vehicle_deep_{vehicle_id}_{hours}"
@@ -1302,6 +1438,7 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
     # Historical messages for trips and route replay points
     sens = target.get("sens") or {}
     raw_msgs = get_vehicle_history(sid, vehicle_id, hours=hours)
+    history_partial = history_truncated(raw_msgs)
     telemetry = normalize_wialon_messages(raw_msgs, configured_sensors=sens)
     activity = segment_vehicle_activity(telemetry, stop_tolerance_seconds=60)
 
@@ -1340,6 +1477,8 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
         "ignition": v_record.get("ignition", False),
         "location": v_record.get("location", {}),
         "health": health,
+        # True when Wialon history could not be read completely: the segmented metrics and route are lower bounds
+        "history_partial": history_partial,
         "metrics_24h": {
             # Segmented from raw messages for the route view; not the Wialon Trips Report mileage used elsewhere
             "distance_km": round(total_dist, 2),
@@ -1348,8 +1487,9 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
             "idle_minutes": round(total_idle_sec / 60, 1),
             "trips_count": len(trips),
             "idle_episodes": len(idles),
-            "engine_hours": round((calc_data[0].get("engine_hours") or {}).get("value", 0), 1) if calc_data else None,
-            "cumulative_odometer_km": round((calc_data[0].get("mileage") or {}).get("value", 0), 1) if calc_data else None,
+            # Unknown (None) when calc_last reports no counter or a non-numeric value, never 0
+            "engine_hours": _rounded_counter(calc_data, "engine_hours"),
+            "cumulative_odometer_km": _rounded_counter(calc_data, "mileage"),
         },
         "trips": [
             {
@@ -1366,5 +1506,6 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
         "route_points": route_points
     }
 
-    set_cached(cache_key, result)
+    if not history_partial:
+        set_cached(cache_key, result)
     return result

@@ -5,8 +5,7 @@ Offline tests for AI chat input validation and tool bounds (audit item H4).
   - message-count and message-length limits; context window forwarded to the model is bounded
   - model-selected hours / min_duration_minutes are validated and clamped before analytics calls
   - per-run tool-call limits (total and get_idle_events)
-  - fleet-wide idle scans cover every unit serially within a 45 s budget, never wait on the report lock,
-    and report failed / not-scanned units instead of skipping them
+  - get_idle_events reads the Idle Analytics data (Wialon Engine Hours report) and reports partial results
 
 Auth, Groq, login/get_all_vehicles/get_vehicle_history and analytics functions are mocked. Outbound
 `requests` and httpx calls are blocked. Run from Backend/:
@@ -29,6 +28,10 @@ from offline_guard import LiveCallBlocked, OfflineGuard  # noqa: E402
 import app.ai.assistant as assistant  # noqa: E402
 import app.ai.tools as tools  # noqa: E402
 from app.main import app  # noqa: E402
+
+# These tests send more chats than the per-user limit allows; rate limiting has its own test
+# (scripts/test_production_remediation.py). 0 disables the per-process limit.
+os.environ["AI_CHAT_RATE_LIMIT_PER_MINUTE"] = "0"
 
 AUTH_HEADERS = {"Authorization": "Bearer test-token"}
 USER = {"id": "00000000-0000-0000-0000-000000000001", "email": "user@example.com", "role": "viewer"}
@@ -197,144 +200,59 @@ def test_time_range_clamping():
     print("[PASS] Clamp note does not mutate the returned analytics dict.")
 
 
-# ─── Idle scan: all units, time budget, partial failures ─────────────────────
+# ─── Idle events: the Idle Analytics data source ─────────────────────────────
 
-NOW = 1_800_000_000
-
-
-def _fleet(n, lmsg_t=None):
-    """n units; lmsg_t=None means core/search_items returned no last-message data for them."""
-    units = []
-    for i in range(1, n + 1):
-        unit = {"id": i, "nm": f"Unit {i}", "sens": {}}
-        if lmsg_t is not None:
-            unit["lmsg"] = {"t": lmsg_t}
-        units.append(unit)
-    return units
-
-
-def _history_side_effect(failing_ids, calls, active=None):
-    def history(sid, vid, hours=6, from_time=None, to_time=None):
-        if active is not None:
-            active["now"] += 1
-            active["max"] = max(active["max"], active["now"])
-        try:
-            calls.append((vid, from_time, to_time))
-            if vid in failing_ids:
-                raise RuntimeError("Wialon error 5")
-            return [{"vid": vid}]
-        finally:
-            if active is not None:
-                active["now"] -= 1
-    return history
+IDLE_PAYLOAD = {
+    "kpis": {"total_idle_seconds": 4200, "total_idle_partial": False},
+    "events_complete": True,
+    "by_vehicle": [{"vehicle_id": 1, "vehicle_name": "Unit 1", "idle_events": 2},
+                   {"vehicle_id": 2, "vehicle_name": "Unit 2", "idle_events": 1}],
+    "events": [
+        {"vehicle_id": 1, "vehicle_name": "Unit 1", "start_time": 1_800_000_000, "end_time": 1_800_000_900,
+         "duration": 600, "address": "Yard", "location": {"latitude": 25.0, "longitude": 55.0}},
+        {"vehicle_id": 1, "vehicle_name": "Unit 1", "start_time": 1_800_001_000, "end_time": 1_800_004_000,
+         "duration": 3000, "address": "Port", "location": {"latitude": 25.1, "longitude": 55.1}},
+        {"vehicle_id": 2, "vehicle_name": "Unit 2", "start_time": 1_800_002_000, "end_time": 1_800_002_700,
+         "duration": 600, "address": "Depot", "location": {"latitude": 25.2, "longitude": 55.2}},
+    ],
+}
 
 
-def _activity(telemetry):
-    return {"idle_periods": [{"start_time": NOW - 3000, "end_time": NOW - 2400, "duration": 600,
-                              "location": {"latitude": 25.0, "longitude": 55.0}}]}
-
-
-def _run_idle(fleet, args, failing_ids=(), clock=None, active=None):
-    calls = []
-    patches = [
-        patch.object(tools, "login", return_value="sid"),
-        patch.object(tools, "get_all_vehicles", return_value=fleet),
-        patch.object(tools, "get_vehicle_history", side_effect=_history_side_effect(set(failing_ids), calls, active)),
-        patch.object(tools, "normalize_wialon_messages", side_effect=lambda raw, configured_sensors: raw),
-        patch.object(tools, "segment_vehicle_activity", side_effect=lambda t, stop_tolerance_seconds: _activity(t)),
-        patch.object(tools.time, "time", return_value=NOW),
-    ]
-    if clock is not None:
-        patches.append(patch.object(tools.time, "monotonic", side_effect=clock))
-    for p in patches:
-        p.start()
-    try:
+def _run_idle(args, payload=IDLE_PAYLOAD, fleet=None):
+    analytics = MagicMock(return_value=payload)
+    with patch("app.main.get_fleet_idle_analytics", analytics),             patch.object(tools, "login", return_value="sid"),             patch.object(tools, "get_all_vehicles", return_value=fleet or [{"id": 1, "nm": "Unit 1"}, {"id": 2, "nm": "Unit 2"}]),             patch.object(tools, "get_vehicle_history", side_effect=AssertionError("raw history must not be read")):
         out = json.loads(tools.dispatch_tool("get_idle_events", args))
-    finally:
-        for p in reversed(patches):
-            p.stop()
-    return out, calls
+    return out, analytics
 
 
-def test_idle_scan_covers_fleets_above_25():
-    active = {"now": 0, "max": 0}
-    out, calls = _run_idle(_fleet(60), {}, active=active)
-    assert len(calls) == 60 and out["vehicles_scanned"] == 60, (len(calls), out["vehicles_scanned"])
-    assert out["complete"] is True and "note" not in out and out["not_scanned_vehicle_count"] == 0, out
-    assert out["event_count"] == 60 and len(out["events"]) == 50  # response size cap unchanged
-    assert active["max"] == 1, "history loads must stay serial (one Wialon request at a time)"
-    assert {(f, t) for _, f, t in calls} == {(NOW - 24 * 3600, NOW)}, "all units must share one window"
-    print("[PASS] 60-unit fleet: every unit scanned serially over one shared window, complete=true.")
+def test_idle_events_use_the_idle_analytics_source():
+    out, analytics = _run_idle({})
+    analytics.assert_called_once_with(hours=24, vehicle_id=None, include_events=True)
+    assert "Engine Hours" in out["source"], out
+    assert out["event_count"] == 3 and [e["duration_seconds"] for e in out["events"]] == [3000, 600, 600]
+    assert out["total_idle_seconds"] == 4200 and out["complete"] is True and "note" not in out, out
+    print("[PASS] get_idle_events reads the Idle Analytics data (engine report), longest first, never raw history.")
 
-    out, calls = _run_idle(_fleet(40), {"hours": 500}, failing_ids={2, 5})
-    assert len(calls) == 40
-    assert all(f == NOW - tools.MAX_TOOL_HOURS * 3600 and t == NOW for _, f, t in calls), calls[:2]
-    assert out["vehicles_requested"] == 40 and out["vehicles_scanned"] == 38
-    assert out["failed_vehicle_count"] == 2
-    assert out["failed_vehicles"] == [{"vehicle_id": 2, "vehicle_name": "Unit 2"},
-                                      {"vehicle_id": 5, "vehicle_name": "Unit 5"}], out["failed_vehicles"]
-    assert out["not_scanned_vehicle_count"] == 0 and out["not_scanned_vehicles"] == []
-    assert out["complete"] is False and "Partial results" in out["note"] and "time_range_note" in out
-    assert out["event_count"] == 38
-    print("[PASS] 40-unit fleet with 2 failing units: failures reported by id/name, other 38 scanned, "
-          "complete=false, hours clamped to 168.")
+    out, analytics = _run_idle({"hours": 500, "min_duration_minutes": 20})
+    analytics.assert_called_once_with(hours=tools.MAX_TOOL_HOURS, vehicle_id=None, include_events=True)
+    assert out["event_count"] == 1 and out["events"][0]["address"] == "Port" and "time_range_note" in out, out
+    print("[PASS] Hours clamped to 168 and min_duration_minutes filters the events.")
 
 
-def test_idle_scan_skips_units_without_messages_in_window():
-    window_from = NOW - 24 * 3600
-    fleet = _fleet(3, lmsg_t=NOW - 60)                                                 # recent -> scan
-    fleet.append({"id": 10, "nm": "Parked", "sens": {}, "lmsg": {"t": window_from - 1}})  # before window
-    fleet.append({"id": 11, "nm": "Never reported", "sens": {}, "lmsg": None})
-    fleet.append({"id": 12, "nm": "Unknown lmsg", "sens": {}})                          # no lmsg data -> scan
-    out, calls = _run_idle(fleet, {})
-    assert sorted(vid for vid, _, _ in calls) == [1, 2, 3, 12], calls
-    assert out["vehicles_without_messages_in_window"] == 2 and out["vehicles_scanned"] == 4
-    assert out["complete"] is True, out
-    print("[PASS] Units whose last message predates the window are accounted for without a Wialon call; "
-          "units without last-message data are still scanned.")
+def test_idle_events_partial_and_single_vehicle():
+    partial = dict(IDLE_PAYLOAD, events_complete=False,
+                   by_vehicle=[{"vehicle_id": 1, "vehicle_name": "Unit 1", "idle_events": None}])
+    out, _ = _run_idle({}, payload=partial)
+    assert out["complete"] is False and "Partial results" in out["note"], out
+    assert out["vehicles_with_unknown_events"] == ["Unit 1"] and out["vehicles_with_unknown_events_count"] == 1
+    print("[PASS] Incomplete Wialon events are reported as partial with the affected vehicles.")
 
-
-def test_idle_scan_time_budget():
-    # Each monotonic() read advances 10 s: deadline = 0 + 45; checks at 10, 20, 30, 40 pass, 50 stops.
-    ticks = iter(range(0, 10_000, 10))
-    fleet = _fleet(30, lmsg_t=NOW - 60) + [{"id": 99, "nm": "Parked", "sens": {}, "lmsg": {"t": 1}}]
-    out, calls = _run_idle(fleet, {}, failing_ids={3}, clock=lambda: next(ticks))
-    assert len(calls) == 4, len(calls)
-    assert out["vehicles_scanned"] == 3 and out["failed_vehicle_count"] == 1
-    assert out["vehicles_without_messages_in_window"] == 1, "no-data units are not reported as not scanned"
-    assert out["not_scanned_vehicle_count"] == 26, out["not_scanned_vehicle_count"]
-    assert out["not_scanned_vehicles"][0] == {"vehicle_id": 5, "vehicle_name": "Unit 5"}
-    assert len(out["not_scanned_vehicles"]) == 20  # sample list capped; the count is exact
-    assert out["complete"] is False and "time budget" in out["note"], out
-    print(f"[PASS] 45 s budget stops the scan after {len(calls)} units; 26 remaining reported (count + ids), "
-          "1 failure reported, complete=false.")
-
-    out, _ = _run_idle(_fleet(3), {"vehicle_id": 3})
-    missing, _ = _run_idle(_fleet(3), {"vehicle_id": 99})
-    assert out["complete"] is True and "note" not in out and out["event_count"] == 1, out
+    out, analytics = _run_idle({"vehicle_id": 2})
+    analytics.assert_called_once_with(hours=24, vehicle_id=2, include_events=True)
+    missing, analytics = _run_idle({"vehicle_id": 99})
     assert missing["vehicle_found"] is False and missing["event_count"] == 0, missing
-    print("[PASS] Single-vehicle scan is complete; unknown vehicle_id reports vehicle_found=false.")
-
-
-def test_idle_scan_does_not_wait_on_report_lock():
-    import threading
-    from app import wialon_reports
-
-    done = threading.Event()
-    result = {}
-
-    def run():
-        result["out"], _ = _run_idle(_fleet(30), {})
-        done.set()
-
-    # Hold the report lock as a long-running Wialon report would; the idle scan must still finish.
-    with wialon_reports._report_lock:
-        worker = threading.Thread(target=run, daemon=True)
-        worker.start()
-        finished = done.wait(timeout=10)
-    assert finished, "idle scan blocked on the Wialon report lock"
-    assert result["out"]["complete"] is True and result["out"]["vehicles_scanned"] == 30
-    print("[PASS] Idle scan completes while the Wialon report lock is held (it never takes or waits on it).")
+    analytics.assert_not_called()
+    print("[PASS] vehicle_id is resolved to the Wialon unit; an unknown vehicle reports vehicle_found=false.")
 
 
 if __name__ == "__main__":
@@ -349,10 +267,8 @@ if __name__ == "__main__":
             test_run_assistant_rejects_injected_roles,
             test_tool_call_bounds,
             test_time_range_clamping,
-            test_idle_scan_covers_fleets_above_25,
-            test_idle_scan_skips_units_without_messages_in_window,
-            test_idle_scan_time_budget,
-            test_idle_scan_does_not_wait_on_report_lock,
+            test_idle_events_use_the_idle_analytics_source,
+            test_idle_events_partial_and_single_vehicle,
         ):
             try:
                 test()

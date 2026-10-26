@@ -98,10 +98,12 @@ test("partialEventsNote flags incomplete idle events and stays silent when compl
 test("Idle analytics labels trend, hotspots and the event list when events are partial", () => {
     const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
     assert.match(page, /const eventsNote = eventsPending \? "Loading idle events…" : partialEventsNote\(analytics\)/)
-    assert.match(page, /title="Idle duration trend"\s+subtitle=\{eventsNote \|\| undefined\}/)
-    assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : "Top 10 locations"\}/)
-    assert.equal((page.match(/\{eventsNote && </g) || []).length, 2, "event list and hotspot list notes")
-    assert.match(page, /value=\{eventsPending \? "…" : kpis\.idle_event_count \?\? "—"\}/,
+    // The trend shows the partial-events note in place of its default subtitle
+    assert.match(page, /title="Idle Duration Trend"\s+subtitle=\{eventsNote \|\| "Accumulated idle minutes over time"\}/)
+    assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : "Top 10 accumulated idle locations"\}/)
+    assert.match(page, /subtitle=\{eventsNote \? `Ranked idle locations · \$\{eventsNote\}` : /, "hotspot table note")
+    assert.equal((page.match(/\{eventsNote && \(/g) || []).length, 1, "event list note")
+    assert.match(page, /\{eventsPending \? "…" : \(kpis\.idle_event_count \?\? "—"\)\}/,
         "unknown event count renders as a dash (and as loading while the full response is pending)")
 })
 

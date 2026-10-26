@@ -2,7 +2,10 @@
 // Kept free of browser/Supabase imports so it can be tested offline with `node --test`.
 
 const inFlightRequests = new Map()
+// Insertion-ordered: the least recently used entry is evicted beyond MAX_CLIENT_CACHE_ENTRIES (keys include
+// user-chosen filters and date ranges, so an unbounded map would grow for the whole session)
 const clientCache = new Map()
+export const MAX_CLIENT_CACHE_ENTRIES = 200
 // Bumped by every clearClientCache(): a request started before a clear (e.g. before sign-out) must not
 // write its response back into the cache or be shared with callers that start after it.
 let cacheGeneration = 0
@@ -10,13 +13,23 @@ let cacheGeneration = 0
 export function getFromClientCache(key, ttlMs = 10000) {
     const entry = clientCache.get(key)
     if (entry && (Date.now() - entry.timestamp) < ttlMs) {
+        clientCache.delete(key)
+        clientCache.set(key, entry)
         return entry.data
     }
     return null
 }
 
 export function setClientCache(key, data) {
+    clientCache.delete(key)
     clientCache.set(key, { data, timestamp: Date.now() })
+    while (clientCache.size > MAX_CLIENT_CACHE_ENTRIES) {
+        clientCache.delete(clientCache.keys().next().value)
+    }
+}
+
+export function clientCacheSize() {
+    return clientCache.size
 }
 
 export function clearClientCache(keyPrefix = "") {

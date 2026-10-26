@@ -45,15 +45,16 @@ SAFETY = {"events": [
      "timestamp": 1250, "speed_kmh": 30, "g_force": None, "location": {"latitude": 25.2, "longitude": 55.2}},
 ]}
 
-# (id, type, severity) in final order: CRITICAL then WARNING, newest first; ids follow the build order
+# (id, type, severity) in final order: CRITICAL then WARNING, newest first. Ids are stable across rebuilds:
+# "<alert_type>-<vehicle_id>" (plus the harsh event's id when it has one), no longer the build-order "alt-N"
 EXPECTED = [
-    ("alt-6", "HARSH_DRIVING", "CRITICAL"),
-    ("alt-1", "BATTERY_CRITICAL", "CRITICAL"),
-    ("alt-4", "DEVICE_OFFLINE", "CRITICAL"),
-    ("alt-7", "HARSH_DRIVING", "WARNING"),
-    ("alt-2", "BATTERY_LOW", "WARNING"),
-    ("alt-3", "TELEMETRY_DELAYED", "WARNING"),
-    ("alt-5", "GPS_WEAK", "WARNING"),
+    ("HARSH_DRIVING-3", "HARSH_DRIVING", "CRITICAL"),
+    ("BATTERY_CRITICAL-1", "BATTERY_CRITICAL", "CRITICAL"),
+    ("DEVICE_OFFLINE-3", "DEVICE_OFFLINE", "CRITICAL"),
+    ("HARSH_DRIVING-1", "HARSH_DRIVING", "WARNING"),
+    ("BATTERY_LOW-2", "BATTERY_LOW", "WARNING"),
+    ("TELEMETRY_DELAYED-2", "TELEMETRY_DELAYED", "WARNING"),
+    ("GPS_WEAK-3", "GPS_WEAK", "WARNING"),
 ]
 
 

@@ -7,7 +7,12 @@ import FleetStatusBadge from "../Common/FleetStatusBadge"
 import { isPositionStale, lastSeenLabel, normalizeVehicleStatus } from "../../utils/vehicleStatus"
 import LiveIdleTimer from "../Common/LiveIdleTimer"
 import { formatElapsedDuration } from "../../utils/datetime"
-import { formatKm, isKnownNumber, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "../../utils/knownTotals"
+import { formatKm, sumKnown, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm } from "../../utils/knownTotals"
+import { idleDurationStatus } from "../../utils/fleetRules"
+
+// While the drawer stays open on one vehicle, its trips and idle events are re-read this often (the live record
+// itself refreshes with the page's poll; the per-vehicle reports do not need to follow every poll)
+const DRAWER_REFRESH_MS = 60000
 
 import {
     MorphingDialog,
@@ -74,13 +79,22 @@ export default function VehicleDetailDrawer({
     // "complete" | "partial" (some Wialon idle events unread, list is a lower bound) | "error" (list unavailable)
     const [idleEventsStatus, setIdleEventsStatus] = useState("complete")
 
+    // Keyed by vehicle id: a live poll replaces the vehicle object every few seconds, which must not refetch the
+    // vehicle's trips and fleet idle report each time
+    const activeVehicleId = activeVehicle?.vehicle_id || activeVehicle?.id || null
+    const [refreshTick, setRefreshTick] = useState(0)
     useEffect(() => {
-        if (!activeVehicle) return
+        if (!activeVehicleId) return undefined
+        const timer = setInterval(() => setRefreshTick(t => t + 1), DRAWER_REFRESH_MS)
+        return () => clearInterval(timer)
+    }, [activeVehicleId])
+
+    useEffect(() => {
+        if (!activeVehicleId) return
         let active = true
 
         async function fetchVehicleTripsData() {
-            const vid = activeVehicle.vehicle_id || activeVehicle.id
-            if (!vid) return
+            const vid = activeVehicleId
             try {
                 setLoadingTrips(true)
                 const { from_time, to_time } = getUAETodayBounds()
@@ -96,8 +110,7 @@ export default function VehicleDetailDrawer({
         }
 
         async function fetchVehicleIdleEvents() {
-            const vid = activeVehicle.vehicle_id || activeVehicle.id
-            if (!vid) return
+            const vid = activeVehicleId
             if (idleEvents && Array.isArray(idleEvents)) {
                 setVehicleIdleEvents(idleEvents.filter(e => String(e.vehicle_id) === String(vid)))
                 setIdleEventsStatus(idleEventsComplete === false ? "partial" : "complete")
@@ -125,7 +138,7 @@ export default function VehicleDetailDrawer({
         fetchVehicleTripsData()
         fetchVehicleIdleEvents()
         return () => { active = false }
-    }, [activeVehicle, idleEvents, idleEventsComplete])
+    }, [activeVehicleId, refreshTick, idleEvents, idleEventsComplete])
 
     const isDrawerVisible = open !== undefined ? open : isOpen
 
@@ -188,11 +201,11 @@ export default function VehicleDetailDrawer({
 
     const spinner = <Loader2 className="inline h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Loading" />
     const isIdling = statusStr === "IDLING"
+    const idleStatus = idleDurationStatus(currentVehicle)
 
     const pageLinks = [
         { label: "Live Tracking", to: unitId ? `/tracking?vehicleId=${encodeURIComponent(unitId)}` : "/tracking" },
         { label: "Vehicle Health", to: "/vehicle-health" },
-        { label: "Trips & Activity", to: "/trips" },
         { label: "Idle Reports", to: "/idle-analytics" },
     ]
 
@@ -222,7 +235,7 @@ export default function VehicleDetailDrawer({
                                 </Row>
                             )}
                             {batteryVoltage !== null && (
-                                <Row label="Battery"><span className="tabular-nums">{Number(batteryVoltage).toFixed(2)} V</span></Row>
+                                <Row label={lastSeen ? "Last battery" : "Battery"}><span className="tabular-nums">{Number(batteryVoltage).toFixed(2)} V</span></Row>
                             )}
                             {cleanDriverId !== null && <Row label="Assigned driver">{cleanDriverId}</Row>}
                         </Section>
@@ -265,30 +278,27 @@ export default function VehicleDetailDrawer({
                             <dl className="divide-y divide-slate-100">
                                 <Row label="Started">
                                     {isIdling && currentVehicle.idle_start
-                                        ? <span className="tabular-nums">{formatUAETime(currentVehicle.idle_start)}</span>
+                                        ? <span className="tabular-nums">{idleStatus === "lower_bound" ? "Before " : ""}{formatUAETime(currentVehicle.idle_start)}</span>
                                         : (isIdling ? "Start time unavailable" : <span className="font-normal text-slate-500">{lastSeen ? "Unknown (telemetry delayed)" : "Not currently idling"}</span>)}
                                 </Row>
-                                <Row label={isIdling ? "Elapsed" : "Last idle duration"}>
-                                    {isIdling ? (
-                                        <span className="inline-flex items-center gap-1.5 text-amber-800">
-                                            <span className="h-1.5 w-1.5 rounded-full bg-status-idling" aria-hidden="true" />
-                                            <LiveIdleTimer
-                                                startTime={currentVehicle.idle_start}
-                                                baseDuration={currentVehicle.idle_duration}
-                                                status={statusStr}
-                                            />
-                                        </span>
-                                    ) : (
-                                        <span className="tabular-nums">
-                                            {currentVehicle.idle_duration
-                                                ? formatElapsedDuration(currentVehicle.idle_duration)
-                                                : (currentVehicle.total_idle_seconds
-                                                    ? formatElapsedDuration(currentVehicle.total_idle_seconds)
-                                                    // Unknown idle time (null from an unreadable Wialon cell) is not 0s
-                                                    : (isKnownNumber(currentVehicle.idle_duration) || isKnownNumber(currentVehicle.total_idle_seconds) ? "0s" : "—"))}
-                                        </span>
-                                    )}
-                                </Row>
+                                {/* A vehicle that is not idling has no current idle duration (the backend sends 0), so no row */}
+                                {isIdling && (
+                                    <Row label="Elapsed">
+                                        {idleStatus === "unknown" ? (
+                                            <span className="font-normal text-slate-500" title="The idle start could not be read from Wialon history">Unknown</span>
+                                        ) : (
+                                            <span className="inline-flex items-center gap-1.5 text-amber-800" title={idleStatus === "lower_bound" ? "Idling began before the history searched; at least this long" : undefined}>
+                                                <span className="h-1.5 w-1.5 rounded-full bg-status-idling" aria-hidden="true" />
+                                                <LiveIdleTimer
+                                                    startTime={currentVehicle.idle_start}
+                                                    baseDuration={currentVehicle.idle_duration}
+                                                    status={statusStr}
+                                                />
+                                                {idleStatus === "lower_bound" && <span>+</span>}
+                                            </span>
+                                        )}
+                                    </Row>
+                                )}
                             </dl>
 
                             <div className="mt-3">

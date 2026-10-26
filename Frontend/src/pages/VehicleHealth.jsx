@@ -7,6 +7,8 @@ import SearchInput from "../components/Common/SearchInput"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
 import { EmptyState, ErrorState, LoadingState } from "../components/Common/StateViews"
 import { getFleetHealthAnalytics } from "../api/fleetApi"
+import { formatUAETime } from "../utils/datetime"
+import { isHealthyVehicle } from "../utils/fleetRules"
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 
@@ -19,11 +21,16 @@ const TONE = {
     none: "bg-slate-300",
 }
 
-const batteryBadge = (status, voltage) => {
-    const s = String(status || "").toUpperCase()
-    if (s === "HEALTHY") return { label: `${fmt(voltage, 1)} V`, note: "Healthy", tone: "good" }
-    if (s === "WARNING") return { label: `${fmt(voltage, 1)} V`, note: "Low", tone: "warn" }
-    if (s === "CRITICAL") return { label: `${fmt(voltage, 1)} V`, note: "Critical", tone: "bad" }
+// `battery` is the backend health record's battery block: an unknown system type (a reading that fits neither a
+// healthy 12V nor 24V system) reads "Unclassified", and a delayed/offline unit's value is the last one reported
+const batteryBadge = (battery = {}) => {
+    const s = String(battery.status || "").toUpperCase()
+    const voltage = battery.voltage
+    const last = battery.stale ? " · last reported" : ""
+    if (s === "HEALTHY") return { label: `${fmt(voltage, 1)} V`, note: `Healthy${last}`, tone: "good" }
+    if (s === "WARNING" && battery.system_type === "Unknown") return { label: `${fmt(voltage, 1)} V`, note: `Unclassified${last}`, tone: "warn" }
+    if (s === "WARNING") return { label: `${fmt(voltage, 1)} V`, note: `Low${last}`, tone: "warn" }
+    if (s === "CRITICAL") return { label: `${fmt(voltage, 1)} V`, note: `Critical${last}`, tone: "bad" }
     return { label: voltage ? `${fmt(voltage, 1)} V` : "No data", note: null, tone: "none" }
 }
 
@@ -126,7 +133,8 @@ export default function VehicleHealth() {
         }
         if (filter === "critical") v = v.filter(x => x.battery?.status === "CRITICAL" || x.connectivity?.status === "OFFLINE")
         if (filter === "warning")  v = v.filter(x => x.battery?.status === "WARNING"  || x.connectivity?.status === "DELAYED" || x.gps?.status === "WEAK" || x.gps?.status === "STALE")
-        if (filter === "healthy")  v = v.filter(x => (x.health_score ?? 0) >= 80 && x.connectivity?.status === "STABLE" && x.gps?.status !== "STALE")
+        // Same rule as the "Healthy units" KPI, so the list and the count agree
+        if (filter === "healthy")  v = v.filter(isHealthyVehicle)
         return v
     }, [vehicles, search, filter])
 
@@ -137,6 +145,8 @@ export default function VehicleHealth() {
                 subtitle="Battery, GPS and telemetry connectivity"
                 onRefresh={refresh}
                 loading={loading}
+                lastUpdated={data?.generated_at ? formatUAETime(data.generated_at) : null}
+                lastUpdatedLabel="Data as of"
             />
 
             <div className="space-y-4">
@@ -266,7 +276,7 @@ export default function VehicleHealth() {
                                                             </div>
                                                         </div>
                                                     </td>
-                                                    <td className="px-3 py-2"><Signal {...batteryBadge(bat.status, bat.voltage)} /></td>
+                                                    <td className="px-3 py-2"><Signal {...batteryBadge(bat)} /></td>
                                                     <td className="px-3 py-2"><Signal {...gpsBadge(gps.status, gps.satellites, gps.seconds_since_position)} /></td>
                                                     <td className="px-3 py-2"><Signal {...connBadge(conn.status)} /></td>
                                                     <td className="whitespace-nowrap px-4 py-2 text-right tabular-nums text-slate-600">

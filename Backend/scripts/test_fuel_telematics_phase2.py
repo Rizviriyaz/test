@@ -248,9 +248,14 @@ def test_columns_found_by_header_name():
     tables2[TEMPLATE_GROUP_ENGINE]["header"] = [h if h != "In motion" else "Moving" for h in GROUP_ENGINE_HEADER]
     with Env(engine=FakeReportEngine(tables=tables2)):
         b = wd.get_fleet_telematics_bundle(CLOSED_FROM, CLOSED_TO, sid="s")
-    assert b["by_name"]["UNIT-A"]["driving_seconds"] == 16200  # historical position used
+    # A value read from the guessed (historical) position is never used as authoritative: unknown, listed, warned
+    unit_a = b["by_name"]["UNIT-A"]
+    assert unit_a["driving_seconds"] is None and unit_a["driving_hours"] is None, unit_a
+    assert "driving_seconds" in unit_a["incomplete_fields"], unit_a
+    assert unit_a["idle_seconds"] == 5400, "located columns are unaffected"
+    assert b["status"] == "partial"
     assert any("Column 'In motion' not found" in w for w in b["warnings"]), b["warnings"]
-    print("[PASS] Columns located by header name; a renamed column falls back to its position with a visible warning.")
+    print("[PASS] Columns located by header name; a renamed column is unknown (not its guessed position), with a visible warning.")
 
 
 def test_unreadable_cells_are_none_not_zero():

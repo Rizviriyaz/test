@@ -9,7 +9,6 @@ import {
     Loader2,
     History,
     RefreshCw,
-    ShieldAlert,
     BarChart3,
     Truck,
     Flame,
@@ -38,6 +37,7 @@ import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
 import { fixedOrDash, skippedRowsLabel } from "../components/Fuel/fuelLabels"
+import { fuelVehicleListParams } from "../utils/fleetRules"
 import { formatUAEDateTime } from "../utils/datetime"
 
 export default function FuelPerformance() {
@@ -167,10 +167,10 @@ export default function FuelPerformance() {
                 page_size: pageSize,
                 sort_by: sortBy,
                 sort_order: sortOrder,
-                // Global filters first, so the local search box (and status/sort) is never overwritten by them
-                ...queryParams,
+                // Global filters first, so the local search box (and status/sort) is never overwritten by them. The
+                // global vehicle filter is exact (vehicle_filter, as the KPI cards); the search box stays a substring.
+                ...fuelVehicleListParams(queryParams, searchQuery),
                 status: statusFilter || undefined,
-                vehicle_identifier: searchQuery || queryParams.vehicle_identifier || undefined,
                 idle_rate_lph: idleRateQuery,
             })
             if (requestId !== rankingsRequestIdRef.current) return
@@ -196,7 +196,7 @@ export default function FuelPerformance() {
                     sort_order: "desc",
                     status: "matched",
                     idle_rate_lph: idleRateQuery,
-                    ...queryParams,
+                    ...fuelVehicleListParams(queryParams),
                 }),
                 getVehicleEfficiencyList({
                     page: 1,
@@ -205,7 +205,7 @@ export default function FuelPerformance() {
                     sort_order: "asc",
                     status: "matched",
                     idle_rate_lph: idleRateQuery,
-                    ...queryParams,
+                    ...fuelVehicleListParams(queryParams),
                 }),
             ])
             if (requestId !== attentionRequestIdRef.current) return

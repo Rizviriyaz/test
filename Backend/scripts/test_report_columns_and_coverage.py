@@ -71,11 +71,15 @@ def _run_parsers(engine):
         }
 
 
-def _strip_unlocated(obj):
+# Idle-event position keys: read only from a header-located location cell, so they legitimately differ without a header
+_EVENT_LOCATION_KEYS = {"location", "address", "location_verified", "event_location_unverified"}
+
+
+def _strip_unlocated(obj, drop=frozenset({"unlocated_fields"})):
     if isinstance(obj, dict):
-        return {k: _strip_unlocated(v) for k, v in obj.items() if k != "unlocated_fields"}
+        return {k: _strip_unlocated(v, drop) for k, v in obj.items() if k not in drop}
     if isinstance(obj, list):
-        return [_strip_unlocated(x) for x in obj]
+        return [_strip_unlocated(x, drop) for x in obj]
     return obj
 
 
@@ -95,9 +99,14 @@ def test_parser_no_header_lists_guessed_fields_and_keeps_existing_values():
     assert no_header["group_engine"]["unlocated_fields"] == [
         "engine_hours_seconds", "in_motion_seconds", "mileage_km", "total_idle_seconds", "total_time_seconds"]
     assert all(r["unlocated_fields"] == ["mileage_km"] for r in no_header["group_trips"]), no_header["group_trips"]
-    # Additive only: every pre-existing key and value is identical, so callers that ignore the new key (fuel) see no change
-    assert _strip_unlocated(no_header) == _strip_unlocated(with_header)
-    print("[PASS] Parser: no header -> guessed fields listed in unlocated_fields; all existing keys/values unchanged.")
+    # Every duration, mileage, count and interval time is identical (interval times come from Wialon's t1/t2)...
+    drop = frozenset({"unlocated_fields"}) | _EVENT_LOCATION_KEYS
+    assert _strip_unlocated(no_header, drop) == _strip_unlocated(with_header, drop)
+    # ...but an idle event's position is never taken from a guessed column: without a header it is unknown
+    events = no_header["group_engine"]["events"] + no_header["unit_engine"]["idle_events"]
+    assert events and all(not e["location_verified"] and e["address"] == "Unknown Location" for e in events), events
+    assert no_header["group_engine"]["event_location_unverified"] is True
+    print("[PASS] Parser: no header -> guessed fields listed in unlocated_fields; values unchanged; event positions unknown.")
 
 
 def test_parser_missing_header_name():

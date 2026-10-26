@@ -219,7 +219,7 @@ def test_time_windows_bounded():
         for url in (
             "/api/vehicles/1/history?hours=100000",
             "/api/vehicles/1/efficiency?hours=0",
-            "/api/fleet/safety?hours=100000",
+            "/api/fleet/safety?hours=0",
             "/api/fleet/utilization?hours=100000",
             "/api/vehicles/1/route?hours=100000",
             "/api/vehicles/1/analytics?hours=100000",
@@ -239,7 +239,11 @@ def test_time_windows_bounded():
         ):
             res = client.get(url, headers=AUTH_HEADERS)
             assert res.status_code == 400 and "too long" in res.text, (url, res.status_code, res.text)
-    print("[PASS] M4: oversized hours -> 422 and oversized ranges -> 400, before any Wialon call.")
+        # Safety loads raw history per unit: at most 168 h, refused with a clear 400 naming the limit
+        for hours in (169, 744, 100000):
+            res = client.get(f"/api/fleet/safety?hours={hours}", headers=AUTH_HEADERS)
+            assert res.status_code == 400 and "at most 168 hours" in res.text, (hours, res.status_code, res.text)
+    print("[PASS] M4: oversized hours -> 422/400 and oversized ranges -> 400, before any Wialon call.")
 
 
 def test_ui_windows_still_accepted():

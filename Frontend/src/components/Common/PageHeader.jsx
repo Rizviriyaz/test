@@ -5,7 +5,9 @@ import { MobileNavButton } from "../Layout/Sidebar"
  * Page title row: title + one-line context on the left; filters, data freshness and
  * refresh on the right. `icon` is accepted for API compatibility but not rendered.
  */
-export default function PageHeader({ title, subtitle, onRefresh, loading = false, lastUpdated = null, children, className = "" }) {
+// `lastUpdatedLabel` names what the time is: "Updated" (when the page fetched) or e.g. "Data as of" (when the
+// backend read the data, which can be older than the fetch when the response was cached)
+export default function PageHeader({ title, subtitle, onRefresh, loading = false, lastUpdated = null, lastUpdatedLabel = "Updated", children, className = "" }) {
     const hasCustomMargin = className.includes("mb-") || className.includes("m-") || className.includes("my-")
     const hasCustomPadding = className.includes("pb-") || className.includes("p-") || className.includes("py-")
     const hasCustomBorder = className.includes("border-b-0") || className.includes("border-none")
@@ -35,9 +37,9 @@ export default function PageHeader({ title, subtitle, onRefresh, loading = false
                     {children}
 
                     {lastUpdated && (
-                        <span className="inline-flex h-8 items-center gap-1.5 px-1 text-xs tabular-nums text-slate-500" title="Last updated (UAE time)">
+                        <span className="inline-flex h-8 items-center gap-1.5 px-1 text-xs tabular-nums text-slate-500" title={`${lastUpdatedLabel} (UAE time)`}>
                             <span className="h-1.5 w-1.5 rounded-full bg-status-moving" aria-hidden="true" />
-                            Updated {lastUpdated}
+                            {lastUpdatedLabel} {lastUpdated}
                         </span>
                     )}
 

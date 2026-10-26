@@ -84,5 +84,6 @@ test("Tracking, drawer and Health page read the GPS fix age separately (source c
     const health = read("../pages/VehicleHealth.jsx")
     assert.match(health, /s === "STALE"/, "STALE GPS badge")
     assert.match(health, /filter === "warning"[^\n]*gps\?\.status === "STALE"/, "STALE listed under warnings")
-    assert.match(health, /filter === "healthy"[^\n]*gps\?\.status !== "STALE"/, "STALE never healthy")
+    // The Healthy filter uses the shared rule (fleetRules.isHealthyVehicle excludes STALE GPS; unit-tested there)
+    assert.match(health, /filter === "healthy"[^\n]*isHealthyVehicle/, "STALE never healthy")
 })

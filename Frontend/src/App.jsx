@@ -85,6 +85,8 @@ function App() {
                             />
 
                             {/* ─── Preserved Operations Routes ────────────────────── */}
+                            {/* Legacy URLs (/trips, /reports, /drivers, /settings) redirect to the page that serves them, so the
+                                address bar never names a page that is not shown; the target route keeps its own protection */}
                             <Route
                                 path="/tracking"
                                 element={
@@ -103,19 +105,11 @@ function App() {
                             />
                             <Route
                                 path="/drivers"
-                                element={
-                                    <ProtectedRoute>
-                                        <Dashboard />
-                                    </ProtectedRoute>
-                                }
+                                element={<Navigate to="/dashboard" replace />}
                             />
                             <Route
                                 path="/trips"
-                                element={
-                                    <ProtectedRoute>
-                                        <Tracking />
-                                    </ProtectedRoute>
-                                }
+                                element={<Navigate to="/tracking" replace />}
                             />
                             <Route
                                 path="/vehicle-health"
@@ -135,19 +129,11 @@ function App() {
                             />
                             <Route
                                 path="/reports"
-                                element={
-                                    <ProtectedRoute>
-                                        <IdleAnalytics />
-                                    </ProtectedRoute>
-                                }
+                                element={<Navigate to="/idle-analytics" replace />}
                             />
                             <Route
                                 path="/settings"
-                                element={
-                                    <ProtectedRoute>
-                                        <Dashboard />
-                                    </ProtectedRoute>
-                                }
+                                element={<Navigate to="/dashboard" replace />}
                             />
 
                             {/* Fallback */}

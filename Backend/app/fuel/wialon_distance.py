@@ -283,7 +283,8 @@ def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[s
             continue
         entry = _empty_entry(name)
         entry["in_trips_report"] = True
-        if "mileage_km" in (row.get("incomplete_fields") or []):
+        # An unreadable cell, or one read from a guessed column position (Mileage not found by header), is unknown
+        if "mileage_km" in (row.get("incomplete_fields") or []) + (row.get("unlocated_fields") or []):
             entry["incomplete_fields"].append("mileage_km")
         else:
             entry["mileage_km"] = float(row.get("mileage_km", 0.0))
@@ -297,6 +298,8 @@ def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[s
         errors.append("group_engine_empty")
     note((group_engine or {}).get("column_warnings"))
     engine_seen = set()
+    # Fields the engine report read from guessed column positions are unknown for every row
+    engine_unlocated = set((group_engine or {}).get("unlocated_fields") or [])
     for row in engine_rows:
         name = str(row.get("vehicle_name", "")).strip()
         if not name:
@@ -305,12 +308,12 @@ def _build_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[s
             duplicate_names.add(name)
             continue
         engine_seen.add(name)
-        incomplete = set(row.get("incomplete_fields") or [])
+        incomplete = set(row.get("incomplete_fields") or []) | engine_unlocated
         entry = by_name.get(name)
         if entry is None:
             # Present in the engine report but not the trips report: use the engine report's own mileage
             entry = _empty_entry(name)
-            if row.get("mileage_km") is not None:
+            if row.get("mileage_km") is not None and "mileage_km" not in incomplete:
                 entry["mileage_km"] = float(row["mileage_km"])
                 entry["distance_source"] = "wialon_group_engine_report"
             else:
@@ -400,7 +403,7 @@ def _fetch_unit_trips(unit_id: int, date_from: str, date_to: str, sid: Optional[
         return {"status": "failed", "trips": [], "error": str(exc)}
     rep = rep or {}
     trips = []
-    partial = bool(rep.get("column_warnings")) or bool(rep.get("incomplete_fields"))
+    partial = bool(rep.get("column_warnings")) or bool(rep.get("incomplete_fields")) or bool(rep.get("unlocated_fields"))
     for t in rep.get("trips") or []:
         unreadable = "distance_km" in (t.get("incomplete_fields") or [])
         partial = partial or unreadable
@@ -578,7 +581,7 @@ def get_vehicle_distance(
             "has_data": False,
         }
 
-    if "distance_km" in (rep_result.get("incomplete_fields") or []):
+    if "distance_km" in (rep_result.get("incomplete_fields") or []) + (rep_result.get("unlocated_fields") or []):
         raise WialonAPIError(f"Wialon trips report for unit {wialon_unit_id} contains unreadable trip distances")
 
     trips = rep_result.get("trips", [])
@@ -631,7 +634,8 @@ def get_vehicle_telematics_detail(
     column_fallback = bool(warnings)
 
     trips = trips_rep.get("trips", []) if trips_rep else []
-    trips_incomplete = "distance_km" in ((trips_rep or {}).get("incomplete_fields") or [])
+    trips_incomplete = "distance_km" in (((trips_rep or {}).get("incomplete_fields") or [])
+                                         + ((trips_rep or {}).get("unlocated_fields") or []))
     total_distance_km = None if trips_incomplete else round(sum(float(t.get("distance_km", 0.0)) for t in trips), 2)
     if trips_incomplete:
         warnings.append("One or more Wialon trip distances could not be read; distance unavailable.")

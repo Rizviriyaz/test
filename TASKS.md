@@ -103,7 +103,7 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 - [ ] Render backend service configured and `/api/health` verified live.
 - [ ] Vercel frontend configured with production `VITE_*` values and verified live.
 - [ ] `CORS_ORIGINS` set to the Vercel origin and sign-in verified end to end in production.
-- [ ] SPA deep-link refresh (e.g. `/dashboard`) verified on Vercel; no rewrite config exists in the repo.
+- [ ] SPA deep-link refresh (e.g. `/dashboard`) verified on Vercel. `vercel.json` (repo root) defines the SPA rewrite and also deploys the backend as a Vercel service; which host runs the backend (Vercel functions or Render) is not yet decided.
 
 ---
 
@@ -123,7 +123,7 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 - [x] Playwright E2E suite (`Frontend/tests/e2e/`: public, auth setup, authenticated navigation).
 - [ ] Playwright E2E run recorded against live Wialon/Supabase.
 - [ ] `test_ai_fuel_assistant.py` and 3 cases of `test_fuel_efficiency.py` need live services; not yet run in this verification.
-- [ ] A CI workflow for this repository layout. The untracked `Frontend/.github/workflows/playwright.yml` is the generic Playwright template: it runs from the repo root, starts no backend, and is not where GitHub reads workflows.
+- [ ] A CI workflow for this repository layout. The tracked `Frontend/.github/workflows/playwright.yml` is the generic Playwright template: it runs from the repo root, starts no backend, and is not where GitHub reads workflows.
 
 ---
 

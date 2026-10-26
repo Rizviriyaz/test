@@ -12,6 +12,10 @@ import {
     History,
 } from "lucide-react"
 import { useFuelFilters } from "../../context/useFuelFilters"
+import { useAuth } from "../../context/useAuth"
+
+// Roles the backend accepts for fuel import (FUEL_IMPORT_ROLES in Backend/app/fuel/routes.py); it stays the authority
+const FUEL_IMPORT_ROLES = new Set(["admin", "manager", "fleet_manager"])
 import PageHeader from "../Common/PageHeader"
 
 const PERIOD_OPTIONS = [
@@ -45,6 +49,8 @@ export default function FuelHeader({
     onOpenImport,
     onOpenHistory,
 }) {
+    const { profile } = useAuth()
+    const canImport = FUEL_IMPORT_ROLES.has(profile?.role)
     const {
         period,
         setPeriod,
@@ -83,12 +89,10 @@ export default function FuelHeader({
         return vehiclesList.filter((v) => v.toLowerCase().includes(q))
     }, [vehiclesList, vehicleSearch])
 
-    // Focus search input when vehicle dropdown opens
+    // Focus search input when vehicle dropdown opens (the search text is cleared when it is opened)
     useEffect(() => {
         if (isVehicleOpen) {
             setTimeout(() => vehicleSearchInputRef.current?.focus(), 50)
-        } else {
-            setVehicleSearch("")
         }
     }, [isVehicleOpen])
 
@@ -207,7 +211,10 @@ export default function FuelHeader({
                         <div className="relative" ref={vehicleRef}>
                             <button
                                 type="button"
-                                onClick={() => setIsVehicleOpen(!isVehicleOpen)}
+                                onClick={() => {
+                                    if (!isVehicleOpen) setVehicleSearch("")
+                                    setIsVehicleOpen(!isVehicleOpen)
+                                }}
                                 aria-haspopup="listbox"
                                 aria-expanded={isVehicleOpen}
                                 className={`${controlBase} ${controlState(Boolean(vehicle))} inline-flex items-center gap-1.5 px-2.5 max-w-[190px]`}
@@ -449,9 +456,10 @@ export default function FuelHeader({
                     {onOpenImport && (
                         <button
                             type="button"
-                            onClick={onOpenImport}
-                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-[#33758F] px-3 text-xs font-medium text-white transition-colors hover:bg-[#285d72] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
-                            title="Upload new Excel fuel statement"
+                            onClick={canImport ? onOpenImport : undefined}
+                            disabled={!canImport}
+                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-[#33758F] px-3 text-xs font-medium text-white transition-colors hover:bg-[#285d72] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[#33758F]"
+                            title={canImport ? "Upload new Excel fuel statement" : "Your role does not permit importing fuel statements"}
                         >
                             <UploadCloud className="h-3.5 w-3.5" />
                             <span>Import Fuel</span>

@@ -49,6 +49,8 @@ async function apiFetch(url, options = {}) {
             ? (detail || "Your sign-in is invalid or expired. Please sign in again.")
             : response.status === 403
                 ? (detail || "Your user profile does not permit this request. Contact your administrator.")
+            : response.status === 429
+                ? (detail || "Too many requests for this resource. Please wait a moment and try again.")
             : response.status === 502
                 ? "Wialon is temporarily unavailable. Fleet data could not be loaded."
                 : response.status === 503

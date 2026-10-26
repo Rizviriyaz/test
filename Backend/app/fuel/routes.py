@@ -763,6 +763,7 @@ async def get_vehicles_fuel_efficiency(
     date_from: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
     date_to: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
     vehicle_identifier: Optional[str] = Query(None, description="Search box: substring of identifier, plate or unit name"),
+    vehicle_filter: Optional[str] = Query(None, description="Exact vehicle filter, the same KPI scope rule as the other analytics endpoints (same Wialon unit or identical identifier)"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel type"),
     status: Optional[str] = Query(None, description="Filter by status ('matched', 'not_tracked', 'no_distance_data', 'ambiguous')"),
     idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
@@ -790,8 +791,11 @@ async def get_vehicles_fuel_efficiency(
             detail=f"Invalid status '{status}'. Supported statuses: {sorted(list(VALID_EFFICIENCY_STATUSES))}",
         )
 
-    # The search box stays a substring match over the aggregated records (not a KPI filter).
-    filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": None, "fuel_type": fuel_type}
+    # The search box stays a substring match over the aggregated records; vehicle_filter is the exact KPI-scope filter,
+    # so the table under a selected vehicle shows exactly the rows the KPI cards count.
+    filters = {"date_from": date_from, "date_to": date_to,
+               "vehicle_identifier": vehicle_filter.strip() if vehicle_filter and vehicle_filter.strip() else None,
+               "fuel_type": fuel_type}
     scope = await _build_scope(filters, _get_bearer_token(request))
     bundle = None
 

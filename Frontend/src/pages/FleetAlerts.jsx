@@ -84,8 +84,10 @@ function AlertRow({ alert }) {
                 </p>
             </div>
 
-            <p className="col-start-2 mt-1 whitespace-nowrap text-[11px] tabular-nums text-slate-500 md:col-start-auto md:mt-0.5 md:text-right">
-                {alert.timestamp ? formatDateTime(alert.timestamp) : "—"}
+            {/* The vehicle's last reported message (or GPS fix, or the harsh event's time), not when the condition began */}
+            <p className="col-start-2 mt-1 whitespace-nowrap text-[11px] tabular-nums text-slate-500 md:col-start-auto md:mt-0.5 md:text-right"
+               title={alert.alert_type === "HARSH_DRIVING" ? "Event time" : "Vehicle's last reported message"}>
+                {alert.timestamp ? `${alert.alert_type === "HARSH_DRIVING" ? "" : "Last reported "}${formatDateTime(alert.timestamp)}` : "—"}
             </p>
         </li>
     )
@@ -177,10 +179,17 @@ export default function FleetAlerts() {
                 subtitle="Battery, connectivity and sensor threshold events"
                 onRefresh={refresh}
                 loading={loading}
-                lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
+                lastUpdated={data?.generated_at ? formatUAETime(data.generated_at) : (lastUpdated ? formatUAETime(lastUpdated) : null)}
+                lastUpdatedLabel={data?.generated_at ? "Data as of" : "Updated"}
             />
 
             <div className="space-y-4">
+                {data?.safety_partial && (
+                    <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        Partial: harsh-driving alerts could not be checked for {data.safety_unavailable_vehicles?.length || "some"} vehicle(s)
+                        {data.safety_unavailable_vehicles?.length ? ` (${data.safety_unavailable_vehicles.slice(0, 5).join(", ")}${data.safety_unavailable_vehicles.length > 5 ? "…" : ""})` : ""}.
+                    </p>
+                )}
                 {/* Severity counts double as the severity filter */}
                 <KpiStrip label="Alert severity filter" className="grid-cols-2 md:grid-cols-4">
                     <KpiCard

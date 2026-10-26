@@ -27,6 +27,7 @@ import { LocationName } from "../utils/reverseGeocode"
 
 import { formatUAEDateTime, formatUAETime } from "../utils/datetime"
 import { partialEventsNote } from "../utils/knownTotals"
+import { groupIdsOf } from "../utils/fleetRules"
 import { RANGE_PRESETS, resolvePreset, toUaeInputValue, validateRange } from "../utils/dateRange"
 
 // ─── Utilities ───────────────────────────────────────────────
@@ -225,14 +226,15 @@ export default function IdleAnalytics() {
         : null
     const drawerVehicleWithLive = useMemo(() => {
         if (!drawerVehicle || !drawerVehicleRow) return drawerVehicle
-        const { status, idle_start, idle_duration } = drawerVehicleRow
-        return { ...drawerVehicle, status, idle_start, idle_duration }
+        const { status, idle_start, idle_duration, idle_duration_status } = drawerVehicleRow
+        return { ...drawerVehicle, status, idle_start, idle_duration, idle_duration_status }
     }, [drawerVehicle, drawerVehicleRow])
     const drawerEventsComplete = drawerVehicleRow ? drawerVehicleRow.idle_events !== null : analytics?.events_complete !== false
 
     const vehicleOptions = useMemo(() => {
         if (!byVehicle || byVehicle.length === 0) return []
-        return byVehicle.filter((v) => !filterGroupId || String(v.group_id) === String(filterGroupId))
+        // Every group the vehicle belongs to, not only its primary group (as the backend group filter does)
+        return byVehicle.filter((v) => !filterGroupId || groupIdsOf(v).includes(String(filterGroupId)))
     }, [byVehicle, filterGroupId])
 
     const pageResetKey = JSON.stringify([drillVehicleId, filterVehicleId, filterGroupId, searchText, sortBy, sortDir, rangePreset, rangeInputs])
@@ -351,7 +353,8 @@ export default function IdleAnalytics() {
     const selectedGroupData = useMemo(() => {
         if (!selectedGroupId) return null
         const gData = byGroup.find((g) => g.group_id === selectedGroupId)
-        const gVehicles = byVehicle.filter((v) => v.group_id === selectedGroupId)
+        // The group's members (group totals are group-membership totals, so a multi-group vehicle appears in each)
+        const gVehicles = byVehicle.filter((v) => groupIdsOf(v).includes(String(selectedGroupId)))
         return { ...gData, vehicles: gVehicles }
     }, [selectedGroupId, byGroup, byVehicle])
 
@@ -609,7 +612,7 @@ export default function IdleAnalytics() {
                                         {kpis.currently_idling_vehicles ?? 0}
                                     </span>
                                     <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium">
-                                        {kpis.idling_fleet_ratio != null ? `${kpis.idling_fleet_ratio}% of active fleet` : "Live status"}
+                                        {kpis.idling_fleet_ratio != null ? `${kpis.idling_fleet_ratio}% of fleet` : "Live status"}
                                     </span>
                                 </dd>
                             </div>
@@ -688,7 +691,7 @@ export default function IdleAnalytics() {
                         {byGroup.length > 0 && (
                             <SectionCard
                                 title="Customer Groups"
-                                subtitle="Group-level accumulated idle time and fleet size · Select a group to drill down into its vehicles"
+                                subtitle="Group-membership totals (a vehicle in several groups counts in each) · Select a group to drill down into its vehicles"
                                 flush
                                 actions={
                                     selectedGroupId ? (
@@ -856,7 +859,7 @@ export default function IdleAnalytics() {
                             <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                 <AnalyticsChart
                                     title="Idle by Customer Group"
-                                    subtitle="Distribution of idle minutes across groups"
+                                    subtitle="Idle minutes per group membership; groups overlap, so they do not add up to the fleet total"
                                     data={groupChartData}
                                     dataKey="value"
                                     nameKey="label"
@@ -1088,7 +1091,7 @@ export default function IdleAnalytics() {
                         {byLocation.length > 0 && (
                             <SectionCard
                                 title="Location Hotspots"
-                                subtitle="Ranked geographic locations with recurring idle accumulation"
+                                subtitle={eventsNote ? `Ranked idle locations · ${eventsNote}` : "Ranked geographic locations with recurring idle accumulation"}
                                 flush
                                 actions={
                                     <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold tabular-nums text-slate-700">

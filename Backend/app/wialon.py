@@ -219,6 +219,23 @@ HISTORY_PAGE_LIMIT = 50000
 HISTORY_MAX_REQUESTS = 200
 
 
+class HistoryMessages(list):
+    """
+    The merged message list of get_vehicle_history (a plain list for every existing caller). `truncated` is True when
+    the load stopped before the whole range was read (request cap, a full page without timestamps, or more messages in
+    one second than a page holds): the list is then a lower bound and callers must report it as partial.
+    """
+
+    def __init__(self, messages=(), truncated=False):
+        super().__init__(messages)
+        self.truncated = truncated
+
+
+def history_truncated(messages):
+    """True when `messages` came from get_vehicle_history and is known to be incomplete."""
+    return bool(getattr(messages, "truncated", False))
+
+
 def get_vehicle_history(
     sid,
     vehicle_id,
@@ -244,7 +261,7 @@ def get_vehicle_history(
         )
 
     if current_time < time_from:
-        return []
+        return HistoryMessages()
 
     chunk_seconds = max(3600, get_env_int("WIALON_HISTORY_CHUNK_SECONDS", HISTORY_CHUNK_SECONDS))
     page_limit = max(100, get_env_int("WIALON_HISTORY_PAGE_LIMIT", HISTORY_PAGE_LIMIT))
@@ -252,6 +269,7 @@ def get_vehicle_history(
 
     collected = []
     requests_made = 0
+    truncated = False
     window_start = time_from
 
     while window_start <= current_time:
@@ -264,7 +282,7 @@ def get_vehicle_history(
                     "Wialon history for vehicle %s stopped after %s requests at t=%s; range %s-%s may be incomplete",
                     vehicle_id, requests_made, page_from, time_from, current_time,
                 )
-                return _merge_history_messages(collected)
+                return HistoryMessages(_merge_history_messages(collected), truncated=True)
 
             page = _load_history_page(sid, vehicle_id, page_from, window_end, page_limit)
             requests_made += 1
@@ -283,6 +301,7 @@ def get_vehicle_history(
                     "Wialon history for vehicle %s returned a full page without timestamps; window %s-%s may be incomplete",
                     vehicle_id, page_from, window_end,
                 )
+                truncated = True
                 break
             if last_t <= page_from:
                 # A full page inside one second; step past it to guarantee progress.
@@ -290,13 +309,14 @@ def get_vehicle_history(
                     "Wialon history for vehicle %s has >= %s messages at t=%s; some may be missing",
                     vehicle_id, page_limit, page_from,
                 )
+                truncated = True
                 page_from += 1
             else:
                 page_from = last_t
 
         window_start = window_end + 1
 
-    return _merge_history_messages(collected)
+    return HistoryMessages(_merge_history_messages(collected), truncated=truncated)
 
 
 def _load_history_page(sid, vehicle_id, time_from, time_to, load_count):

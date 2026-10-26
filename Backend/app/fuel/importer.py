@@ -52,6 +52,12 @@ SUMMARY_ROW_KEYWORDS: Set[str] = {
     "opening balance", "net total", "gross total"
 }
 
+# The keyword alone, optionally followed only by a currency/unit word and/or digits ("total", "grand total aed",
+# "sub total 12"); "total al quoz" (a station) is not a summary label.
+_SUMMARY_LABEL_RE = re.compile(r"^(grand\s*total|sub\s*total|report\s*total|net\s*total|gross\s*total|total|summary|"
+                               r"closing\s*bal(ance)?|opening\s*bal(ance)?)"
+                               r"(\s+(aed|amount|value|litres|liters|ltr|ltrs|qty|quantity))?[\s\d]*$")
+
 MAX_IMPORT_WARNINGS = 50
 MAX_DETAIL_ROWS = 20
 # .xlsx is a zip: a few MB upload can expand to GBs in openpyxl (read_only=False). Checked before loading.
@@ -196,10 +202,59 @@ def parse_numeric_value(val: Any) -> Tuple[Optional[float], Optional[str]]:
     return number, None
 
 
-def parse_date_value(val: Any) -> Tuple[Optional[str], Optional[str]]:
+_DMY_TEXT_RE = re.compile(r"^\s*(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})")
+
+DATE_ORDER_DMY = "dmy"
+DATE_ORDER_MDY = "mdy"
+DATE_ORDER_CONFLICT = "conflict"
+
+
+def infer_date_order(values: List[Any]) -> Optional[str]:
+    """
+    Day/month order of a statement's text dates, decided from the whole column rather than row by row:
+    'dmy' when some value can only be DD/MM (first part > 12), 'mdy' when some value can only be MM/DD (second part
+    > 12), 'conflict' when both occur, None when the column gives no evidence (every text date is ambiguous or none is
+    text). Native Excel dates and ISO text carry no ambiguity and are ignored.
+    """
+    dmy = mdy = False
+    for val in values:
+        if val is None or isinstance(val, (datetime, date, int, float)):
+            continue
+        m = _DMY_TEXT_RE.match(str(val))
+        if not m:
+            continue
+        part1, part2 = int(m.group(1)), int(m.group(2))
+        if part1 > 12 and part2 <= 12:
+            dmy = True
+        elif part2 > 12 and part1 <= 12:
+            mdy = True
+    if dmy and mdy:
+        return DATE_ORDER_CONFLICT
+    return DATE_ORDER_DMY if dmy else DATE_ORDER_MDY if mdy else None
+
+
+DATE_ORDER_CONFLICT_WARNING = (
+    "The transaction date column contains both DD/MM and MM/DD dates; dates whose day and month are both 12 or less "
+    "cannot be read and are reported as failed rows."
+)
+
+
+def statement_date_order(rows: List[Any], canonical_to_col_idx: Dict[str, int]) -> Optional[str]:
+    """infer_date_order over the mapped transaction_date column of the statement rows (None when unmapped)."""
+    idx = canonical_to_col_idx.get("transaction_date")
+    if idx is None:
+        return None
+    return infer_date_order([row[idx] if row and len(row) > idx else None for row in rows])
+
+
+def parse_date_value(val: Any, order: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
     """
     Safely parse date/datetime values from Excel cells into ISO formatted strings.
     Returns: (iso_date_string_or_None, warning_if_any)
+
+    `order` is the column's day/month order from infer_date_order. An ambiguous text date (both parts <= 12) follows
+    it ('mdy' reads MM/DD); without it the UAE default DD/MM applies with a warning, as before. Under 'conflict' the
+    column contains both orders, so an ambiguous value cannot be read and is rejected (None) with a warning.
     """
     if val is None:
         return None, None
@@ -272,8 +327,25 @@ def parse_date_value(val: Any) -> Tuple[Optional[str], Optional[str]]:
                 return dt.strftime("%Y-%m-%dT%H:%M:%S") if (hh or mm or ss) else dt.strftime("%Y-%m-%d"), None
             except ValueError:
                 return None, f"Invalid date values in '{str_val}'"
+        elif order == DATE_ORDER_CONFLICT:
+            return None, (f"Ambiguous date '{str_val}' rejected: this column contains both DD/MM and MM/DD dates, "
+                          "so the day and month cannot be told apart")
+        elif order == DATE_ORDER_MDY:
+            # Both <= 12, but other dates in this column can only be MM/DD
+            try:
+                dt = datetime(year, part1, part2, hh, mm, ss)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S") if (hh or mm or ss) else dt.strftime("%Y-%m-%d"), None
+            except ValueError:
+                return None, f"Invalid date values in '{str_val}'"
+        elif order == DATE_ORDER_DMY:
+            # Both <= 12, but other dates in this column can only be DD/MM
+            try:
+                dt = datetime(year, part2, part1, hh, mm, ss)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S") if (hh or mm or ss) else dt.strftime("%Y-%m-%d"), None
+            except ValueError:
+                return None, f"Invalid date values in '{str_val}'"
         else:
-            # Both <= 12: default to DD/MM/YYYY (standard in UAE/Middle East) with a warning note
+            # Both <= 12 and no evidence in the column: default to DD/MM/YYYY (standard in UAE/Middle East) with a warning
             try:
                 dt = datetime(year, part2, part1, hh, mm, ss)
                 res_str = dt.strftime("%Y-%m-%dT%H:%M:%S") if (hh or mm or ss) else dt.strftime("%Y-%m-%d")
@@ -312,10 +384,13 @@ def is_summary_or_blank_row(row_values: List[Any], header_count: int) -> Tuple[b
         return True, "blank row"
 
     # Check if first 3 populated values match any summary row keyword
+    # A summary label is a cell that IS a keyword, optionally with a currency/unit word or a number ("Total",
+    # "Grand Total:", "Sub-total AED"). A keyword inside other text ("TotalEnergies", "Total Al Quoz", "Monthly total")
+    # is data: such a row is validated as fuel (and reported as invalid if it is not), never silently dropped.
     first_few_strs = [str(v).strip().lower() for v in non_empty[:3]]
     for s in first_few_strs:
         norm_s = normalize_header(s)
-        if norm_s in SUMMARY_ROW_KEYWORDS or any(kw in norm_s for kw in ["total", "grand total", "sub total", "summary", "closing bal"]):
+        if norm_s in SUMMARY_ROW_KEYWORDS or _SUMMARY_LABEL_RE.match(norm_s):
             return True, f"summary row: '{s}'"
 
     # If row only contains 1 populated value across a table with 4+ columns
@@ -349,7 +424,7 @@ def column_indexes(raw_headers: List[str], mapping: Dict[str, Optional[str]]) ->
 
 
 def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_idx: int,
-                           total_cols: int) -> Dict[str, Any]:
+                           total_cols: int, date_order: Optional[str] = None) -> Dict[str, Any]:
     """
     Classify and validate one statement row. The single rule set shared by the import preview and the import, so
     both count the same rows the same way. Returns a dict:
@@ -386,9 +461,9 @@ def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_i
         return done("non_fuel", f"Non-fuel entry (type '{str(raw_type).strip()}', no litres)")
 
     # Validate required fields
-    parsed_dt, date_err = parse_date_value(raw_date)
+    parsed_dt, date_err = parse_date_value(raw_date, date_order)
     if not parsed_dt:
-        return done("failed", f"Invalid or missing transaction date ('{raw_date}')")
+        return done("failed", date_err or f"Invalid or missing transaction date ('{raw_date}')")
     if date_err:
         res["date_ambiguous"] = True
         res["warnings"].append(f"Row {row_idx}: {date_err}")
@@ -663,12 +738,15 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
     sample_rows: List[Dict[str, Any]] = []
 
     all_rows = read_table_rows(sheet, header_row_idx)
+    date_order = statement_date_order(all_rows, canonical_to_col_idx)
+    if date_order == DATE_ORDER_CONFLICT:
+        validation_warnings.append(DATE_ORDER_CONFLICT_WARNING)
 
     total_cols = len(raw_headers)
     for offset, row in enumerate(all_rows, start=1):
         row_idx = header_row_idx + offset
         rows_found += 1
-        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols)
+        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order)
         if res["kind"] == "ignored":
             rows_ignored += 1
             continue
@@ -704,7 +782,7 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
                     continue
 
                 if canonical == "transaction_date":
-                    parsed_dt, warn = parse_date_value(cell_value)
+                    parsed_dt, warn = parse_date_value(cell_value, date_order)
                     sample_record[canonical] = parsed_dt
                     if warn and len(validation_warnings) < 10:
                         validation_warnings.append(f"Row {row_idx}: {warn}")
@@ -1015,6 +1093,7 @@ def _execute_fuel_import_locked(
 
     # 3. Read table rows
     all_rows = read_table_rows(sheet, header_row_idx)
+    date_order = statement_date_order(all_rows, canonical_to_col_idx)
 
     total_rows_found = len(all_rows)
     total_cols = len(raw_headers)
@@ -1034,6 +1113,9 @@ def _execute_fuel_import_locked(
         if len(warnings) < MAX_IMPORT_WARNINGS:
             warnings.append(message)
 
+    if date_order == DATE_ORDER_CONFLICT:
+        add_warning(DATE_ORDER_CONFLICT_WARNING)
+
     def fail_row(source_row: int, reason: str) -> None:
         nonlocal rows_failed
         rows_failed += 1
@@ -1041,7 +1123,7 @@ def _execute_fuel_import_locked(
 
     for offset, row in enumerate(all_rows, start=1):
         row_idx = header_row_idx + offset
-        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols)
+        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order)
         kind = res["kind"]
         if kind == "ignored":
             rows_ignored += 1

@@ -3,7 +3,7 @@
 import { test, beforeEach } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { clearClientCache, deduplicatedFetch, getFromClientCache, setClientCache } from "./requestCache.js"
+import { MAX_CLIENT_CACHE_ENTRIES, clearClientCache, clientCacheSize, deduplicatedFetch, getFromClientCache, setClientCache } from "./requestCache.js"
 
 function deferred() {
     let resolve, reject
@@ -137,4 +137,16 @@ test("dashboard mileage: concurrent callers still share one in-flight request wi
     assert.deepEqual(await Promise.all([first, second]), [{ total_km: 10 }, { total_km: 10 }])
     assert.equal(calls, 1)
     assert.equal(getFromClientCache(MILEAGE_URL.today, 30000), null, "nothing is kept in the client cache")
+})
+
+test("the client cache is bounded: least recently used entries are evicted", () => {
+    clearClientCache()
+    for (let i = 0; i < MAX_CLIENT_CACHE_ENTRIES + 25; i += 1) setClientCache(`/api/x?i=${i}`, { i })
+    assert.equal(clientCacheSize(), MAX_CLIENT_CACHE_ENTRIES)
+    assert.equal(getFromClientCache("/api/x?i=0", 60000), null, "oldest entry evicted")
+    // Reading an entry makes it recent, so it survives the next eviction
+    assert.deepEqual(getFromClientCache("/api/x?i=25", 60000), { i: 25 })
+    setClientCache("/api/x?new", { n: 1 })
+    assert.deepEqual(getFromClientCache("/api/x?i=25", 60000), { i: 25 })
+    assert.equal(getFromClientCache("/api/x?i=26", 60000), null)
 })

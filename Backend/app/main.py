@@ -18,9 +18,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.auth import authenticate_access_token
 from app.performance_diagnostics import log_cache_state, log_data_window, new_trace_id, request_trace_id, timed_calculation
 from app.utils.status_config import CONN_DELAYED_SECONDS
+from app.utils.rate_limit import enforce_rate_limit
 from app.utils.ttl_cache import TTLCache
 
-from app.wialon import EVENTS_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet
+from app.wialon import EVENTS_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
@@ -164,7 +165,14 @@ async def require_supabase_auth(request: Request, call_next):
         logging.debug("PERF request start request_id=%s method=%s path=%s", trace_id, request.method, request.url.path)
     response = None
     try:
-        response = await _authenticate_and_dispatch(request, call_next)
+        try:
+            response = await _authenticate_and_dispatch(request, call_next)
+        except Exception:
+            # An exception no route handled would otherwise reach Starlette's ServerErrorMiddleware, outside CORS:
+            # the browser would see a CORS failure instead of the error. Answer here (inside CORS) with a generic
+            # body; the exception text and traceback stay in the server log.
+            logging.exception("Unhandled error on %s %s", request.method, request.url.path)
+            response = JSONResponse(status_code=500, content={"detail": "Internal server error"})
         return response
     finally:
         if tracked_path:
@@ -224,6 +232,11 @@ def _internal_error(endpoint: str) -> HTTPException:
 # than Wialon report rows, so it gets the tighter limit; the UI's longest preset is 720 h (30 days).
 MAX_HISTORY_HOURS = 31 * 24
 MAX_REPORT_HOURS = 366 * 24
+# Safety analytics loads every unit's raw message history for the window: bounded to 7 days (the UI default, the
+# AI tool's maximum and the longest window any page requests)
+MAX_SAFETY_HOURS = 7 * 24
+# Roles allowed to run the full Wialon fleet audit (raw parameters, sensor configuration, device identifiers)
+AUDIT_ROLES = frozenset({"admin"})
 # Rolling timeframe aliases accepted by /api/dashboard/summary (all within MAX_HISTORY_HOURS)
 SUMMARY_ROLLING_TIMEFRAME_HOURS = {
     "24h": 24, "24_hours": 24, "last_24_hours": 24,
@@ -365,7 +378,11 @@ def get_vehicle_details(vehicle_id: int):
 
 @app.get("/api/wialon/audit")
 @timed_calculation("/api/wialon/audit")
-def get_wialon_audit():
+def get_wialon_audit(request: Request):
+    user = getattr(request.state, "user", None)
+    if not isinstance(user, dict) or user.get("role") not in AUDIT_ROLES:
+        raise HTTPException(status_code=403, detail="Your role does not permit the Wialon fleet audit.")
+    enforce_rate_limit(request, "heavy")
     try:
         sid = login()
         audit_data = audit_wialon_fleet(sid)
@@ -514,6 +531,8 @@ def get_vehicle_history_data(
         "from_time": from_time,
         "to_time": to_time,
         "point_count": len(telemetry),
+        # True when Wialon history could not be read completely: the points are a lower bound
+        "partial": history_truncated(raw_messages),
         "telemetry": telemetry
     }
 
@@ -594,6 +613,7 @@ def get_vehicle_idle(
             "average_idle_seconds": round(avg_idle_sec, 2) if events_complete else None
         },
         "events_complete": events_complete,
+        "event_location_unverified": bool(rep_res.get("event_location_unverified")),
         "periods": idle_periods,
         "incomplete_fields": incomplete_fields,
         "column_warnings": column_warnings,
@@ -683,6 +703,8 @@ def get_vehicle_efficiency(vehicle_id: int, hours: Annotated[int, Query(ge=1, le
     return {
         "vehicle_id": vehicle_id,
         "hours": hours,
+        # True when Wialon history could not be read completely: every figure below is a lower bound
+        "partial": history_truncated(raw_messages),
         "efficiency": {
             "distance_km": round(total_distance_km, 2),
             "driving_time_minutes": round(
@@ -799,7 +821,7 @@ def get_drivers():
 
 
 @app.get("/api/dashboard/summary")
-def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS)] = 24, timeframe: str = None):
+def get_dashboard_summary(request: Request = None, hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS)] = 24, timeframe: str = None):
     """
     Authoritative single-source-of-truth dashboard summary.
     Reconciles live fleet state with validated historical analytics.
@@ -821,6 +843,7 @@ def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
     hit = cached(cache_key, ttl_seconds=60)
     if hit:
         return hit
+    enforce_rate_limit(request, "heavy")
 
     try:
         from app.fleet_analytics import (
@@ -844,7 +867,10 @@ def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
 
         # Authoritative analytics
         trips_data = get_trips_mileage_analytics(hours=hours)
-        safety_data = get_safety_analytics(hours=hours)
+        # Safety loads raw history for every unit: only computed for windows up to MAX_SAFETY_HOURS; longer windows
+        # report the count as unknown (null) instead of loading weeks of messages per unit
+        safety_supported = hours <= MAX_SAFETY_HOURS
+        safety_data = get_safety_analytics(hours=hours) if safety_supported else None
         util_data = get_fleet_utilization_analytics(hours=hours)
 
         result = {
@@ -862,12 +888,15 @@ def get_dashboard_summary(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
                 "total_idle_minutes": round(util_data["total_idle_hours"] * 60, 1) if util_data.get("total_idle_hours") is not None else None,
                 "total_idle_partial": bool(util_data.get("partial")),
                 "total_trips": trips_data.get("summary", {}).get("total_trips", 0),
-                "total_safety_events": safety_data.get("summary", {}).get("total_events", 0)
+                "total_safety_events": safety_data.get("summary", {}).get("total_events", 0) if safety_data else None,
+                "total_safety_partial": bool(safety_data.get("partial")) if safety_data else False,
+                "safety_window_supported": safety_supported,
             }
         }
 
         # A partial total is not cached; the next request re-reads the reports
-        if not (result["summary"]["total_distance_partial"] or result["summary"]["total_idle_partial"]):
+        if not (result["summary"]["total_distance_partial"] or result["summary"]["total_idle_partial"]
+                or result["summary"]["total_safety_partial"]):
             set_cache(cache_key, result)
         return result
     except Exception as e:
@@ -1217,7 +1246,7 @@ def get_dashboard_mileage(
 
 
 @app.get("/api/dashboard/trends")
-def get_dashboard_trends(hours: int = 24):
+def get_dashboard_trends(request: Request = None, hours: int = 24):
     if hours < 1:
         hours = 1
 
@@ -1228,6 +1257,7 @@ def get_dashboard_trends(hours: int = 24):
     hit = cached(cache_key, ttl_seconds=600)  # 10 min cache
     if hit:
         return hit
+    enforce_rate_limit(request, "heavy")
 
     sid = login()
 
@@ -1256,6 +1286,9 @@ def get_dashboard_trends(hours: int = 24):
             "stopped_seconds": 0
         }
 
+    failed_vehicles = []
+    truncated_vehicles = []
+
     def _fetch_trend_telemetry(v):
         vid = v.get("id")
         if not vid:
@@ -1267,6 +1300,8 @@ def get_dashboard_trends(hours: int = 24):
                 vid,
                 hours=hours
             )
+            if history_truncated(messages):
+                truncated_vehicles.append(v.get("nm", f"Vehicle {vid}"))
 
             telemetry = normalize_wialon_messages(
                 messages,
@@ -1281,8 +1316,10 @@ def get_dashboard_trends(hours: int = 24):
                 key=lambda point: point.get("timestamp", 0)
             )
         except Exception as exc:
+            # One unit's failure leaves it out of the trend (listed, result partial and not cached)
             logging.warning("Trend calculation failed for vehicle %s: %s", vid, exc)
-            raise
+            failed_vehicles.append(v.get("nm", f"Vehicle {vid}"))
+            return []
 
     with ThreadPoolExecutor(max_workers=4) as executor:
         all_telemetries = list(executor.map(_fetch_trend_telemetry, vehicles))
@@ -1391,13 +1428,18 @@ def get_dashboard_trends(hours: int = 24):
             )
         })
 
+    partial = bool(failed_vehicles or truncated_vehicles)
     result = {
         "hours": hours,
         "interval": "hour",
-        "points": points
+        "points": points,
+        # The points leave out the listed units (history failed) or cover only part of their history (truncated)
+        "partial": partial,
+        "failed_vehicles": sorted(failed_vehicles),
+        "truncated_vehicles": sorted(truncated_vehicles),
     }
-
-    set_cache(cache_key, result)
+    if not partial:
+        set_cache(cache_key, result)
     return result
 
 
@@ -1463,6 +1505,7 @@ def _build_idle_trend(events, eff_from, eff_to):
 @app.get("/api/idle/fleet-analytics")
 @timed_calculation("/api/idle/fleet-analytics")
 def get_fleet_idle_analytics(
+    request: Request = None,
     hours: Annotated[int, Query(ge=1, le=MAX_REPORT_HOURS)] = 24,
     timeframe: str = None,
     from_date: str = None,
@@ -1505,6 +1548,10 @@ def get_fleet_idle_analytics(
         window_spec = f"tf-{tf}" if tf in ROLLING_TIMEFRAMES else f"tf-{tf}-{eff_from}"
     else:
         window_spec = f"hours-{hours or 24}"
+
+    if (refresh or skip_cache) and request is not None:
+        # A forced refresh bypasses every cache and re-runs the fleet report: bounded per user
+        enforce_rate_limit(request, "heavy")
 
     events_tag = "full" if include_events else "summary"
     cache_key = f"fleet-idle-v10-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
@@ -1551,7 +1598,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         for uid in u_ids:
             if uid not in unit_groups_map:
                 unit_groups_map[uid] = []
-            if name not in unit_groups_map[uid]:
+            if not any(g["id"] == gid for g in unit_groups_map[uid]):
                 unit_groups_map[uid].append({"id": gid, "name": name})
 
     # Vehicles & Live Calculations
@@ -1654,6 +1701,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         primary_grp = v_grps[0]
         live_st = v.get("status", "STOPPED")
         v_idle_dur = v.get("idle_duration", 0)
+        v_idle_dur_status = v.get("idle_duration_status", "known")
         v_idle_st = v.get("idle_start")
         v_lat = v.get("latitude")
         v_lng = v.get("longitude")
@@ -1719,6 +1767,9 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
             "registration_plate": v_reg_plate,
             "group_id": primary_grp["id"],
             "group_name": primary_grp["name"],
+            # Every group the vehicle belongs to (group_id/group_name above stay its primary group)
+            "group_ids": [g["id"] for g in v_grps],
+            "group_names": [g["name"] for g in v_grps],
             "total_idle_seconds": v_idle_sec,
             "idle_minutes": round(v_idle_sec / 60.0, 2) if v_idle_sec is not None else None,
             "idle_events": v_event_count,
@@ -1730,6 +1781,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
             "status": live_st,
             "idle_start": v_idle_st if live_st == "IDLING" else None,
             "idle_duration": v_idle_dur,
+            "idle_duration_status": v_idle_dur_status,
         })
 
         if live_st == "IDLING":
@@ -1737,9 +1789,12 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         if v_idle_sec:
             total_idle_vehicles += 1
 
-        # Aggregate by group (a group containing an unattributable unit has an unknown total)
-        gid = primary_grp["id"]
-        if gid in group_agg:
+        # Aggregate by group membership: the vehicle counts in every group it belongs to (as vehicle_count does), so
+        # group totals do not add up to the fleet total. A group containing an unattributable unit has an unknown total.
+        for grp in v_grps:
+            gid = grp["id"]
+            if gid not in group_agg:
+                continue
             if v_idle_sec is None or group_agg[gid]["total_idle_seconds"] is None:
                 group_agg[gid]["total_idle_seconds"] = None
             else:
@@ -1913,6 +1968,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
             "idling_fleet_ratio": round((currently_idling / total_fleet_vehicles) * 100, 1) if total_fleet_vehicles > 0 else 0
         },
         "by_group": by_group,
+        # by_group totals are group-membership totals: a vehicle in several groups counts in each
+        "by_group_basis": "group_membership",
         "by_vehicle": by_vehicle,
         "by_location": by_location[:10],
         "trend": trend_points,
@@ -1920,6 +1977,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         # by_location, trend and events are built from discrete events: false when any vehicle's events were not
         # requested or could not be read completely (see by_vehicle idle_events None), so those sections are partial
         "events_complete": events_complete,
+        # True when some events' address/position could not be read from a verified location cell
+        "event_location_unverified": bool(rep_res.get("event_location_unverified")),
         "groups": valid_groups,
         "ambiguous_vehicle_names": ambiguous_names,
     }
@@ -1951,13 +2010,15 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
 
 @app.post("/api/ai/chat")
-async def ai_chat(request: ChatRequest):
+async def ai_chat(request: ChatRequest, http_request: Request):
     """
     Groq-powered Fleet AI chat endpoint.
     Requires the Supabase bearer token enforced by the API authentication middleware.
     """
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
+    # Each chat runs up to 6 model steps and 12 Wialon/Supabase tool calls: bounded per user
+    enforce_rate_limit(http_request, "ai_chat")
 
     from app.ai.assistant import validate_chat_messages
     try:
@@ -2063,8 +2124,15 @@ def api_fleet_trips(
 
 @app.get("/api/fleet/safety")
 @timed_calculation("/api/fleet/safety")
-def api_fleet_safety(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS)] = 168):
+def api_fleet_safety(request: Request = None, hours: Annotated[int, Query(ge=1)] = 168):
     """Safety analytics: harsh braking, harsh acceleration, harsh cornering."""
+    if hours > MAX_SAFETY_HOURS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Safety analytics supports at most {MAX_SAFETY_HOURS} hours ({MAX_SAFETY_HOURS // 24} days); "
+                   f"{hours} hours were requested.",
+        )
+    enforce_rate_limit(request, "heavy")
     try:
         return get_safety_analytics(hours=hours)
     except Exception as e:
