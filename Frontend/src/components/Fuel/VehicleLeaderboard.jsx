@@ -54,7 +54,7 @@ export default function VehicleLeaderboard({
     }
 
     return (
-        <section aria-labelledby="leaderboard-heading" className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <section aria-labelledby="leaderboard-heading" className="overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             {/* ─── Leaderboard Header & Controls ─────────────────────────── */}
             <div className="flex flex-col gap-3 border-b border-slate-200 px-4 py-3.5 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -76,7 +76,7 @@ export default function VehicleLeaderboard({
                     <div role="group" aria-label="Table view mode" className="inline-flex rounded-md bg-slate-100 p-0.5 text-xs font-medium">
                         {[
                             { id: "all", label: "Complete" },
-                            { id: "efficiency", label: "Efficiency" },
+                            { id: "efficiency", label: "Efficiency Focus" },
                             { id: "idling", label: "Driving vs. Idling" },
                         ].map((tab) => (
                             <button
@@ -172,7 +172,8 @@ export default function VehicleLeaderboard({
                             <th scope="col" className="px-3 py-2.5 text-right font-medium">Distance</th>
                             <th scope="col" className="px-3 py-2.5 text-right font-medium">Fuel Purchased</th>
                             <th scope="col" className="px-3 py-2.5 text-right font-medium min-w-[130px]">
-                                Efficiency (km/L)
+                                <span>Efficiency (km/L)</span>
+                                <span className="block text-[10px] text-slate-400 font-normal">Purchase-derived</span>
                             </th>
                             {(viewMode === "all" || viewMode === "idling") && (
                                 <>
@@ -248,7 +249,11 @@ export default function VehicleLeaderboard({
                                 const sub = "block text-[11px] text-slate-400 font-normal"
 
                                 return (
-                                    <tr key={v.vehicle_identifier} className="transition-colors hover:bg-slate-50/70">
+                                    <tr
+                                        key={v.vehicle_identifier}
+                                        onClick={() => onSelectVehicle?.(v.vehicle_identifier)}
+                                        className="transition-colors hover:bg-slate-50/70 cursor-pointer"
+                                    >
                                         {/* Rank # */}
                                         <td className="px-3 py-2.5 text-center font-mono text-[11px] text-slate-400 tabular-nums">
                                             {isTopRanked ? (

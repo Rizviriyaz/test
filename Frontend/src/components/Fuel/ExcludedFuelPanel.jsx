@@ -92,7 +92,7 @@ export default function ExcludedFuelPanel() {
     const excludedPct = summary.allCount > 0 ? ((summary.count / summary.allCount) * 100).toFixed(1) : 0
 
     return (
-        <section aria-labelledby="data-quality-heading" className="mb-4 rounded-lg border border-slate-200 bg-white p-3.5 shadow-xs">
+        <section aria-labelledby="data-quality-heading" className="mb-4 rounded-xl border border-slate-200/70 bg-white p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             {/* Header & High-level Summary */}
             <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2.5">

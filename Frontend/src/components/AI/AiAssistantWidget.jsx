@@ -347,7 +347,7 @@ export default function AiAssistantWidget() {
     }
 
     return (
-        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-[9999] font-sans antialiased flex flex-col items-end">
+        <div className="fixed bottom-4 right-4 sm:bottom-6 sm:right-6 z-[9999] font-sans antialiased flex flex-col items-end pointer-events-none">
             {/* ─── CHAT PANEL WITH SMOOTH UX ANIMATIONS ────────────────────── */}
             {isMounted && (
                 <div
@@ -355,7 +355,7 @@ export default function AiAssistantWidget() {
                     onAnimationEnd={handleAnimationEnd}
                     role="dialog"
                     aria-label="Fleet Operations Copilot"
-                    className={`mb-3 w-[calc(100vw-2rem)] sm:w-[420px] max-w-[420px] h-[560px] max-h-[calc(100dvh-6rem)] bg-white border border-slate-200/90 rounded-2xl shadow-[0_10px_35px_-5px_rgba(15,23,42,0.14),0_20px_48px_-10px_rgba(15,23,42,0.18)] flex flex-col overflow-hidden origin-bottom-right ${
+                    className={`pointer-events-auto mb-3 w-[calc(100vw-2rem)] sm:w-[420px] max-w-[420px] h-[560px] max-h-[calc(100dvh-6rem)] bg-white border border-slate-200/90 rounded-2xl shadow-[0_10px_35px_-5px_rgba(15,23,42,0.14),0_20px_48px_-10px_rgba(15,23,42,0.18)] flex flex-col overflow-hidden origin-bottom-right ${
                         status === "entering"
                             ? "ai-assistant-entering"
                             : status === "closing"
@@ -525,7 +525,7 @@ export default function AiAssistantWidget() {
                 onClick={toggleOpen}
                 title={isOpenedOrOpening ? "Collapse assistant" : "Open Fleet AI Assistant"}
                 aria-label={isOpenedOrOpening ? "Collapse assistant" : "Open Fleet AI Assistant"}
-                className="relative w-12 h-12 rounded-full bg-brand hover:bg-brand-hover text-white shadow-lg hover:shadow-xl flex items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
+                className="pointer-events-auto relative w-12 h-12 rounded-full bg-brand hover:bg-brand-hover text-white shadow-lg hover:shadow-xl flex items-center justify-center transition-all duration-200 active:scale-95 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2"
             >
                 <Bot
                     className={`w-5 h-5 absolute transition-all duration-200 ease-out ${

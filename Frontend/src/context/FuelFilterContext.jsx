@@ -58,6 +58,14 @@ export function FuelFilterProvider({ children }) {
                 periodLabel: "Today",
             }
         }
+        if (period === "yesterday") {
+            const yesterdayStr = getUAEDateStr(-1)
+            return {
+                dateFrom: yesterdayStr,
+                dateTo: yesterdayStr,
+                periodLabel: "Yesterday",
+            }
+        }
         if (period === "7d") {
             const past7 = getUAEDateStr(-6)
             return {
@@ -88,7 +96,7 @@ export function FuelFilterProvider({ children }) {
         return {
             dateFrom: "",
             dateTo: "",
-            periodLabel: "All Available Data",
+            periodLabel: "All Time",
         }
     }, [period, customFrom, customTo])
 

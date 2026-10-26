@@ -108,7 +108,7 @@ export default function FuelTrendChart() {
     const margin = { top: 8, right: 8, left: -8, bottom: 0 }
 
     return (
-        <section className="mb-5 rounded-lg border border-slate-200 bg-white p-4">
+        <section className="mb-4 rounded-xl border border-slate-200/70 bg-white p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div className="min-w-0">
                     <h2 className="type-section-title text-slate-900">Fuel purchased & Wialon distance</h2>

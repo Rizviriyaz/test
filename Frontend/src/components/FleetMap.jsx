@@ -1,12 +1,12 @@
-import { useEffect, useMemo, useRef } from "react"
+import { useCallback, useEffect, useMemo, useRef } from "react"
 import {
     MapContainer,
     TileLayer,
     Marker,
-    Popup,
     useMap,
+    ZoomControl,
 } from "react-leaflet"
-import { ArrowUpRight } from "lucide-react"
+import { ArrowUpRight, Maximize2 } from "lucide-react"
 
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
@@ -34,7 +34,7 @@ function getMarkerIcon(status, selected = false) {
             <div style="position: relative; width: ${size}px; height: ${size}px; cursor: pointer;">
                 ${
                     selected
-                        ? `<div style="position: absolute; inset: -5px; border: 2px solid #33758F; border-radius: 9999px;"></div>`
+                        ? `<div style="position: absolute; inset: -6px; border: 2.5px solid #33758F; border-radius: 9999px; background: rgba(51, 117, 143, 0.18); box-shadow: 0 0 10px rgba(51, 117, 143, 0.45);"></div>`
                         : ""
                 }
                 <div
@@ -46,7 +46,7 @@ function getMarkerIcon(status, selected = false) {
                         border: ${border}px solid white;
                         border-radius: 9999px;
                         box-sizing: border-box;
-                        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.35);
+                        box-shadow: 0 2px 6px rgba(15, 23, 42, 0.35);
                     "
                 ></div>
             </div>
@@ -57,33 +57,83 @@ function getMarkerIcon(status, selected = false) {
     })
 }
 
-function SelectedVehicleFocus({ selectedVehicle }) {
+function SelectedVehicleFocus({ selectedVehicle, isPanelOpen = true, isDrawerOpen = false }) {
     const map = useMap()
-    const lastFocusedId = useRef(null)
+    const lastFocusRef = useRef({ id: null, panel: null, drawer: null })
+
+    const adjustViewport = useCallback((vehicle, isInitialSelection = false) => {
+        if (!vehicle || !isValidCoordinate(vehicle.latitude, vehicle.longitude)) return
+
+        const lat = Number(vehicle.latitude)
+        const lng = Number(vehicle.longitude)
+        const size = map.getSize()
+        const W = size.x
+        const H = size.y
+
+        if (W <= 0 || H <= 0) return
+
+        // Calculate padding from UI overlays
+        // Fleet Units panel: w-[320px] (mobile) or 340px (sm) + left-3/4 (12/16px) + gap
+        const isMobile = W < 640
+        const panelWidth = isMobile ? Math.min(320, W - 24) : Math.min(340, W - 32)
+        const drawerWidth = isMobile ? Math.min(340, W - 24) : Math.min(380, W - 32)
+
+        const paddingLeft = isPanelOpen ? panelWidth + 24 : 64
+        const paddingRight = isDrawerOpen ? drawerWidth + 24 : 24
+
+        const visibleWidth = W - paddingLeft - paddingRight
+
+        let targetCenterX = W / 2
+        let targetCenterY = H / 2
+
+        // Position vehicle in center of unobstructed space
+        if (visibleWidth >= 80) {
+            targetCenterX = paddingLeft + visibleWidth / 2
+        } else if (isDrawerOpen && !isPanelOpen) {
+            targetCenterX = Math.max(80, (W - paddingRight) / 2)
+        } else if (isPanelOpen && !isDrawerOpen) {
+            targetCenterX = Math.min(W - 80, paddingLeft + (W - paddingLeft) / 2)
+        } else {
+            targetCenterX = Math.max(60, W - paddingRight - 60)
+        }
+
+        const offsetX = targetCenterX - W / 2
+        const offsetY = targetCenterY - H / 2
+
+        const targetZoom = isInitialSelection ? Math.max(map.getZoom(), 15) : map.getZoom()
+        const targetPoint = map.project([lat, lng], targetZoom)
+        const centerPoint = L.point(targetPoint.x - offsetX, targetPoint.y - offsetY)
+        const centerLatLng = map.unproject(centerPoint, targetZoom)
+
+        map.flyTo(centerLatLng, targetZoom, {
+            duration: isInitialSelection ? 0.7 : 0.4,
+            easeLinearity: 0.25,
+        })
+    }, [map, isPanelOpen, isDrawerOpen])
 
     useEffect(() => {
-        if (!selectedVehicle) return
-        const vehicleId = selectedVehicle.vehicle_id || selectedVehicle.id
-        if (!vehicleId) return
-
-        if (isValidCoordinate(selectedVehicle.latitude, selectedVehicle.longitude)) {
-            const lat = Number(selectedVehicle.latitude)
-            const lng = Number(selectedVehicle.longitude)
-
-            // Fly to vehicle if different selection or user focused
-            if (lastFocusedId.current !== vehicleId) {
-                lastFocusedId.current = vehicleId
-                map.flyTo([lat, lng], Math.max(map.getZoom(), 14), {
-                    duration: 0.7,
-                })
-            }
+        if (!selectedVehicle) {
+            lastFocusRef.current = { id: null, panel: null, drawer: null }
+            return
         }
-    }, [selectedVehicle, map])
+
+        const vid = selectedVehicle.vehicle_id || selectedVehicle.id
+        if (!vid) return
+
+        const isNewVehicle = lastFocusRef.current.id !== vid
+        const panelChanged = lastFocusRef.current.panel !== isPanelOpen
+        const drawerChanged = lastFocusRef.current.drawer !== isDrawerOpen
+
+        if (isNewVehicle || panelChanged || drawerChanged) {
+            lastFocusRef.current = { id: vid, panel: isPanelOpen, drawer: isDrawerOpen }
+            adjustViewport(selectedVehicle, isNewVehicle)
+        }
+    }, [selectedVehicle, isPanelOpen, isDrawerOpen, adjustViewport])
 
     return null
 }
 
-function FleetMapControls({ vehicles }) {
+function FleetMapControls({ vehicles, isPanelOpen = true, isDrawerOpen = false }) {
     const map = useMap()
 
     const resetView = () => {
@@ -97,9 +147,14 @@ function FleetMapControls({ vehicles }) {
                 ])
             )
 
+            // Account for panels when fitting bounds so all markers are visible
+            const padLeft = isPanelOpen ? 360 : 48
+            const padRight = isDrawerOpen ? 400 : 48
+
             map.fitBounds(bounds, {
-                padding: [50, 50],
-                maxZoom: 13,
+                paddingTopLeft: [padLeft, 48],
+                paddingBottomRight: [padRight, 48],
+                maxZoom: 14,
                 duration: 0.8,
             })
             return
@@ -109,14 +164,27 @@ function FleetMapControls({ vehicles }) {
     }
 
     return (
-        <div className="absolute right-3 top-3 z-[500] flex flex-col gap-2">
+        <div
+            className={`absolute top-3 sm:top-4 z-[1000] flex items-center gap-2 pointer-events-auto transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                isDrawerOpen
+                    ? "right-[calc(340px+1rem)] sm:right-[calc(380px+1.25rem)] max-w-[calc(100vw-360px)]"
+                    : "right-3 sm:right-4"
+            }`}
+        >
+            <div className="hidden sm:inline-flex items-center gap-1.5 rounded-xl border border-slate-200/90 bg-white/95 px-3 py-2 text-xs font-medium text-slate-600 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.12)] backdrop-blur-md select-none">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
+                <span className="font-semibold text-slate-900 tabular-nums">{vehicles.length}</span>
+                <span>on map</span>
+            </div>
             <button
                 type="button"
                 onClick={resetView}
-                title="Reset map view to fit all vehicles"
-                className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 shadow-pop transition-colors hover:text-brand cursor-pointer"
+                title="Fit all units in view"
+                aria-label="Fit all units in view"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200/90 bg-white/95 px-3 py-2 text-xs font-semibold text-slate-700 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.12)] backdrop-blur-md transition-all hover:bg-white hover:text-brand hover:border-brand/40 hover:shadow-lg cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
             >
-                Fit all units
+                <Maximize2 className="h-3.5 w-3.5 text-brand" />
+                <span>Fit all units</span>
             </button>
         </div>
     )
@@ -198,6 +266,8 @@ function FleetMap({
     selectedVehicle = null,
     onVehicleSelect = () => {},
     onInspectVehicle = null,
+    isPanelOpen = true,
+    isDrawerOpen = false,
     className = "",
 }) {
     const vehiclesWithLocation = useMemo(() => {
@@ -218,16 +288,31 @@ function FleetMap({
     }, [vehiclesWithLocation])
 
     return (
-        <div className={`relative h-full w-full overflow-hidden bg-white ${className}`}>
+        <div
+            className={`relative isolate h-full w-full overflow-hidden bg-white shadow-[0_1px_4px_rgba(15,23,42,0.10)] [&_.leaflet-control-zoom]:!mb-20 sm:[&_.leaflet-control-zoom]:!mb-22 [&_.leaflet-control-attribution]:!mr-16 sm:[&_.leaflet-control-attribution]:!mr-20 ${
+                isDrawerOpen ? "[&_.leaflet-bottom.leaflet-right]:!right-[calc(340px+1rem)] sm:[&_.leaflet-bottom.leaflet-right]:!right-[calc(380px+1.25rem)]" : ""
+            } [&_.leaflet-bottom.leaflet-right]:transition-all [&_.leaflet-bottom.leaflet-right]:duration-300 ${className}`}
+        >
             <MapContainer
                 center={center}
                 zoom={10}
+                zoomControl={false}
                 className="h-full w-full"
                 scrollWheelZoom={true}
             >
-                <SelectedVehicleFocus selectedVehicle={selectedVehicle} />
+                <ZoomControl position="bottomright" />
 
-                <FleetMapControls vehicles={vehiclesWithLocation} />
+                <SelectedVehicleFocus
+                    selectedVehicle={selectedVehicle}
+                    isPanelOpen={isPanelOpen}
+                    isDrawerOpen={isDrawerOpen}
+                />
+
+                <FleetMapControls
+                    vehicles={vehiclesWithLocation}
+                    isPanelOpen={isPanelOpen}
+                    isDrawerOpen={isDrawerOpen}
+                />
 
                 <TileLayer
                     attribution="&copy; <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors"
@@ -249,18 +334,7 @@ function FleetMap({
                                     onVehicleSelect(vehicle)
                                 },
                             }}
-                        >
-                            <Popup
-                                className="ats-vehicle-popup"
-                                autoPan={true}
-                                autoPanPadding={[50, 50]}
-                            >
-                                <VehiclePopupCard
-                                    vehicle={vehicle}
-                                    onInspect={onInspectVehicle}
-                                />
-                            </Popup>
-                        </Marker>
+                        />
                     )
                 })}
             </MapContainer>
@@ -269,3 +343,4 @@ function FleetMap({
 }
 
 export default FleetMap
+

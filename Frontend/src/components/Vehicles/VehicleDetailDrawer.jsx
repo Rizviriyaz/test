@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react"
 import { Link } from "react-router-dom"
-import { Loader2, ArrowUpRight } from "lucide-react"
+import { Loader2, ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
@@ -41,10 +41,18 @@ function Row({ label, children, hint }) {
 }
 
 // `idleEvents` must cover today (UAE); `idleEventsComplete` false marks that list as partial (Wialon events unread)
-export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = null, idleEventsComplete = true }) {
+export default function VehicleDetailDrawer({
+    vehicle,
+    open,
+    onClose,
+    idleEvents = null,
+    idleEventsComplete = true,
+    asDrawer = false,
+    className = "",
+}) {
     // Keep activeVehicle cached so the exit animation runs smoothly even when vehicle prop transitions to null
     const [activeVehicle, setActiveVehicle] = useState(vehicle)
-    const [isOpen, setIsOpen] = useState(Boolean(vehicle))
+    const [isOpen, setIsOpen] = useState(open !== undefined ? open : Boolean(vehicle))
 
     // Adjust state during render when the vehicle prop changes
     const [prevVehicle, setPrevVehicle] = useState(vehicle)
@@ -52,9 +60,9 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
         setPrevVehicle(vehicle)
         if (vehicle) {
             setActiveVehicle(vehicle)
-            setIsOpen(true)
+            if (open === undefined) setIsOpen(true)
         } else {
-            setIsOpen(false)
+            if (open === undefined) setIsOpen(false)
         }
     }
 
@@ -118,9 +126,16 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
         return () => { active = false }
     }, [activeVehicle, idleEvents, idleEventsComplete])
 
-    const handleClose = useCallback(() => {
+    const isDrawerVisible = open !== undefined ? open : isOpen
+
+    const handleClose = useCallback((e) => {
+        if (e) {
+            e.stopPropagation?.()
+            e.preventDefault?.()
+        }
         setIsOpen(false)
-    }, [])
+        onClose?.()
+    }, [onClose])
 
     const handleExitComplete = useCallback(() => {
         if (!isOpen) {
@@ -176,40 +191,8 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
         { label: "Idle Reports", to: "/idle-analytics" },
     ]
 
-    return (
-        <MorphingDialog
-            open={isOpen}
-            onClose={handleClose}
-            layoutId={morphId}
-            transition={{
-                type: "spring",
-                stiffness: 200,
-                damping: 24,
-            }}
-        >
-            <MorphingDialogContainer onExitComplete={handleExitComplete}>
-                <MorphingDialogContent
-                    layoutId={morphId}
-                    className="relative flex max-h-[85vh] w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog"
-                >
-                    {/* Header */}
-                    <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
-                        <div className="min-w-0">
-                            <MorphingDialogTitle className="truncate text-base font-semibold text-slate-900">
-                                {vehicleName}
-                            </MorphingDialogTitle>
-                            <MorphingDialogSubtitle className="mt-1 flex items-center gap-2 text-xs">
-                                <FleetStatusBadge status={statusStr} size="xs" />
-                                <span className="text-slate-300" aria-hidden="true">·</span>
-                                <span className="truncate text-slate-500">{vehicleGroup}</span>
-                                <span className="text-slate-300" aria-hidden="true">·</span>
-                                <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
-                            </MorphingDialogSubtitle>
-                        </div>
-                        <MorphingDialogClose onClick={handleClose} />
-                    </div>
-
-                    <ScrollArea className="flex-1 divide-y divide-slate-200 overflow-y-auto">
+    const drawerScrollArea = (
+        <ScrollArea className="flex-1 divide-y divide-slate-200 overflow-y-auto">
                         <Section title="Status">
                             <Row label="Unit name"><span className="block truncate">{vehicleName}</span></Row>
                             {hardwareType && <Row label="Hardware device">{hardwareType}</Row>}
@@ -340,6 +323,78 @@ export default function VehicleDetailDrawer({ vehicle, onClose, idleEvents = nul
                             ))}
                         </nav>
                     </ScrollArea>
+    )
+
+    if (asDrawer) {
+        if (!isDrawerVisible || !currentVehicle) return null
+        return (
+            <aside
+                aria-label="Vehicle details drawer"
+                className={`absolute right-3 top-3 bottom-3 sm:right-4 sm:top-4 sm:bottom-4 z-20 flex flex-col w-[340px] sm:w-[380px] max-w-[calc(100vw-1.5rem)] rounded-2xl border border-slate-200/90 bg-white/95 backdrop-blur-md shadow-[0_12px_36px_-6px_rgba(15,23,42,0.18),0_4px_12px_-2px_rgba(15,23,42,0.06)] overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${className}`}
+            >
+                {/* Header */}
+                <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 px-4 py-3 sm:px-5 sm:py-3.5">
+                    <div className="min-w-0">
+                        <h2 className="truncate text-base font-semibold text-slate-900 font-jakarta">
+                            {vehicleName}
+                        </h2>
+                        <div className="mt-1 flex items-center gap-2 text-xs">
+                            <FleetStatusBadge status={statusStr} size="xs" />
+                            <span className="text-slate-300" aria-hidden="true">·</span>
+                            <span className="truncate text-slate-500">{vehicleGroup}</span>
+                            <span className="text-slate-300" aria-hidden="true">·</span>
+                            <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={handleClose}
+                        aria-label="Close drawer"
+                        className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer shrink-0"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+
+                {drawerScrollArea}
+            </aside>
+        )
+    }
+
+    return (
+        <MorphingDialog
+            open={isOpen}
+            onClose={handleClose}
+            layoutId={morphId}
+            transition={{
+                type: "spring",
+                stiffness: 200,
+                damping: 24,
+            }}
+        >
+            <MorphingDialogContainer onExitComplete={handleExitComplete}>
+                <MorphingDialogContent
+                    layoutId={morphId}
+                    className="relative flex max-h-[85vh] w-full max-w-[460px] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog"
+                >
+                    {/* Header */}
+                    <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
+                        <div className="min-w-0">
+                            <MorphingDialogTitle className="truncate text-base font-semibold text-slate-900">
+                                {vehicleName}
+                            </MorphingDialogTitle>
+                            <MorphingDialogSubtitle className="mt-1 flex items-center gap-2 text-xs">
+                                <FleetStatusBadge status={statusStr} size="xs" />
+                                <span className="text-slate-300" aria-hidden="true">·</span>
+                                <span className="truncate text-slate-500">{vehicleGroup}</span>
+                                <span className="text-slate-300" aria-hidden="true">·</span>
+                                <span className="shrink-0 tabular-nums text-slate-900">{speed} <span className="text-slate-500">km/h</span></span>
+                            </MorphingDialogSubtitle>
+                        </div>
+                        <MorphingDialogClose onClick={handleClose} />
+                    </div>
+
+                    {drawerScrollArea}
                 </MorphingDialogContent>
             </MorphingDialogContainer>
         </MorphingDialog>

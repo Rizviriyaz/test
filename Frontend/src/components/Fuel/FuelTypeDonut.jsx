@@ -82,7 +82,7 @@ export default function FuelTypeDonut() {
     }, [fuelTypes, totalLitres])
 
     return (
-        <div className="flex flex-col justify-between rounded-lg border border-slate-200 bg-white p-4">
+        <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             <div className="flex items-baseline justify-between gap-2">
                 <h3 className="type-section-title text-slate-900">Fuel products</h3>
                 <span className="text-xs text-slate-500">

@@ -147,7 +147,7 @@ export default function FuelWasteIntelligence({
                 : { rule: "before:bg-transparent", text: "text-slate-500", label: sev ? sev.charAt(0).toUpperCase() + sev.slice(1) : "Info" }
 
     return (
-        <section className="mb-5 overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <section className="mb-5 overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             <div className="flex flex-col justify-between gap-3 border-b border-slate-200 px-4 py-3 md:flex-row md:items-center">
                 <h2 className="type-section-title text-slate-900">
                     Fuel waste & anomalies <span className="font-normal tabular-nums text-slate-500">· {totalAnomalies} findings</span>

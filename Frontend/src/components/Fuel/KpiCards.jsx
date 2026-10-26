@@ -37,7 +37,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     if (loading) {
         return (
             <div className="mb-5 space-y-3" role="status" aria-label="Loading fuel KPIs">
-                <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4 lg:grid-cols-4">
+                <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
                     {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
                         <div key={i} className="bg-white px-4 py-3">
                             <div className="h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
@@ -285,7 +285,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
         },
         {
             key: "efficiency",
-            label: "Fleet fuel efficiency",
+            label: "Fleet fuel efficiency (purchase-derived)",
             value: has(kmPerLitre) ? formatNumber(kmPerLitre, 2) : (has(efficiency) ? formatNumber(efficiency, 1) : "—"),
             unit: has(kmPerLitre) ? "km/L" : (has(efficiency) ? "L/100km" : ""),
             note: has(kmPerLitre) && has(efficiency)
@@ -379,7 +379,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     return (
         <div className="mb-4 space-y-2">
             {/* Unified 8-card hairline grid (Primary top row, Secondary bottom row) */}
-            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-slate-200 bg-slate-200 sm:grid-cols-4 lg:grid-cols-4 shadow-xs">
+            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
                 {primaryMetrics.map((m) => renderCard(m, true))}
                 {secondaryMetrics.map((m) => renderCard(m, false))}
             </div>

@@ -1,12 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
     Truck,
-    User,
     ChevronRight,
-    Map,
-    List,
     X,
+    Search,
 } from "lucide-react"
 
 import { getVehicles } from "../api/fleetApi"
@@ -14,22 +12,43 @@ import FleetMap from "../components/FleetMap"
 import { isValidCoordinate } from "../utils/coordinates"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
-import SearchInput from "../components/Common/SearchInput"
-import FleetStatusBadge from "../components/Common/FleetStatusBadge"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
-import { MorphingDialogTrigger } from "../components/core/morphing-dialog"
+
+function formatLastUpdate(vehicle) {
+    if (typeof vehicle.seconds_since_update === "number" && !isNaN(vehicle.seconds_since_update)) {
+        const secs = vehicle.seconds_since_update
+        if (secs < 60) return "Just now"
+        if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+        if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+        return `${Math.floor(secs / 86400)}d ago`
+    }
+    if (vehicle.last_message_timestamp) {
+        const diffSecs = Math.max(0, Math.floor(Date.now() / 1000 - Number(vehicle.last_message_timestamp)))
+        if (diffSecs < 60) return "Just now"
+        if (diffSecs < 3600) return `${Math.floor(diffSecs / 60)}m ago`
+        if (diffSecs < 86400) return `${Math.floor(diffSecs / 3600)}h ago`
+        return `${Math.floor(diffSecs / 86400)}d ago`
+    }
+    return null
+}
 
 function Tracking() {
     const [searchParams, setSearchParams] = useSearchParams()
 
     const [vehicles, setVehicles] = useState([])
+    const [isPanelOpen, setIsPanelOpen] = useState(true)
 
     const [selectedVehicleId, setSelectedVehicleId] = useState(() => {
         const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
         if (!param) return null
         const numeric = Number(param)
         return Number.isNaN(numeric) ? param : numeric
+    })
+
+    const [isDrawerOpen, setIsDrawerOpen] = useState(() => {
+        const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
+        return Boolean(param)
     })
 
     const [statusFilter, setStatusFilter] = useState(() => {
@@ -45,23 +64,25 @@ function Tracking() {
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState(null)
     const [lastSyncTime, setLastSyncTime] = useState(null)
-    const [drawerVehicleSnapshot, setDrawerVehicle] = useState(null)
-    const [mobileTab, setMobileTab] = useState("map") // "map" | "list" on small screens
 
-    // Synchronize query parameters (adjusted during render when the URL changes)
-    const [syncedSearchParams, setSyncedSearchParams] = useState(searchParams)
-    if (searchParams !== syncedSearchParams) {
-        setSyncedSearchParams(searchParams)
+    // Synchronize query parameters without re-opening a closed drawer
+    const lastVehicleParamRef = useRef(searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v"))
+    useEffect(() => {
         const param = searchParams.get("vehicleId") || searchParams.get("vehicle") || searchParams.get("v")
-        if (param) {
+        if (param && param !== lastVehicleParamRef.current) {
+            lastVehicleParamRef.current = param
             const numeric = Number(param)
             setSelectedVehicleId(Number.isNaN(numeric) ? param : numeric)
+            setIsDrawerOpen(true)
+            window.dispatchEvent(new CustomEvent("ats:drawer-change", { detail: { open: true } }))
+        } else if (!param && lastVehicleParamRef.current) {
+            lastVehicleParamRef.current = null
         }
         const sParam = searchParams.get("status")
         if (sParam && ["ALL", "MOVING", "IDLING", "STOPPED", "OFFLINE"].includes(sParam.toUpperCase())) {
             setStatusFilter(sParam.toUpperCase())
         }
-    }
+    }, [searchParams])
 
     /*
         Load fleet vehicles
@@ -140,14 +161,14 @@ function Tracking() {
         )
     }, [vehicles, selectedVehicleId])
 
-    // Show the latest telemetry for the open drawer vehicle (falls back to the last known snapshot)
-    const drawerVehicle = useMemo(() => {
-        if (!drawerVehicleSnapshot) return null
-        const fresh = vehicles.find(
-            v => String(v.vehicle_id || v.id) === String(drawerVehicleSnapshot.vehicle_id || drawerVehicleSnapshot.id)
-        )
-        return fresh || drawerVehicleSnapshot
-    }, [vehicles, drawerVehicleSnapshot])
+    // Keep cached vehicle telemetry so drawer and focus transitions are smooth during polling
+    const [cachedVehicle, setCachedVehicle] = useState(null)
+    useEffect(() => {
+        if (selectedVehicle) {
+            setCachedVehicle(selectedVehicle)
+        }
+    }, [selectedVehicle])
+    const activeVehicle = selectedVehicle || cachedVehicle
 
     /*
         Filter vehicles
@@ -157,9 +178,9 @@ function Tracking() {
         return vehicles.filter(
             vehicle => {
                 const plateStr = String(vehicle.registration_plate || vehicle.plate || "").toLowerCase()
-                const name = String(vehicle.vehicle_name || "").toLowerCase()
+                const name = String(vehicle.vehicle_name || vehicle.unit_name || "").toLowerCase()
                 const idStr = String(vehicle.vehicle_id || vehicle.id || "").toLowerCase()
-                const groupStr = String(vehicle.group || "").toLowerCase()
+                const groupStr = String(vehicle.group || (Array.isArray(vehicle.groups) ? vehicle.groups.join(" ") : "")).toLowerCase()
                 const matchesSearch = !query || plateStr.includes(query) || name.includes(query) || idStr.includes(query) || groupStr.includes(query)
 
                 const vStatus = String(vehicle.status || "").toUpperCase()
@@ -209,24 +230,43 @@ function Tracking() {
     }, [vehicles])
 
     /*
-        Select vehicle handler
+        Select vehicle handler - highlights marker, focuses map, and opens single details drawer
     */
     const selectVehicle = useCallback((vehicle) => {
         if (!vehicle) {
             setSelectedVehicleId(null)
+            setIsDrawerOpen(false)
+            window.dispatchEvent(new CustomEvent("ats:drawer-change", { detail: { open: false } }))
+            setSearchParams(prev => {
+                const next = new URLSearchParams(prev)
+                next.delete("vehicleId")
+                next.delete("vehicle")
+                next.delete("v")
+                return next
+            }, { replace: true })
             return
         }
         const vid = vehicle.vehicle_id || vehicle.id
         setSelectedVehicleId(vid)
-        // If on mobile list view, switch to map to see location
-        if (mobileTab === "list") {
-            setMobileTab("map")
-        }
-    }, [mobileTab])
+        setIsDrawerOpen(true)
+        window.dispatchEvent(new CustomEvent("ats:drawer-change", { detail: { open: true } }))
+        setSearchParams(prev => {
+            const next = new URLSearchParams(prev)
+            next.set("vehicleId", String(vid))
+            return next
+        }, { replace: true })
+    }, [setSearchParams])
+
+    /*
+        Close details drawer handler - closes drawer without clearing selected vehicle on map
+    */
+    const handleCloseDrawer = useCallback(() => {
+        setIsDrawerOpen(false)
+        window.dispatchEvent(new CustomEvent("ats:drawer-change", { detail: { open: false } }))
+    }, [])
 
     const handleFilterChange = (filterKey) => {
         setStatusFilter(filterKey)
-        // Update URL search param seamlessly
         setSearchParams(prev => {
             const next = new URLSearchParams(prev)
             if (filterKey === "ALL") {
@@ -246,18 +286,14 @@ function Tracking() {
         { key: "OFFLINE", label: "Offline", count: counts.OFFLINE, dot: "bg-status-offline" },
     ]
 
-    const viewToggleBtn = (active) =>
-        `inline-flex h-full items-center gap-1.5 rounded px-2.5 font-medium transition-colors cursor-pointer ${
-            active ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]" : "text-slate-600 hover:text-slate-900"
-        }`
-
     return (
         <SidebarProvider>
             <div className="flex h-dvh overflow-hidden bg-canvas font-sans text-slate-900 antialiased">
                 <Sidebar />
 
-                <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-                    <div className="shrink-0 border-b border-slate-200/70 bg-canvas px-4 py-3 sm:px-6">
+                <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
+                    {/* Header docked at top */}
+                    <div className="shrink-0 border-b border-slate-200/80 bg-white/95 backdrop-blur-md px-4 py-2.5 sm:px-6 z-10">
                         <PageHeader
                             title="Live Tracking"
                             subtitle="Real-time vehicle location and status"
@@ -266,37 +302,120 @@ function Tracking() {
                             lastUpdated={lastSyncTime}
                             className="mb-0 pb-0 border-b-0"
                         >
-                            {/* Mobile view toggle */}
-                            <div className="flex h-8 items-center rounded-md bg-slate-100 p-0.5 text-xs lg:hidden">
-                                <button type="button" onClick={() => setMobileTab("map")} aria-pressed={mobileTab === "map"} className={viewToggleBtn(mobileTab === "map")}>
-                                    <Map className="h-3.5 w-3.5" />
-                                    Map
-                                </button>
-                                <button type="button" onClick={() => setMobileTab("list")} aria-pressed={mobileTab === "list"} className={viewToggleBtn(mobileTab === "list")}>
-                                    <List className="h-3.5 w-3.5" />
-                                    List ({filteredVehicles.length})
-                                </button>
+                            <div className="hidden md:flex items-center gap-2 text-xs text-slate-600 bg-slate-100/90 rounded-lg px-2.5 py-1 font-medium">
+                                <span className="font-semibold text-slate-900 tabular-nums">{vehicles.length}</span>
+                                <span>total units</span>
                             </div>
                         </PageHeader>
                     </div>
 
-                    <main className="flex min-h-0 flex-1 overflow-hidden p-3 pt-0 gap-3">
-                        {/* ─── VEHICLE LIST ─────────────────────────────────────────── */}
-                        <aside
-                            className={`h-full w-full shrink-0 flex-col overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] lg:w-[380px] xl:w-[420px] ${
-                                mobileTab === "list" ? "flex" : "hidden lg:flex"
+                    {/* Edge-to-Edge Map Viewport */}
+                    <main className="relative flex-1 min-h-0 w-full overflow-hidden">
+                        {/* 1. Primary Full-Bleed Map */}
+                        <FleetMap
+                            vehicles={mapVehicles}
+                            selectedVehicleId={selectedVehicleId}
+                            selectedVehicle={activeVehicle}
+                            onVehicleSelect={selectVehicle}
+                            isPanelOpen={isPanelOpen}
+                            isDrawerOpen={isDrawerOpen && Boolean(activeVehicle)}
+                            className="absolute inset-0 h-full w-full"
+                        />
+
+                        {/* 2. Floating Reopen Button (when panel is collapsed) */}
+                        <div
+                            className={`absolute left-3 top-3 sm:left-4 sm:top-4 z-20 transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                                isPanelOpen
+                                    ? "-translate-x-12 opacity-0 pointer-events-none"
+                                    : "translate-x-0 opacity-100 pointer-events-auto"
                             }`}
                         >
-                            <div className="shrink-0 space-y-2.5 border-b border-slate-100 p-3">
-                                <SearchInput
-                                    value={searchTerm}
-                                    onChange={setSearchTerm}
-                                    onClear={() => setSearchTerm("")}
-                                    placeholder="Search plate, name, ID or group…"
-                                    className="w-full"
-                                />
+                            <button
+                                type="button"
+                                onClick={() => setIsPanelOpen(true)}
+                                aria-label="Open vehicle panel"
+                                title="Open vehicle list"
+                                className="group inline-flex items-center gap-2.5 rounded-xl border border-slate-200/90 bg-white/95 px-3.5 py-2.5 text-xs font-semibold text-slate-800 shadow-[0_8px_24px_-4px_rgba(15,23,42,0.18)] backdrop-blur-md transition-all hover:bg-white hover:text-brand hover:border-brand/40 hover:shadow-xl cursor-pointer"
+                            >
+                                <Truck className="h-4 w-4 text-brand transition-transform group-hover:scale-110" />
+                                <span>Fleet Units</span>
+                                <span className="inline-flex items-center justify-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-700 tabular-nums group-hover:bg-brand-light group-hover:text-brand">
+                                    {filteredVehicles.length}
+                                </span>
+                            </button>
+                        </div>
 
-                                <div role="group" aria-label="Filter by status" className="grid grid-cols-5 gap-0.5 rounded-md bg-slate-100 p-0.5">
+                        {/* 3. Floating Vehicle Panel */}
+                        <aside
+                            aria-label="Fleet vehicle control panel"
+                            className={`absolute left-3 top-3 bottom-3 sm:left-4 sm:top-4 sm:bottom-4 z-20 flex flex-col w-[320px] sm:w-[340px] max-w-[calc(100vw-1.5rem)] rounded-2xl border border-slate-200/85 bg-white/95 backdrop-blur-md shadow-[0_12px_36px_-6px_rgba(15,23,42,0.18),0_4px_12px_-2px_rgba(15,23,42,0.06)] overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                                isPanelOpen
+                                    ? "translate-x-0 opacity-100 pointer-events-auto"
+                                    : "-translate-x-[calc(100%+2rem)] opacity-0 pointer-events-none"
+                            }`}
+                        >
+                            {/* Panel Header */}
+                            <div className="shrink-0 border-b border-slate-100 px-3 py-2.5">
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand-light text-brand shrink-0">
+                                            <Truck className="h-4 w-4" />
+                                        </div>
+                                        <h2 className="font-jakarta text-[13px] font-bold text-slate-900 tracking-tight truncate">
+                                            Fleet Units
+                                        </h2>
+                                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600 tabular-nums shrink-0">
+                                            {filteredVehicles.length} of {vehicles.length}
+                                        </span>
+                                    </div>
+
+                                    <div className="flex items-center gap-1">
+                                        {selectedVehicle && (
+                                            <button
+                                                type="button"
+                                                onClick={() => selectVehicle(null)}
+                                                className="text-[11px] font-medium text-brand hover:underline underline-offset-2 cursor-pointer mr-1"
+                                                title="Clear current selection"
+                                            >
+                                                Clear focus
+                                            </button>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={() => setIsPanelOpen(false)}
+                                            aria-label="Collapse vehicle panel"
+                                            title="Collapse panel to view map"
+                                            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors cursor-pointer"
+                                        >
+                                            <X className="h-4 w-4" />
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Search Bar */}
+                                <div className="relative mt-2">
+                                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                                    <input
+                                        type="text"
+                                        value={searchTerm}
+                                        onChange={(e) => setSearchTerm(e.target.value)}
+                                        placeholder="Search plate, name, ID or group…"
+                                        className="h-8 w-full rounded-lg border border-slate-200/90 bg-slate-50/80 pl-8 pr-7 text-xs text-slate-900 placeholder-slate-400 transition-colors focus:border-brand focus:bg-white focus:outline-none focus:ring-2 focus:ring-brand/20"
+                                    />
+                                    {searchTerm && (
+                                        <button
+                                            type="button"
+                                            onClick={() => setSearchTerm("")}
+                                            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                                            title="Clear search"
+                                        >
+                                            <X className="h-3.5 w-3.5" />
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Status Filters */}
+                                <div role="group" aria-label="Filter by status" className="mt-2 grid grid-cols-5 gap-1 rounded-lg bg-slate-100/90 p-1">
                                     {statusTabs.map(item => {
                                         const isActive = statusFilter === item.key
                                         return (
@@ -306,37 +425,27 @@ function Tracking() {
                                                 onClick={() => handleFilterChange(item.key)}
                                                 aria-pressed={isActive}
                                                 title={`${item.label}: ${item.count}`}
-                                                className={`flex min-w-0 flex-col items-center rounded px-1 py-1 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                                                    isActive ? "bg-white text-slate-900 shadow-[0_0_0_1px_rgba(15,23,42,0.08)]" : "text-slate-500 hover:text-slate-900"
+                                                className={`flex min-w-0 flex-col items-center rounded-md px-1 py-1 transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                                                    isActive
+                                                        ? "bg-white text-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.1)] font-semibold"
+                                                        : "text-slate-500 hover:text-slate-900 font-medium"
                                                 }`}
                                             >
-                                                <span className="flex items-center gap-1 text-[11px] font-medium">
-                                                    {item.dot && <span className={`h-1.5 w-1.5 rounded-full ${item.dot}`} aria-hidden="true" />}
+                                                <span className="flex items-center gap-1 text-[11px]">
+                                                    {item.dot && <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${item.dot}`} aria-hidden="true" />}
                                                     <span className="truncate">{item.label}</span>
                                                 </span>
-                                                <span className="text-[13px] font-semibold tabular-nums">{item.count}</span>
+                                                <span className={`text-[12px] tabular-nums ${isActive ? "text-brand font-bold" : "text-slate-600"}`}>
+                                                    {item.count}
+                                                </span>
                                             </button>
                                         )
                                     })}
                                 </div>
-
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                    <span className="tabular-nums">
-                                        <span className="font-medium text-slate-800">{filteredVehicles.length}</span> of {vehicles.length} units
-                                    </span>
-                                    {selectedVehicle && (
-                                        <button
-                                            type="button"
-                                            onClick={() => selectVehicle(null)}
-                                            className="font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
-                                        >
-                                            Clear selection
-                                        </button>
-                                    )}
-                                </div>
                             </div>
 
-                            <div className="flex-1 divide-y divide-slate-100 overflow-y-auto">
+                            {/* Vehicle List */}
+                            <div className="flex-1 divide-y divide-slate-100 overflow-y-auto overscroll-contain pr-0.5">
                                 {loading && (
                                     <LoadingState label="Loading vehicle telemetry…" className="m-3 border-none" />
                                 )}
@@ -368,12 +477,9 @@ function Tracking() {
                                 {!loading && !error && filteredVehicles.map(vehicle => {
                                     const vid = vehicle.vehicle_id || vehicle.id
                                     const isSelected = String(vid) === String(selectedVehicleId)
-                                    const vStatus = String(vehicle.status || "").toUpperCase()
-                                    const isOffline = vehicle.connection_status === "OFFLINE" || Boolean(vehicle.is_offline) || vStatus === "OFFLINE"
-                                    const statusKey = isOffline ? "OFFLINE" : (vStatus === "MOVING" ? "MOVING" : (vStatus === "IDLING" ? "IDLING" : "STOPPED"))
-                                    const hasCoords = isValidCoordinate(vehicle.latitude, vehicle.longitude)
-                                    const speed = Math.round(Number(vehicle.speed) || 0)
-                                    const driverName = vehicle.driver?.name || vehicle.driver?.id || vehicle.sensors?.driver_id || null
+                                    const lastUpdatedText = formatLastUpdate(vehicle) || "Recent"
+                                    const vehicleNumber = vehicle.vehicle_name || vehicle.unit_name || vehicle.vehicle_number || String(vid)
+                                    const vehicleGroup = vehicle.group || (Array.isArray(vehicle.groups) && vehicle.groups[0]) || "Unassigned"
 
                                     return (
                                         <div
@@ -389,64 +495,34 @@ function Tracking() {
                                                     selectVehicle(vehicle)
                                                 }
                                             }}
-                                            className={`relative cursor-pointer select-none px-4 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40 ${
+                                            className={`group relative cursor-pointer select-none px-3.5 py-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40 ${
                                                 isSelected
-                                                    ? "bg-brand-light before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-brand"
-                                                    : "hover:bg-slate-50"
+                                                    ? "bg-brand-light/70 before:absolute before:inset-y-0 before:left-0 before:w-1 before:bg-brand shadow-2xs"
+                                                    : "hover:bg-slate-50/80"
                                             }`}
                                         >
-                                            <div className="flex items-baseline justify-between gap-3">
-                                                <h3 className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-900">
-                                                    {vehicle.registration_plate || vehicle.plate || vehicle.vehicle_name || `Unit #${vid}`}
-                                                </h3>
-                                                <FleetStatusBadge status={statusKey} size="xs" />
+                                            <div className="flex items-center justify-between gap-2">
+                                                <span className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-900">
+                                                    {vehicleNumber}
+                                                </span>
+                                                <span className="shrink-0 text-[11px] text-slate-400 tabular-nums">
+                                                    {lastUpdatedText}
+                                                </span>
                                             </div>
-                                            <p className="mt-0.5 truncate text-xs text-slate-500">
-                                                {vehicle.vehicle_name ? `${vehicle.vehicle_name} · ` : ""}{vehicle.group || "General Fleet"} · ID {vid}
-                                            </p>
-
-                                            <div className="mt-1.5 flex items-center justify-between gap-3 text-xs">
-                                                <dl className="flex min-w-0 items-center gap-x-3 text-slate-600">
-                                                    <div className="flex items-baseline gap-1">
-                                                        <dt className="sr-only">Speed</dt>
-                                                        <dd className="font-semibold tabular-nums text-slate-900">{speed}</dd>
-                                                        <span className="text-[11px] text-slate-500">km/h</span>
-                                                    </div>
-                                                    <div>
-                                                        <dt className="sr-only">Ignition</dt>
-                                                        <dd className={vehicle.ignition ? "text-slate-700" : "text-slate-400"}>
-                                                            Ign. {vehicle.ignition ? "on" : "off"}
-                                                        </dd>
-                                                    </div>
-                                                    {statusKey === "IDLING" && vehicle.idle_duration_formatted ? (
-                                                        <div>
-                                                            <dt className="sr-only">Idle time</dt>
-                                                            <dd className="font-medium tabular-nums text-amber-800">{vehicle.idle_duration_formatted}</dd>
-                                                        </div>
-                                                    ) : !hasCoords ? (
-                                                        <div>
-                                                            <dt className="sr-only">GPS</dt>
-                                                            <dd className="text-rose-700">No GPS fix</dd>
-                                                        </div>
-                                                    ) : null}
-                                                    <div className="flex min-w-0 items-center gap-1 text-slate-500">
-                                                        <dt className="sr-only">Driver</dt>
-                                                        <User className="h-3 w-3 shrink-0 text-slate-400" aria-hidden="true" />
-                                                        <dd className="truncate">{driverName ? String(driverName) : "Unassigned"}</dd>
-                                                    </div>
-                                                </dl>
-
-                                                <MorphingDialogTrigger
-                                                    layoutId={`vehicle-${vehicle.vehicle_id || vehicle.id}`}
+                                            <div className="mt-1 flex items-center justify-between gap-2">
+                                                <span className="min-w-0 truncate text-xs text-slate-500">
+                                                    {vehicleGroup}
+                                                </span>
+                                                <button
+                                                    type="button"
                                                     onClick={(e) => {
                                                         e.stopPropagation()
-                                                        setDrawerVehicle(vehicle)
+                                                        selectVehicle(vehicle)
                                                     }}
-                                                    className="inline-flex shrink-0 items-center gap-0.5 rounded font-medium text-brand hover:text-brand-hover hover:underline underline-offset-2 cursor-pointer"
+                                                    className="inline-flex shrink-0 items-center gap-0.5 text-xs font-medium text-brand group-hover:text-brand-hover hover:underline underline-offset-2 cursor-pointer"
                                                 >
-                                                    Details
-                                                    <ChevronRight className="h-3.5 w-3.5" />
-                                                </MorphingDialogTrigger>
+                                                    Details →
+                                                </button>
                                             </div>
                                         </div>
                                     )
@@ -454,75 +530,17 @@ function Tracking() {
                             </div>
                         </aside>
 
-                        {/* ─── MAP ──────────────────────────────────────────────────── */}
-                        <div
-                            className={`relative h-full flex-1 overflow-hidden rounded-xl border border-slate-200/70 bg-white shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] ${
-                                mobileTab === "map" ? "flex" : "hidden lg:flex"
-                            }`}
-                        >
-                            <FleetMap
-                                vehicles={mapVehicles}
-                                selectedVehicleId={selectedVehicleId}
-                                selectedVehicle={selectedVehicle}
-                                onVehicleSelect={selectVehicle}
-                                onInspectVehicle={(v) => setDrawerVehicle(v)}
-                                className=""
+                        {/* 4. Single Vehicle Details Drawer */}
+                        {isDrawerOpen && activeVehicle && (
+                            <VehicleDetailDrawer
+                                vehicle={activeVehicle}
+                                open={isDrawerOpen}
+                                onClose={handleCloseDrawer}
+                                asDrawer={true}
                             />
-
-                            {/* Map coverage (bottom left) */}
-                            <div className="absolute bottom-3 left-3 z-[400] rounded-xl border border-slate-200/70 bg-white px-2.5 py-1 text-xs tabular-nums text-slate-700 shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)]">
-                                <span className="font-medium text-slate-900">{mapVehicles.length}</span> of {vehicles.length} on map
-                                {statusFilter !== "ALL" && (
-                                    <span className="text-slate-500"> · {statusFilter.toLowerCase()}</span>
-                                )}
-                            </div>
-
-                            {/* Selected vehicle (top left) */}
-                            {selectedVehicle && (
-                                <div className="absolute left-3 right-3 top-3 z-[400] rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_16px_-4px_rgba(15,23,42,0.1)] sm:right-auto sm:w-80">
-                                    <div className="flex items-start justify-between gap-3">
-                                        <div className="min-w-0">
-                                            <h4 className="truncate font-mono text-[13px] font-semibold text-slate-900">
-                                                {selectedVehicle.registration_plate || selectedVehicle.plate || selectedVehicle.vehicle_name || `Unit #${selectedVehicle.vehicle_id || selectedVehicle.id}`}
-                                            </h4>
-                                            <p className="mt-0.5 truncate text-xs text-slate-500">
-                                                {selectedVehicle.vehicle_name ? `${selectedVehicle.vehicle_name} · ` : ""}{selectedVehicle.group || "General Fleet"} · ID {selectedVehicle.vehicle_id || selectedVehicle.id}
-                                            </p>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={() => selectVehicle(null)}
-                                            className="rounded p-1 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
-                                            title="Clear selected unit"
-                                            aria-label="Clear selected unit"
-                                        >
-                                            <X className="h-4 w-4" />
-                                        </button>
-                                    </div>
-
-                                    <div className="mt-2.5 flex items-center justify-between gap-2 border-t border-slate-100 pt-2.5 text-xs">
-                                        <FleetStatusBadge status={selectedVehicle.status} size="xs" />
-                                        <span className="tabular-nums text-slate-600">
-                                            <span className="font-semibold text-slate-900">{Math.round(Number(selectedVehicle.speed) || 0)}</span> km/h
-                                        </span>
-                                        <MorphingDialogTrigger
-                                            layoutId={`vehicle-${selectedVehicle.vehicle_id || selectedVehicle.id}`}
-                                            onClick={() => setDrawerVehicle(selectedVehicle)}
-                                            className="flex items-center justify-center rounded-md bg-brand px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer"
-                                        >
-                                            Full details
-                                        </MorphingDialogTrigger>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
+                        )}
                     </main>
                 </div>
-
-                <VehicleDetailDrawer
-                    vehicle={drawerVehicle}
-                    onClose={() => setDrawerVehicle(null)}
-                />
             </div>
         </SidebarProvider>
     )
