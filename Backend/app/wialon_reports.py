@@ -252,6 +252,22 @@ def parse_duration_strict(cell: Any) -> Optional[int]:
         return None
 
 
+# Wialon writes a run of dashes ("-----") in a cell when the value does not exist for the interval (e.g. the Mileage of
+# a 2 s engine-on interval without motion). The value stays unknown (None) and listed in `incomplete_fields`; unlike an
+# unreadable cell it is what Wialon reports for that interval, so re-reading a closed window returns it again.
+_DASH_PLACEHOLDER = re.compile(r"-{2,}")
+_ENGINE_FIELD_TEXT = {"total_time_seconds": "total_time_str", "engine_hours_seconds": "engine_hours_str",
+                      "in_motion_seconds": "in_motion_str", "total_idle_seconds": "idling_str", "mileage_km": "mileage_str"}
+
+
+def engine_row_unstable_incomplete(row: Dict[str, Any]) -> List[str]:
+    """A group engine report row's `incomplete_fields` other than dash-only placeholders (see above)."""
+    return [
+        f for f in row.get("incomplete_fields") or []
+        if not (f in _ENGINE_FIELD_TEXT and _DASH_PLACEHOLDER.fullmatch(str(row.get(_ENGINE_FIELD_TEXT[f]) or "").strip()))
+    ]
+
+
 def parse_duration_to_minutes(dur_str: Any) -> float:
     """Parse Wialon duration string to minutes rounded to 2 decimal places."""
     sec = parse_duration_to_seconds(dur_str)

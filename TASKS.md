@@ -135,18 +135,16 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 
 ## Verification Status
 
-Run on 2026-10-22 against the working tree at `0040ae0`, on Windows with Python 3.13 and Node 24. No live service was called: backend scripts ran with all outbound HTTP blocked (`requests` sessions and `httpx` network transports).
+Run on 2026-10-26 against the uncommitted Phase 2 working tree on top of `9e730af` (D1, D3, D4, R2 and the engine-report dash-placeholder caching fix), on Windows with Python 3.13 and Node 24. No live service was called by these checks: backend scripts ran under `OfflineGuard`, which blocks all outbound HTTP.
 
 | Check | Result |
 | --- | --- |
-| `npm run lint` | Pass, no issues |
-| `npm test` | Pass, 60/60 tests |
-| `npm run build` with `VITE_API_URL` unset | Fails as designed: "VITE_API_URL is required for production builds." |
-| `npm run build` with a loopback `VITE_API_URL` | Fails as designed: "must not use a loopback host in production." |
-| `npm run build` with an absolute non-loopback URL | Pass (built to a temporary directory) |
-| Backend `scripts/test_*.py` (33 scripts) | 31 pass offline |
-| `test_fuel_efficiency.py` | 10/13 pass. 3 endpoint cases reach real Supabase pagination (`fuel/db.py`), so they need live access |
-| `test_ai_fuel_assistant.py` | Live test by design (logs in to Wialon); not run |
+| `npm run lint` | Fails: 8 errors (unused variables / useless assignment in `FleetMap.jsx`, `FuelPerformance.jsx`, `Tracking.jsx`; setState in an effect in `FuelHeader.jsx`, `Tracking.jsx`). Identical at baseline `9e730af`; no frontend file is changed in this working tree |
+| `npm test` | 90/91 pass. `knownTotals.test.js:98` (regex over `IdleAnalytics.jsx` source for the trend subtitle) fails, identically at baseline `9e730af` |
+| `npm run build` with an absolute non-loopback URL | Pass (built to a temporary directory; no tracked or ignored file changed) |
+| `npm run build` with `VITE_API_URL` unset or loopback | Not re-run (last verified failing as designed at `0040ae0`) |
+| Backend `scripts/test_*.py` with `OfflineGuard` (32 of 43 scripts) | 32 pass, zero network calls |
+| Backend `scripts/test_*.py` without `OfflineGuard` (11 scripts, incl. `test_fuel_efficiency.py`, `test_ai_fuel_assistant.py`) | Not run (may contact live services) |
 
 **Not verified**:
 
@@ -154,4 +152,12 @@ Run on 2026-10-22 against the working tree at `0040ae0`, on Windows with Python 
 - `audit_*` / `verify_*` / inspector scripts.
 - Any Render or Vercel deployment.
 - Production sign-in, CORS and deep-link behaviour.
-- Live Wialon accuracy against the Wialon UI.
+- Live Wialon accuracy against the Wialon UI (sample units were provided for a manual check; not confirmed).
+
+**Known limitations** (documented, not fixed):
+
+- Dashboard driving time: on 2026-10-26, 11 of 103 units were unknown because Engine (template 2) and Trips (template 5) mileage disagree beyond max(2 km, 5%); the 180 s cache gap between the two windows added 2 more at worst. Both show as unknown, never as a wrong value.
+- Fuel: 138 identifiers / 942 of 2,335 rows (40%) do not match the current Wialon fleet; whether they are legitimately untracked vehicles needs ATS confirmation. 100 identifiers / 1,393 rows match, with no plate-code conflicts.
+- A unit with recent messages but a stale GPS fix is DELAYED on live views, but the "Last seen · N min ago" label uses message age, and Health/Alerts do not flag the stale fix.
+- A parked (last seen STOPPED) unit whose tracker has failed is not flagged in Health/Alerts until it is OFFLINE after 12 hours.
+- Dash-only engine cells (`-----`) stay unknown; only a closed-window idle-analytics result whose sole incompleteness is such a placeholder is cached (one live example).

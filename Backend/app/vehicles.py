@@ -290,6 +290,10 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
         last_message_ts = (vehicle.get("lmsg") or {}).get("t") or position.get("t")
         seconds_since_update = (current_time - int(last_message_ts)) if last_message_ts else None
+        # Time of the last GPS position (core/search_items `pos`, flag 1024); unit/calc_last's `pos` carries the speed
+        # but no time. None when Wialon sends none: unknown, never treated as stale.
+        position_ts = (vehicle.get("pos") or {}).get("t")
+        seconds_since_position = (current_time - int(position_ts)) if position_ts else None
 
         if seconds_since_update is None or seconds_since_update > CONN_DELAYED_SECONDS:
             connection_status = "OFFLINE"
@@ -306,6 +310,12 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         if is_offline:
             status = "OFFLINE"
         elif connection_status == "DELAYED" and last_known_status in ("MOVING", "IDLING"):
+            status = "DELAYED"
+        elif last_known_status == "MOVING" and seconds_since_position is not None \
+                and seconds_since_position > CONN_STABLE_SECONDS:
+            # Messages without a new GPS fix keep the last position's speed: MOVING from a position older than
+            # CONN_STABLE_SECONDS is not live (DELAYED; last_known_status MOVING, speed kept). IDLING/STOPPED are
+            # not judged by position age: a stationary tracker may not send new positions.
             status = "DELAYED"
         else:
             status = last_known_status

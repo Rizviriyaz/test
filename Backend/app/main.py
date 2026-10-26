@@ -26,6 +26,7 @@ from app.wialon_reports import (
     execute_wialon_group_trips_report,
     execute_wialon_unit_engine_report,
     execute_wialon_group_engine_idle_report,
+    engine_row_unstable_incomplete,
     resolve_all_units_group_id,
 )
 from app.normalize import (
@@ -1090,6 +1091,7 @@ def get_dashboard_mileage(
             row_counts = Counter(rep_item["vehicle_name"] for rep_item in group_report)
             ambiguous_names = sorted(n for n in scoped_names if len(name_candidates(n)) > 1 or row_counts[n] > 1)
             vehicles_by_name = {n: name_candidates(n)[0] for n in scoped_names if len(name_candidates(n)) == 1}
+            attributed_ids = set()  # fleet units that received a report row
 
             # The report returns its rows or raises WialonAPIError (mapped to 502); it never returns None.
             for rep_item in group_report:
@@ -1115,6 +1117,7 @@ def get_dashboard_mileage(
                     continue
                 v_obj = vehicles_by_name.get(v_name)
                 vid = v_obj.get("id") if v_obj else None
+                attributed_ids.add(vid)
                 v_groups = unit_groups_map.get(vid, ["General Fleet"]) if vid else ["General Fleet"]
                 primary_group = v_groups[0] if v_groups else "General Fleet"
                 # An unreadable mileage cell is unknown (None), never reported as 0 km
@@ -1160,9 +1163,13 @@ def get_dashboard_mileage(
                     source = "ambiguous_vehicle_name" if len(name_candidates(v_name)) > 1 else "duplicate_report_rows"
                 elif member_ids is not None and vid in member_ids and v_name not in covered_names:
                     source = "missing_from_report"
-                elif group_id is None and member_ids is not None and vid not in member_ids and v_name not in covered_names:
+                elif group_id is None and (
+                    (vid not in member_ids and vid not in attributed_ids) if member_ids else v_name not in covered_names
+                ):
                     # Fleet-wide view: a fleet unit outside the "All Unit" report group was not covered by the
-                    # report, so its mileage is unknown (listed, total marked partial), never silently left out
+                    # report, so its mileage is unknown (listed, total marked partial), never silently left out.
+                    # With known members this holds even when an in-group unit of the same name has a row; with
+                    # unknown (or empty) membership, a unit no row names was not covered.
                     source = "outside_report_group"
                 else:
                     continue
@@ -1772,7 +1779,13 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     # left out and flagged via `total_idle_partial` rather than counted as zero
     known_idle_seconds = [v["total_idle_seconds"] for v in by_vehicle if v["total_idle_seconds"] is not None]
     total_idle_seconds = sum(known_idle_seconds)
-    total_idle_partial = len(known_idle_seconds) < len(by_vehicle)
+    # Fleet-wide, a report row naming no fleet unit is left out of the total too (as /api/fleet/trips), so the
+    # total is partial and not cached
+    unmatched_rows = sorted(str(n) for n in report_name_counts if n not in live_name_counts) \
+        if target_vehicles is live_vehicles else []
+    if unmatched_rows:
+        logging.warning("Idle report rows name no fleet unit, left out of the fleet total: %s", unmatched_rows)
+    total_idle_partial = len(known_idle_seconds) < len(by_vehicle) or bool(unmatched_rows)
     # Event-based KPIs need every vehicle's discrete events; when events were not requested or could not be
     # read completely, the count, average and longest event are unknown (None), not 0 or a lower bound
     events_complete = all(bv["idle_events"] is not None for bv in by_vehicle)
@@ -1916,8 +1929,12 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         rep_res.get("column_warnings")
         or rep_res.get("unlocated_fields")
         or events_incomplete
-        or any(uv.get("incomplete_fields") for uv in rep_res.get("vehicles", []))
+        # A dash-only placeholder (Wialon reported no value) is stable once the window has closed, so only then does it
+        # not block caching; the value stays unknown either way, and any other unreadable cell still blocks it
+        or any(engine_row_unstable_incomplete(uv) or (uv.get("incomplete_fields") and eff_to >= current_ts)
+               for uv in rep_res.get("vehicles", []))
         or any(bv["vehicle_name"] not in report_name_counts for bv in by_vehicle)
+        or unmatched_rows
     )
     if not report_incomplete:
         set_cache(cache_key, response_payload)

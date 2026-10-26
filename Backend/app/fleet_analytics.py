@@ -189,7 +189,9 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
         seconds_since_update = max(0, now_ts - int(last_msg_ts))
         if seconds_since_update > HEALTH_THRESHOLDS["CONN_DELAYED_SECONDS"]:
             conn_status = "OFFLINE"
-        elif seconds_since_update > HEALTH_THRESHOLDS["CONN_STABLE_SECONDS"]:
+        elif seconds_since_update > HEALTH_THRESHOLDS["CONN_STABLE_SECONDS"] and vehicle.get("last_known_status") != "STOPPED":
+            # A unit last seen parked (STOPPED) reports less often: an older message alone is not a delay (no
+            # warning, alert or penalty) until it is OFFLINE past CONN_DELAYED_SECONDS
             conn_status = "DELAYED"
         else:
             conn_status = "STABLE"
@@ -348,7 +350,13 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
     if group_engine is not None and group_engine.get("vehicles"):
         engine_by_name = {uv["vehicle_name"]: uv for uv in group_engine.get("vehicles", [])}
         ambiguous_names = _ambiguous_report_names(fleet, group_engine.get("vehicles", []))
-        report_incomplete = bool(group_engine.get("column_warnings") or group_engine.get("unlocated_fields")) or any(
+        # A row naming no fleet unit is left out of the totals (as /api/fleet/trips): partial and not cached
+        fleet_names = {v["vehicle_name"] for v in fleet}
+        unmatched_rows = sorted({name for name in engine_by_name if name not in fleet_names})
+        if unmatched_rows:
+            logging.warning("Engine report rows name no fleet unit, left out of utilization: %s", unmatched_rows)
+        report_incomplete = bool(unmatched_rows) or bool(
+            group_engine.get("column_warnings") or group_engine.get("unlocated_fields")) or any(
             uv.get("incomplete_fields") for uv in group_engine.get("vehicles", []))
         unit_results = []
         total_sec = hours * 3600
@@ -405,6 +413,7 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
             })
     else:
         report_incomplete = False
+        unmatched_rows = []
 
         def _process_unit_utilization(v_record):
             vid = v_record["vehicle_id"]
@@ -473,7 +482,7 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         "total_idle_hours": None if all_unknown else round(total_idle_sec / 3600, 1),
         "total_engine_on_hours": None if all_unknown else round(total_engine_sec / 3600, 1),
         "driving_to_idle_ratio": None if all_unknown else fleet_ratio,
-        "partial": bool(unknown_vehicles),
+        "partial": bool(unknown_vehicles or unmatched_rows),
         "unknown_vehicles": unknown_vehicles,
         # Unknown (None) utilization sorts after all known values
         "vehicles": sorted(unit_results, key=lambda x: (x["utilization_percentage"] is not None, x["utilization_percentage"] or 0), reverse=True)

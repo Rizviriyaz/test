@@ -379,7 +379,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicles_by_status",
-            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL.",
+            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes, or last seen MOVING with a GPS position older than 10 minutes although messages are recent; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL.",
             "parameters": {
                 "type": "object",
                 "properties": {
