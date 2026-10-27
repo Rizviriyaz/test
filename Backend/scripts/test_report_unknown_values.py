@@ -114,8 +114,11 @@ def test_utilization_unreadable_cell_is_unknown():
         _fleet_patches(stack)
         report = stack.enter_context(patch.object(fa, "execute_wialon_group_engine_idle_report", return_value=engine))
         res = fa.get_fleet_utilization_analytics(hours=24)
+        # An unreadable cell may be transient: the result is kept only for the short transient TTL, then re-read
+        assert fa._analytics_cache.get("fleet_utilization_24")["ttl"] == fa.TRANSIENT_PARTIAL_TTL_SECONDS
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
         fa.get_fleet_utilization_analytics(hours=24)
-        assert report.call_count == 2, "a result with an unreadable cell must not be served from cache"
+        assert report.call_count == 2, "a result with an unreadable cell is re-read after the transient TTL"
     by_id = {v["vehicle_id"]: v for v in res["vehicles"]}
     a = by_id[101]
     # Per field: only the idle cell is unreadable, so idle and the values needing it are None; driving (a readable

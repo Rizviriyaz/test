@@ -10,7 +10,7 @@ import requests
 from fastapi import HTTPException
 from urllib3.util import Retry
 
-from app.utils.ttl_cache import TTLCache
+from app.utils.ttl_cache import InFlight, TTLCache
 
 _retry_strategy = Retry(
     total=2,
@@ -30,6 +30,7 @@ TOKEN_STALE_SECONDS = 600
 
 # Bounded cache of validated tokens: token -> {"user": dict, "timestamp": float}
 _token_cache = TTLCache(max_entries=1024)
+_validations = InFlight()
 
 
 def _token_expiry(token: str):
@@ -53,7 +54,13 @@ def authenticate_access_token(token: str) -> dict:
     cached = _token_cache.get(token)
     if cached and (now - cached["timestamp"]) < TOKEN_CACHE_SECONDS:
         return cached["user"]
+    # Concurrent requests with the same token (one page load fires several) share one Supabase validation and
+    # its outcome (user or HTTP error); nothing is retained beyond the token cache above
+    return _validations.run(token, lambda: _validate_with_supabase(token, cached, now))
 
+
+def _validate_with_supabase(token: str, cached, now: float) -> dict:
+    """Validate `token` with Supabase, load its profile and cache the result (see authenticate_access_token)."""
     supabase_url = os.getenv("SUPABASE_URL", "").rstrip("/")
     anon_key = os.getenv("SUPABASE_ANON_KEY", "")
     if not supabase_url or not anon_key:

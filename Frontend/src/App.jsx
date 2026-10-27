@@ -4,30 +4,56 @@ import {
     Route,
     Navigate,
 } from "react-router-dom"
-import { lazy, Suspense } from "react"
+import { lazy, Suspense, useEffect } from "react"
 
 import { AuthProvider } from "./context/AuthContext"
 import { FuelFilterProvider } from "./context/FuelFilterContext"
+import { useAuth } from "./context/useAuth"
 import ProtectedRoute from "./components/Auth/ProtectedRoute"
 
 const Landing = lazy(() => import("./pages/Landing"))
 const Login = lazy(() => import("./pages/Login"))
 
+// Operational page chunks, also prefetched after sign-in (see PrefetchOperationalPages)
+const operationalPages = {
+    dashboard: () => import("./pages/Dashboard"),
+    fuel: () => import("./pages/FuelPerformance"),
+    tracking: () => import("./pages/Tracking"),
+    idle: () => import("./pages/IdleAnalytics"),
+    health: () => import("./pages/VehicleHealth"),
+    alerts: () => import("./pages/FleetAlerts"),
+}
+
 // Main Fleet Dashboard Pages
-const Dashboard = lazy(() => import("./pages/Dashboard"))
-const FuelPerformance = lazy(() => import("./pages/FuelPerformance"))
+const Dashboard = lazy(operationalPages.dashboard)
+const FuelPerformance = lazy(operationalPages.fuel)
 
 // Additional Fleet Operations Pages
-const Tracking = lazy(() => import("./pages/Tracking"))
-const IdleAnalytics = lazy(() => import("./pages/IdleAnalytics"))
-const VehicleHealth = lazy(() => import("./pages/VehicleHealth"))
-const FleetAlerts = lazy(() => import("./pages/FleetAlerts"))
+const Tracking = lazy(operationalPages.tracking)
+const IdleAnalytics = lazy(operationalPages.idle)
+const VehicleHealth = lazy(operationalPages.health)
+const FleetAlerts = lazy(operationalPages.alerts)
 
 const AiAssistantWidget = lazy(() => import("./components/AI/AiAssistantWidget"))
+
+// Once signed in, load the other pages' code in the background so moving between pages never replaces the whole
+// screen (navigation included) with the Suspense fallback. Code only: no data is fetched.
+function PrefetchOperationalPages() {
+    const { isAuthenticated } = useAuth()
+    useEffect(() => {
+        if (!isAuthenticated) return undefined
+        const timer = setTimeout(() => {
+            Object.values(operationalPages).forEach(load => { load().catch(() => {}) })
+        }, 1500)
+        return () => clearTimeout(timer)
+    }, [isAuthenticated])
+    return null
+}
 
 function App() {
     return (
         <AuthProvider>
+            <PrefetchOperationalPages />
             <FuelFilterProvider>
                 <BrowserRouter>
                     <Suspense fallback={<div role="status" className="grid min-h-dvh place-items-center bg-white text-xs font-semibold text-slate-500">Loading…</div>}>

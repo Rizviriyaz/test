@@ -13,6 +13,10 @@ import {
     getFleetAlertsAnalytics,
     getFleetTripsAnalytics,
     getFleetIdleAnalytics,
+    peekFleetAlertsAnalytics,
+    peekFleetIdleAnalytics,
+    peekFleetTripsAnalytics,
+    peekVehicles,
 } from "../api/fleetApi"
 
 import {
@@ -31,10 +35,14 @@ import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
-import { ErrorBanner, LoadingState } from "../components/Common/StateViews"
-import { formatUAETime, getUAETodayBounds, getUAETodayStr } from "../utils/datetime"
+import { ErrorBanner } from "../components/Common/StateViews"
+import { formatUAEDateTime, formatUAETime, getUAETodayBounds, getUAETodayStr } from "../utils/datetime"
 import { groupNamesOf, idleDurationStatus, inGroup } from "../utils/fleetRules"
 import { isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
+import {
+    EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, activeTodaySummary, fleetAlertsCount, forUaeDay, formatKm2, offlineNote,
+    previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState, yesterdayCellStates,
+} from "../utils/fleetNow"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
 import LiveIdleTimer from "../components/Common/LiveIdleTimer"
 import {
@@ -59,33 +67,83 @@ const DRIVING_LABEL_TITLE = "Wialon Engine Hours report \"In motion\" time per v
 
 const BRAND_BLUE = "#33758F"
 
+// Placeholder for a value whose request has not answered yet (never shown as 0 or "—")
+function Pending({ className = "h-5 w-12" }) {
+    return <span role="status" aria-label="Loading" className={`inline-block animate-pulse rounded bg-slate-100 align-middle motion-reduce:animate-none ${className}`} />
+}
+
+// Body of a section whose data is not available yet: a skeleton while pending, a notice once its request failed
+function SectionPlaceholder({ state, label }) {
+    if (state === "failed") {
+        return (
+            <div role="alert" className="flex h-[240px] items-center justify-center px-6 text-center text-xs text-slate-500">
+                {label} could not be loaded. Retrying automatically.
+            </div>
+        )
+    }
+    return (
+        <div role="status" aria-label={`Loading ${label}`} className="flex h-[240px] flex-col justify-center gap-3 px-2">
+            {[80, 65, 50, 40].map(w => (
+                <span key={w} className="h-3 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" style={{ width: `${w}%` }} />
+            ))}
+        </div>
+    )
+}
+
 
 function Dashboard() {
     // ─── Core State ─────────────────────────────────────────────────────────
-    const [vehicles, setVehicles] = useState([])
-    const [loading, setLoading] = useState(true)
+    // Responses still in the client cache from an earlier visit are shown at once, marked as not refreshed yet
+    // (vehiclesFresh / earlier below), while every section refetches (live vehicles up to STALE_LIVE_MS old,
+    // reports up to STALE_REPORT_MS)
+    const [cached] = useState(() => ({
+        vehicles: peekVehicles(),
+        alerts: peekFleetAlertsAnalytics(),
+        trips: peekFleetTripsAnalytics({ timeframe: "today" }),
+        idle: peekFleetIdleAnalytics({ timeframe: "today", include_events: false }),
+        yesterdayTrips: peekFleetTripsAnalytics({ timeframe: "yesterday" }),
+        yesterdayIdle: peekFleetIdleAnalytics({ timeframe: "yesterday", include_events: false }),
+    }))
+    const [vehicles, setVehicles] = useState(() => cached.vehicles?.data?.vehicles || [])
+    // False until /api/vehicles succeeds once: an empty list before then is unavailable data, not a fleet of 0
+    const [vehiclesLoaded, setVehiclesLoaded] = useState(() => Boolean(cached.vehicles))
+    // False while the vehicles shown are an earlier visit's cached response
+    const [vehiclesFresh, setVehiclesFresh] = useState(false)
     const [error, setError] = useState(null)
-    const [lastUpdated, setLastUpdated] = useState(null)
+    const [lastUpdated, setLastUpdated] = useState(() => (cached.vehicles ? new Date(cached.vehicles.fetchedAt) : null))
 
     // Global Vehicle Group Filter (Affects all sections on the page)
     const [selectedGroup, setSelectedGroup] = useState("ALL")
 
     // Alerts data
-    const [alertsData, setAlertsData] = useState(null)
+    const [alertsData, setAlertsData] = useState(() => cached.alerts?.data ?? null)
 
     // Today's trips data
-    const [tripsData, setTripsData] = useState(null)
+    const [tripsData, setTripsData] = useState(() => cached.trips?.data ?? null)
 
     // Today's verified idle analytics data
-    const [idleAnalyticsData, setIdleAnalyticsData] = useState(null)
+    const [idleAnalyticsData, setIdleAnalyticsData] = useState(() => cached.idle?.data ?? null)
 
-    // Today's dedicated mileage data
+    // Today's dedicated mileage data (the latest successful response) and whether the latest refresh failed
     const [todayMileageData, setTodayMileageData] = useState(null)
+    const [todayMileageFailed, setTodayMileageFailed] = useState(false)
 
     // Yesterday's trips, idle, and mileage data
-    const [yesterdayTripsData, setYesterdayTripsData] = useState(null)
-    const [yesterdayIdleAnalyticsData, setYesterdayIdleAnalyticsData] = useState(null)
+    const [yesterdayTripsData, setYesterdayTripsData] = useState(() => cached.yesterdayTrips?.data ?? null)
+    const [yesterdayIdleAnalyticsData, setYesterdayIdleAnalyticsData] = useState(() => cached.yesterdayIdle?.data ?? null)
     const [yesterdayMileageData, setYesterdayMileageData] = useState(null)
+
+    // Whether the latest request of each Dashboard report failed (the last good data, if any, stays shown)
+    const [auxFailed, setAuxFailed] = useState({
+        alerts: false, trips: false, idle: false, yesterdayTrips: false, yesterdayIdle: false, yesterdayMileage: false,
+    })
+    // Reports still showing an earlier visit's cached response: labelled until their first request of this visit succeeds
+    const [earlier, setEarlier] = useState(() => ({
+        alerts: Boolean(cached.alerts), trips: Boolean(cached.trips), idle: Boolean(cached.idle),
+        yesterdayTrips: Boolean(cached.yesterdayTrips), yesterdayIdle: Boolean(cached.yesterdayIdle),
+    }))
+    // Runs the report poll now (Retry), replacing its pending timer
+    const auxRetryRef = useRef(null)
 
     const auxSeqRef = useRef(0)
     // UAE day (its 00:00 epoch) whose "yesterday" reports were loaded: a closed day does not change, so its three
@@ -112,6 +170,8 @@ function Dashboard() {
                 const data = await getVehicles()
                 if (mounted) {
                     setVehicles(data.vehicles || [])
+                    setVehiclesLoaded(true)
+                    setVehiclesFresh(true)
                     setLastUpdated(new Date())
                     setError(null)
                 }
@@ -123,7 +183,6 @@ function Dashboard() {
             } finally {
                 isFetching = false
                 if (mounted) {
-                    setLoading(false)
                     timerId = setTimeout(fetchVehiclesPeriodic, 10000)
                 }
             }
@@ -157,19 +216,33 @@ function Dashboard() {
             const seq = ++auxSeqRef.current
             try {
                 const isCurrent = () => active && seq === auxSeqRef.current
+                // Records whether the latest request of a report failed; the failure is re-thrown for allSettled
+                const tracked = (key, promise) => promise.then(
+                    res => {
+                        if (isCurrent()) {
+                            setAuxFailed(f => (f[key] ? { ...f, [key]: false } : f))
+                            setEarlier(e => (e[key] ? { ...e, [key]: false } : e))
+                        }
+                        return res
+                    },
+                    err => { if (isCurrent()) setAuxFailed(f => (f[key] ? f : { ...f, [key]: true })); throw err },
+                )
                 const dayKey = getUAETodayBounds().from_time
                 const retryAt = yesterdayRetryAtRef.current
                 const loadYesterday = yesterdayLoadedForRef.current !== dayKey || (retryAt !== null && Date.now() >= retryAt)
                 const yesterdayRequests = loadYesterday ? [
-                    getFleetTripsAnalytics({ timeframe: "yesterday" }).then(res => { if (isCurrent()) setYesterdayTripsData(res); return res }),
-                    getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false }).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res); return res }),
-                    getDashboardMileage("yesterday").then(res => { if (isCurrent()) setYesterdayMileageData(res); return res }),
+                    tracked("yesterdayTrips", getFleetTripsAnalytics({ timeframe: "yesterday" })).then(res => { if (isCurrent()) setYesterdayTripsData(res); return res }),
+                    tracked("yesterdayIdle", getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false })).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res); return res }),
+                    tracked("yesterdayMileage", getDashboardMileage("yesterday")).then(res => { if (isCurrent()) setYesterdayMileageData(res); return res }),
                 ] : []
                 const results = await Promise.allSettled([
-                    getFleetAlertsAnalytics().then(res => { if (isCurrent()) setAlertsData(res) }),
-                    getFleetTripsAnalytics({ timeframe: "today" }).then(res => { if (isCurrent()) setTripsData(res) }),
-                    getFleetIdleAnalytics({ timeframe: "today", include_events: false }).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
-                    getDashboardMileage("today").then(res => { if (isCurrent()) setTodayMileageData(res) }),
+                    tracked("alerts", getFleetAlertsAnalytics()).then(res => { if (isCurrent()) setAlertsData(res) }),
+                    tracked("trips", getFleetTripsAnalytics({ timeframe: "today" })).then(res => { if (isCurrent()) setTripsData(res) }),
+                    tracked("idle", getFleetIdleAnalytics({ timeframe: "today", include_events: false })).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
+                    getDashboardMileage("today").then(
+                        res => { if (isCurrent()) { setTodayMileageData(res); setTodayMileageFailed(false) } },
+                        err => { if (isCurrent()) setTodayMileageFailed(true); throw err },
+                    ),
                     ...yesterdayRequests,
                 ])
                 // Marked loaded only when every yesterday report succeeded and none came back partial or stale; a
@@ -199,6 +272,11 @@ function Dashboard() {
             fetchAuxiliaryData()
         }
         document.addEventListener("visibilitychange", onVisibilityChange)
+        auxRetryRef.current = () => {
+            if (!active || isFetching) return
+            if (timerId) clearTimeout(timerId)
+            fetchAuxiliaryData()
+        }
         return () => {
             document.removeEventListener("visibilitychange", onVisibilityChange)
             active = false
@@ -268,64 +346,28 @@ function Dashboard() {
 
     const pct = (count) => (totalVehiclesCount > 0 ? Math.round((count / totalVehiclesCount) * 100) : 0)
 
-    // Active Today
-    const activeTodayCount = useMemo(() => {
-        const activeIds = new Set()
-        filteredVehicles.forEach(v => {
-            if (v.normalizedStatus === "MOVING" || v.normalizedStatus === "IDLING") {
-                activeIds.add(v.vehicle_id)
-            }
-        })
-        const sourceMileage = todayMileageData?.all_units
-        if (sourceMileage) {
-            sourceMileage.forEach(u => {
-                if (isKnownNumber(u.mileage) && u.mileage > 0) {
-                    const vidStr = String(u.vehicle_id)
-                    if (filteredVehicleIdSet.has(vidStr)) {
-                        activeIds.add(u.vehicle_id)
-                    } else {
-                        const matched = filteredVehicles.find(v => v.vehicle_name === u.vehicle_name)
-                        if (matched) activeIds.add(matched.vehicle_id)
-                    }
-                }
-            })
-        }
-        if (tripsData?.vehicles) {
-            tripsData.vehicles.forEach(tv => {
-                if (Number(tv.trip_count || 0) > 0 || Number(tv.gps_mileage_km || 0) > 0) {
-                    const vidStr = String(tv.vehicle_id)
-                    if (filteredVehicleIdSet.has(vidStr)) activeIds.add(tv.vehicle_id)
-                }
-            })
-        }
-        return activeIds.size
-    }, [filteredVehicles, filteredVehicleIdSet, todayMileageData, tripsData])
+    // Report payloads apply only to their own UAE day. Re-evaluated on every render (the 10 s vehicle poll re-renders):
+    // after midnight a payload loaded the day before drops out (its section shows pending) until the new day's arrives,
+    // instead of being shown as today's (or yesterday's).
+    const todayStr = getUAETodayStr()
+    const yesterdayStr = previousUaeDay(todayStr)
+    const todayTrips = forUaeDay(tripsData, todayStr)
+    const todayIdle = forUaeDay(idleAnalyticsData, todayStr, d => d.timeframe?.from_time)
+    const yesterdayTrips = forUaeDay(yesterdayTripsData, yesterdayStr)
+    const yesterdayIdle = forUaeDay(yesterdayIdleAnalyticsData, yesterdayStr, d => d.timeframe?.from_time)
+    const yesterdayMileage = forUaeDay(yesterdayMileageData, yesterdayStr, d => d.effective_from)
 
-    // Filter alerts to only those belonging to the current UAE calendar day (Asia/Dubai)
-    const todayAlerts = useMemo(() => {
-        if (!alertsData?.alerts || !Array.isArray(alertsData.alerts)) return []
-        const todayStr = getUAETodayStr()
-        return alertsData.alerts.filter(a => {
-            if (!a.timestamp) return false
-            const date = typeof a.timestamp === "number"
-                ? new Date(a.timestamp > 1e11 ? a.timestamp : a.timestamp * 1000)
-                : new Date(a.timestamp)
-            if (isNaN(date.getTime())) return false
-            const alertDateStr = date.toLocaleDateString("en-CA", { timeZone: "Asia/Dubai" })
-            return alertDateStr === todayStr
-        })
-    }, [alertsData])
+    // Active Today: activity evidence inside today's UAE day; vehicles without known data are counted as unknown
+    const activeToday = useMemo(() => activeTodaySummary(filteredVehicles, {
+        mileageData: todayMileageData, tripsData, todayStr,
+    }), [filteredVehicles, todayMileageData, tripsData, todayStr])
+    const activeTodayCount = activeToday.active
 
-    // Filtered Alerts Count
-    const alertsCount = useMemo(() => {
-        if (todayAlerts.length === 0) return 0
-        if (selectedGroup === "ALL") return todayAlerts.length
-        return todayAlerts.filter(a => {
-            if (a.vehicle_id && filteredVehicleIdSet.has(String(a.vehicle_id))) return true
-            const grp = (a.group || "").trim().toLowerCase()
-            return grp === selectedGroup.trim().toLowerCase()
-        }).length
-    }, [todayAlerts, selectedGroup, filteredVehicleIdSet])
+    // Alerts: the same current alerts as the Alerts page (null while unavailable, never 0)
+    const alertsSummary = useMemo(() => fleetAlertsCount(alertsData, {
+        selectedGroup, vehicleIds: filteredVehicleIdSet,
+    }), [alertsData, selectedGroup, filteredVehicleIdSet])
+    const alertsCount = alertsSummary.count
 
     // ─── 7. Fleet Activity Metrics Calculation (Reusable for Today & Yesterday)
     const formatHoursMins = (totalMins) => {
@@ -402,9 +444,10 @@ function Dashboard() {
             idleAllUnknown = true
         }
 
+        // Trips report precision (0.01 km per unit), not whole km, so the total reads like the report
         return {
-            distance: distanceAllUnknown ? "—" : `${Math.round(distanceKm).toLocaleString()} km`,
-            distanceRaw: distanceAllUnknown ? null : Math.round(distanceKm),
+            distance: distanceAllUnknown ? "—" : formatKm2(distanceKm),
+            distanceRaw: distanceAllUnknown ? null : roundKm2(distanceKm),
             distanceUnknownUnits,
             trips: trips === null ? "—" : trips.toLocaleString(),
             tripsRaw: trips,
@@ -419,15 +462,17 @@ function Dashboard() {
         }
     }
 
+    // Re-evaluated on every render (the 10 s vehicle poll re-renders), so a previous day's result drops out at midnight
+    const todayMileage = todayMileageState(todayMileageData, { refreshFailed: todayMileageFailed, todayStr })
     const todayFleetActivity = useMemo(() => {
-        return calculateTimeframeActivity(todayMileageData, tripsData, idleAnalyticsData)
+        return calculateTimeframeActivity(todayMileage.data, todayTrips, todayIdle)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [todayMileageData, tripsData, idleAnalyticsData, selectedGroup, filteredVehicleIdSet])
+    }, [todayMileage.data, todayTrips, todayIdle, selectedGroup, filteredVehicleIdSet])
 
     const yesterdayFleetActivity = useMemo(() => {
-        return calculateTimeframeActivity(yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData)
+        return calculateTimeframeActivity(yesterdayMileage, yesterdayTrips, yesterdayIdle)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData, selectedGroup, filteredVehicleIdSet])
+    }, [yesterdayMileage, yesterdayTrips, yesterdayIdle, selectedGroup, filteredVehicleIdSet])
 
     // Percentage change helper
     const calculateComparisonChange = (todayVal, yesterdayVal, isLowerBetter = false) => {
@@ -536,12 +581,12 @@ function Dashboard() {
 
     // ─── 8. Operational Insights: Idle Time by Fleet Group (No Double Counting) ───
     const idleTimeByGroupData = useMemo(() => {
-        if (!idleAnalyticsData) return []
+        if (!todayIdle) return []
         let list = []
-        if (Array.isArray(idleAnalyticsData.by_vehicle) && idleAnalyticsData.by_vehicle.length > 0) {
+        if (Array.isArray(todayIdle.by_vehicle) && todayIdle.by_vehicle.length > 0) {
             const groupMap = new Map()
             const seenVehicles = new Set()
-            idleAnalyticsData.by_vehicle.forEach(v => {
+            todayIdle.by_vehicle.forEach(v => {
                 const vid = String(v.vehicle_id)
                 if (seenVehicles.has(vid)) return
                 seenVehicles.add(vid)
@@ -574,8 +619,8 @@ function Dashboard() {
                     unknownCount: g.unknownCount,
                 }
             })
-        } else if (Array.isArray(idleAnalyticsData.by_group) && idleAnalyticsData.by_group.length > 0) {
-            list = idleAnalyticsData.by_group
+        } else if (Array.isArray(todayIdle.by_group) && todayIdle.by_group.length > 0) {
+            list = todayIdle.by_group
                 .filter(g => g.group_name && g.group_name.trim().toLowerCase() !== "all unit")
                 .map(g => {
                     const totalSec = isKnownNumber(g.total_idle_seconds) ? Number(g.total_idle_seconds) : null
@@ -597,12 +642,12 @@ function Dashboard() {
 
         list.sort((a, b) => compareKnownDesc(a.idleHours, b.idleHours))
         return list
-    }, [idleAnalyticsData, selectedGroup])
+    }, [todayIdle, selectedGroup])
 
     // ─── 9. Fleet Performance: Vehicles with Highest Idle Time (Bar Chart) ────
     const highestIdleVehicles = useMemo(() => {
-        if (!idleAnalyticsData?.by_vehicle || !Array.isArray(idleAnalyticsData.by_vehicle)) return []
-        let list = [...idleAnalyticsData.by_vehicle]
+        if (!todayIdle?.by_vehicle || !Array.isArray(todayIdle.by_vehicle)) return []
+        let list = [...todayIdle.by_vehicle]
         if (selectedGroup !== "ALL") {
             list = list.filter(v => inGroup(v, selectedGroup))
         }
@@ -620,22 +665,22 @@ function Dashboard() {
                 name: v.vehicle_name || `Unit ${v.vehicle_id}`,
             }
         })
-    }, [idleAnalyticsData, selectedGroup])
+    }, [todayIdle, selectedGroup])
 
 
     // ─── 10. Fleet Performance: Top Vehicles by Mileage ───────────────────────
     const topMileageVehicles = useMemo(() => {
         let sourceUnits = []
-        if (todayMileageData?.all_units && todayMileageData.all_units.length > 0) {
-            sourceUnits = todayMileageData.all_units.map(u => ({
+        if (todayMileage.data?.all_units && todayMileage.data.all_units.length > 0) {
+            sourceUnits = todayMileage.data.all_units.map(u => ({
                 vehicle_id: u.vehicle_id,
                 vehicle_name: u.vehicle_name,
                 group: u.group,
                 groups: u.groups,
                 mileage: u.mileage,
             }))
-        } else if (tripsData?.vehicles && tripsData.vehicles.length > 0) {
-            sourceUnits = tripsData.vehicles.map(tv => ({
+        } else if (todayTrips?.vehicles && todayTrips.vehicles.length > 0) {
+            sourceUnits = todayTrips.vehicles.map(tv => ({
                 vehicle_id: tv.vehicle_id,
                 vehicle_name: tv.vehicle_name,
                 group: tv.group,
@@ -667,7 +712,7 @@ function Dashboard() {
                 name,
             }
         })
-    }, [todayMileageData, tripsData, selectedGroup, filteredVehicleIdSet])
+    }, [todayMileage.data, todayTrips, selectedGroup, filteredVehicleIdSet])
 
     // Currently Idling: only vehicles whose existing current idle-duration value is > 5 minutes (300s)
     const MIN_CURRENT_IDLE_SECONDS = 300
@@ -690,19 +735,52 @@ function Dashboard() {
         { key: "MOVING", label: "Moving", count: movingCount, dot: "bg-status-moving", note: staleMovingCount > 0 ? `${staleMovingCount} stale` : null },
         { key: "IDLING", label: "Idling", count: idlingCount, dot: "bg-status-idling", note: staleIdlingCount > 0 ? `${staleIdlingCount} stale` : null },
         { key: "STOPPED", label: "Stopped", count: stoppedCount, dot: "bg-status-stopped", note: null },
-        { key: "OFFLINE", label: "Offline", count: offlineCount, dot: "bg-status-offline", note: "no signal > 12 h" },
+        { key: "OFFLINE", label: "Offline", count: offlineCount, dot: "bg-status-offline", note: offlineNote(offlineVehicles), title: OFFLINE_RULE_TITLE },
     ]
+    // The Tracking page has no group filter: with a group selected its links open the whole fleet, and say so
+    const trackingScopeNote = selectedGroup === "ALL" ? "" : " (Live Tracking shows the whole fleet, not only this group)"
+    // Before the first vehicles response: a skeleton while it loads, "—" once it failed (never a fleet of 0)
+    const fleetValue = (count) => (vehiclesLoaded ? count : error ? "—" : <Pending />)
+
+    // Per-report section state (pending / failed / ready); Distance falls back to the trips report like its value
+    // Day-guarded data only: a previous day's payload is pending, never shown as this day's
+    const tripsState = sectionState(todayTrips, auxFailed.trips)
+    const idleState = sectionState(todayIdle, auxFailed.idle)
+    const distanceState = sectionState(todayMileage.data ?? todayTrips, todayMileageFailed && auxFailed.trips)
+    const topMileageState = sectionState(todayMileage.data ?? todayTrips, todayMileageFailed && auxFailed.trips)
+    const alertsState = sectionState(alertsData, auxFailed.alerts)
+    // Each Yesterday cell follows its own report request (pending / failed / earlier-visit label)
+    const yesterdayCellById = yesterdayCellStates({ mileage: yesterdayMileage, trips: yesterdayTrips, idle: yesterdayIdle }, {
+        failed: { mileage: auxFailed.yesterdayMileage, trips: auxFailed.yesterdayTrips, idle: auxFailed.yesterdayIdle },
+        earlier: { trips: earlier.yesterdayTrips, idle: earlier.yesterdayIdle },
+    })
+    const todayStateById = { distance: distanceState, trips: tripsState, driving: idleState, idle: idleState }
+    // Distance and the top-mileage chart show an earlier visit's trips only while today's mileage has not answered
+    const distanceEarlier = !todayMileage.data && earlier.trips
+    // Subtitle of a chart section still showing an earlier visit's cached response
+    const earlierSubtitle = (state, isEarlier) => (state === "ready" && isEarlier ? EARLIER_RESULT_NOTICE.text : undefined)
+    // Alerts without data already read "unavailable" in the card: only data shown gets a notice
+    const alertsNotice = alertsState === "ready" ? reportNotice(alertsState, { failed: auxFailed.alerts, earlier: earlier.alerts }) : null
 
     const activityRows = [
         {
             label: "Distance",
+            labelTitle: todayMileage.data
+                ? `Wialon Trips report mileage, summed per unit: ${formatUAEDateTime(todayMileage.data.effective_from)} → `
+                    + `${formatUAEDateTime(todayMileage.data.effective_to)} (UAE). A report run over a different window `
+                    + "differs; Engine Hours mileage is measured differently and is not used here."
+                : "Wialon Trips report mileage, summed per unit, for today (UAE)",
             value: todayFleetActivity.distance,
+            state: distanceState,
+            notice: todayMileage.notice ?? reportNotice(distanceState, { earlier: distanceEarlier }),
             partial: todayFleetActivity.distanceUnknownUnits > 0 ? `${todayFleetActivity.distanceUnknownUnits} unit(s) unknown` : null,
             partialTitle: "Wialon reported no usable mileage for these units (unreadable, ambiguous name, or not covered by the report group); they are left out of the total",
         },
         {
             label: "Trips",
             value: todayFleetActivity.trips,
+            state: tripsState,
+            notice: reportNotice(tripsState, { failed: auxFailed.trips, earlier: earlier.trips }),
             partial: todayFleetActivity.tripsUnknownVehicles > 0 ? `${todayFleetActivity.tripsUnknownVehicles} vehicle(s) unknown` : null,
             partialTitle: "Wialon reported no usable trip count for these vehicles (unreadable, ambiguous name, or not covered by the report group); they are left out of the total",
         },
@@ -710,12 +788,16 @@ function Dashboard() {
             label: "Driving time (engine on, moving)",
             labelTitle: DRIVING_LABEL_TITLE,
             value: todayFleetActivity.driving,
+            state: idleState,
+            notice: reportNotice(idleState, { failed: auxFailed.idle, earlier: earlier.idle }),
             partial: todayFleetActivity.drivingUnknownVehicles > 0 ? `${todayFleetActivity.drivingUnknownVehicles} vehicle(s) unknown` : null,
             partialTitle: "Wialon \"In motion\" time is missing, unreadable or unattributed for these vehicles; they are left out of the total",
         },
         {
             label: "Idle time",
             value: todayFleetActivity.idle,
+            state: idleState,
+            notice: reportNotice(idleState, { failed: auxFailed.idle, earlier: earlier.idle }),
             partial: todayFleetActivity.idleUnknownVehicles > 0 ? `${todayFleetActivity.idleUnknownVehicles} vehicle(s) unknown` : null,
             partialTitle: "These vehicles' idle time could not be attributed; they are left out of the total",
         },
@@ -755,9 +837,8 @@ function Dashboard() {
                 </FilterSelect>
             </PageHeader>
 
-            {loading ? (
-                <LoadingState label="Loading live fleet telemetry…" />
-            ) : (
+            {/* The layout renders at once; each section shows its own skeleton until its request answers */}
+            {(
                 <div className="space-y-5">
                     {error && <ErrorBanner message={`${error}. Retrying automatically.`} />}
 
@@ -770,10 +851,19 @@ function Dashboard() {
                             className="flex flex-col h-full justify-between"
                             title={selectedGroup === "ALL" ? "Fleet Now" : `Fleet Now · ${selectedGroup}`}
                             actions={
-                                <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
-                                    <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" aria-hidden="true" />
-                                    <span>Live status</span>
-                                </div>
+                                error ? (
+                                    <div className="flex items-center gap-1.5 text-xs text-amber-700 font-medium">
+                                        <span className="h-2 w-2 rounded-full bg-amber-500" aria-hidden="true" />
+                                        <span>{vehiclesLoaded ? "Update failed, last data shown" : "Unavailable"}</span>
+                                    </div>
+                                ) : (
+                                    <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
+                                        <span className={`h-2 w-2 rounded-full ${vehiclesFresh ? "bg-emerald-500" : "bg-slate-300"} animate-pulse`} aria-hidden="true" />
+                                        <span title={vehiclesLoaded && !vehiclesFresh ? "Showing the status from your previous visit until the live refresh answers" : undefined}>
+                                            {vehiclesFresh ? "Live status" : vehiclesLoaded ? "Earlier status · refreshing" : "Loading live status"}
+                                        </span>
+                                    </div>
+                                )
                             }
                         >
                             <div className="space-y-4">
@@ -783,36 +873,71 @@ function Dashboard() {
                                         <div className="mt-0.5 flex items-baseline gap-1.5">
                                             <Link
                                                 to="/tracking"
-                                                title="View all units in Live Tracking"
+                                                title={`View all units in Live Tracking${trackingScopeNote}`}
                                                 className="text-2xl font-bold leading-none tracking-tight text-slate-900 tabular-nums hover:text-brand focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 rounded-sm"
                                             >
-                                                {totalVehiclesCount}
+                                                {fleetValue(totalVehiclesCount)}
                                             </Link>
                                             <span className="text-xs text-slate-500">vehicles</span>
                                         </div>
                                     </div>
                                     <dl className="flex items-center gap-5 sm:gap-7">
                                         <div>
-                                            <dt className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Active Today</dt>
+                                            <dt
+                                                className="text-[11px] font-medium uppercase tracking-wider text-slate-500"
+                                                title="Vehicles with Trips report mileage or a trip today (UAE), or live Moving/Idling from a message sent today. A stale last-known status is not counted."
+                                            >
+                                                Active Today
+                                            </dt>
                                             <dd className="mt-0.5 flex items-baseline gap-1.5">
-                                                <span className="text-lg font-bold tabular-nums text-slate-900">{activeTodayCount}</span>
-                                                <span className="text-xs font-medium tabular-nums text-slate-500">({pct(activeTodayCount)}%)</span>
+                                                <span className="text-lg font-bold tabular-nums text-slate-900">{fleetValue(activeTodayCount)}</span>
+                                                {vehiclesLoaded && (
+                                                    <span className="text-xs font-medium tabular-nums text-slate-500">({pct(activeTodayCount)}%)</span>
+                                                )}
                                             </dd>
+                                            {vehiclesLoaded && !activeToday.complete && (
+                                                <span
+                                                    className="mt-0.5 block text-[11px] font-medium text-amber-700"
+                                                    title="No activity data for these vehicles today yet (report unavailable, failed, stale or unreadable); they are not counted as inactive"
+                                                >
+                                                    Partial: {activeToday.unknown} unknown
+                                                </span>
+                                            )}
                                         </div>
                                         <div>
-                                            <dt className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Alerts</dt>
+                                            <dt
+                                                className="text-[11px] font-medium uppercase tracking-wider text-slate-500"
+                                                title="Current battery, connection and GPS alerts plus harsh-driving events of the last 24 h, as on the Alerts page"
+                                            >
+                                                Alerts
+                                            </dt>
                                             <dd className="mt-0.5">
                                                 <Link
                                                     to="/alerts"
-                                                    title="View fleet alerts"
+                                                    title={selectedGroup === "ALL" ? "View fleet alerts" : "View fleet alerts (the Alerts page lists the whole fleet, not only this group)"}
                                                     className={`group inline-flex items-baseline gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${alertsCount > 0 ? "text-rose-700" : "text-slate-900"}`}
                                                 >
-                                                    <span className="text-lg font-bold tabular-nums">{alertsCount}</span>
+                                                    <span className="text-lg font-bold tabular-nums">
+                                                        {alertsState === "pending" ? <Pending /> : alertsCount === null ? "—" : `${alertsCount}${alertsSummary.lowerBound ? "+" : ""}`}
+                                                    </span>
                                                     <span className="inline-flex items-center gap-0.5 text-xs text-slate-500 group-hover:text-brand font-medium">
-                                                        {alertsCount > 0 ? "review" : "none open"}
+                                                        {alertsState === "pending" ? "loading" : alertsCount === null ? "unavailable" : alertsCount > 0 ? "review" : "none open"}
                                                         <ArrowUpRight className="h-3.5 w-3.5" />
                                                     </span>
                                                 </Link>
+                                                {alertsSummary.partial && (
+                                                    <span
+                                                        className="mt-0.5 block text-[11px] font-medium text-amber-700"
+                                                        title="Harsh-driving events could not be checked for some vehicles"
+                                                    >
+                                                        Partial
+                                                    </span>
+                                                )}
+                                                {alertsNotice && (
+                                                    <span className="mt-0.5 block text-[11px] font-medium text-amber-700" title={alertsNotice.title}>
+                                                        {alertsNotice.text}
+                                                    </span>
+                                                )}
                                             </dd>
                                         </div>
                                     </dl>
@@ -821,7 +946,7 @@ function Dashboard() {
                                 {/* Status Segment Progress Bar */}
                                 <div>
                                     <div className="flex h-2 gap-1 overflow-hidden rounded-full bg-slate-100 p-0.5" aria-hidden="true">
-                                        {totalVehiclesCount > 0 && statusSegments.filter(seg => seg.count > 0).map(seg => (
+                                        {vehiclesLoaded && totalVehiclesCount > 0 && statusSegments.filter(seg => seg.count > 0).map(seg => (
                                             <div
                                                 key={seg.key}
                                                 className={`${seg.dot} rounded-full transition-[width] duration-300 motion-reduce:transition-none`}
@@ -838,7 +963,7 @@ function Dashboard() {
                                         <Link
                                             key={seg.key}
                                             to={`/tracking?status=${seg.key}`}
-                                            title={`View ${seg.label.toLowerCase()} vehicles`}
+                                            title={`View ${seg.label.toLowerCase()} vehicles${trackingScopeNote}${seg.title ? `. ${seg.title}` : ""}`}
                                             className="group rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                                         >
                                             <div className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
@@ -846,12 +971,12 @@ function Dashboard() {
                                                 <span className="truncate">{seg.label}</span>
                                             </div>
                                             <div className="mt-1.5 flex items-baseline gap-1.5">
-                                                <span className={`text-xl font-bold tabular-nums tracking-tight ${seg.key === "OFFLINE" && seg.count > 0 ? "text-rose-700" : "text-slate-900"}`}>
-                                                    {seg.count}
+                                                <span className={`text-xl font-bold tabular-nums tracking-tight ${vehiclesLoaded && seg.key === "OFFLINE" && seg.count > 0 ? "text-rose-700" : "text-slate-900"}`}>
+                                                    {fleetValue(seg.count)}
                                                 </span>
-                                                <span className="text-xs font-medium tabular-nums text-slate-400">{pct(seg.count)}%</span>
+                                                {vehiclesLoaded && <span className="text-xs font-medium tabular-nums text-slate-400">{pct(seg.count)}%</span>}
                                             </div>
-                                            {seg.note && <span className="mt-0.5 text-[11px] text-slate-400 block leading-tight truncate">{seg.note}</span>}
+                                            {vehiclesLoaded && seg.note && <span className="mt-0.5 text-[11px] text-slate-400 block leading-tight truncate" title={seg.note}>{seg.note}</span>}
                                         </Link>
                                     ))}
                                 </div>
@@ -862,6 +987,15 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col h-full justify-between"
                             title="Today"
+                            actions={(auxFailed.trips || auxFailed.idle || todayMileageFailed) ? (
+                                <button
+                                    type="button"
+                                    onClick={() => auxRetryRef.current?.()}
+                                    className="text-xs font-medium text-brand hover:underline underline-offset-2 cursor-pointer"
+                                >
+                                    Retry now
+                                </button>
+                            ) : null}
                         >
                             <div className="grid flex-1 grid-cols-2 grid-rows-2 gap-3 h-full">
                                 {activityRows.map(row => (
@@ -872,8 +1006,13 @@ function Dashboard() {
                                         <dt className="text-xs font-semibold text-slate-600 leading-snug" title={row.labelTitle}>{row.label}</dt>
                                         <dd className="mt-2 flex flex-col justify-end">
                                             <span className="text-xl sm:text-2xl lg:text-[26px] font-bold tabular-nums text-slate-900 tracking-tight leading-tight">
-                                                {row.value}
+                                                {row.state === "pending" ? <Pending className="h-7 w-24" /> : row.value}
                                             </span>
+                                            {row.notice && (
+                                                <span className="mt-1 block truncate text-[11px] text-amber-700 font-medium" title={row.notice.title}>
+                                                    {row.notice.text}
+                                                </span>
+                                            )}
                                             {row.partial && (
                                                 <span className="mt-1 block truncate text-[11px] text-amber-700 font-medium" title={row.partialTitle}>
                                                     Partial: {row.partial}
@@ -909,7 +1048,9 @@ function Dashboard() {
                                 </div>
                             }
                         >
-                            {currentlyIdlingVehicles.length === 0 ? (
+                            {!vehiclesLoaded ? (
+                                <SectionPlaceholder state={error ? "failed" : "pending"} label="Live vehicle status" />
+                            ) : currentlyIdlingVehicles.length === 0 ? (
                                 <div className="flex h-[240px] flex-col items-center justify-center p-6 text-center">
                                     <div className="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 mb-2">
                                         <CheckCircle2 className="h-5 w-5" />
@@ -985,6 +1126,7 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col h-full"
                             title={selectedGroup === "ALL" ? "Top Vehicles by Mileage" : `Top Vehicles by Mileage · ${selectedGroup}`}
+                            subtitle={earlierSubtitle(topMileageState, distanceEarlier)}
                             actions={
                                 <Link
                                     to="/tracking"
@@ -995,7 +1137,9 @@ function Dashboard() {
                                 </Link>
                             }
                         >
-                            {topMileageVehicles.length === 0 ? (
+                            {topMileageState !== "ready" ? (
+                                <SectionPlaceholder state={topMileageState} label="Today's mileage" />
+                            ) : topMileageVehicles.length === 0 ? (
                                 <div className="flex h-[240px] items-center justify-center gap-2 text-xs text-slate-500">
                                     <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
                                     No mileage recorded for vehicles today.
@@ -1063,6 +1207,7 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col h-full"
                             title="Today vs. Yesterday"
+                            subtitle={earlierSubtitle("ready", earlier.trips || earlier.idle)}
                             actions={
                                 <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
                                     <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
@@ -1100,10 +1245,15 @@ function Dashboard() {
                                                     </div>
                                                 </td>
                                                 <td className="py-2.5 text-right font-bold text-slate-900 tabular-nums px-2">
-                                                    {m.today}
+                                                    {todayStateById[m.id] === "pending" ? <Pending className="h-4 w-14" /> : m.today}
                                                 </td>
                                                 <td className="py-2.5 text-right font-medium text-slate-600 tabular-nums px-2">
-                                                    {m.yesterday}
+                                                    {yesterdayCellById[m.id].state === "pending" ? <Pending className="h-4 w-14" /> : m.yesterday}
+                                                    {yesterdayCellById[m.id].notice && (
+                                                        <span className="mt-0.5 block text-[10px] font-medium text-amber-700" title={yesterdayCellById[m.id].notice.title}>
+                                                            {yesterdayCellById[m.id].notice.text}
+                                                        </span>
+                                                    )}
                                                 </td>
                                                 <td className="py-2.5 text-right tabular-nums pl-2">
                                                     <span
@@ -1132,6 +1282,7 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col h-full"
                             title="Idle Time by Fleet Group"
+                            subtitle={earlierSubtitle(idleState, earlier.idle)}
                             actions={
                                 <Link
                                     to="/idle-analytics"
@@ -1142,7 +1293,9 @@ function Dashboard() {
                                 </Link>
                             }
                         >
-                            {idleTimeByGroupData.length === 0 ? (
+                            {idleState !== "ready" ? (
+                                <SectionPlaceholder state={idleState} label="Today's idle report" />
+                            ) : idleTimeByGroupData.length === 0 ? (
                                 <div className="flex h-[240px] items-center justify-center text-xs text-slate-400">
                                     No idle time recorded for this selection today.
                                 </div>
@@ -1206,6 +1359,7 @@ function Dashboard() {
                         <SectionCard
                             className="flex flex-col"
                             title="Vehicles with Highest Idle Time"
+                            subtitle={earlierSubtitle(idleState, earlier.idle)}
                             actions={
                                 <Link
                                     to="/idle-analytics"
@@ -1216,7 +1370,9 @@ function Dashboard() {
                                 </Link>
                             }
                         >
-                            {highestIdleVehicles.length === 0 ? (
+                            {idleState !== "ready" ? (
+                                <SectionPlaceholder state={idleState} label="Today's idle report" />
+                            ) : highestIdleVehicles.length === 0 ? (
                                 <div className="flex h-[240px] items-center justify-center gap-2 text-xs text-slate-500">
                                     <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
                                     No idle time recorded for vehicles today.

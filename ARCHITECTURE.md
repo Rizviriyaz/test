@@ -53,10 +53,11 @@ The frontend never talks to Wialon or Groq, and it uses Supabase only for sign-i
   - Redirects: `/overview` and `/vehicles` go to `/dashboard`. `/fuel/ranking`, `/fuel/vehicles`, `/fuel/import`, `/ranking` and `/import` go to `/fuel`.
   - Unknown paths go to `/`.
 - **State**:
-  - `AuthContext` holds the Supabase session and profile.
+  - `AuthContext` holds the Supabase session and profile. The profile loads in the background once the session is known, so pages render without waiting for it; until it arrives role-gated UI (fuel import) stays hidden. A profile response is applied only while its user is still the one signed in. The backend enforces roles on every request regardless.
   - `FuelFilterContext` holds the fuel period, vehicle and fuel type.
   - Pages use local state plus `useMemo` for aggregation.
-- **API client** (`api/fleetApi.js`): attaches and refreshes the Supabase token, maps HTTP errors to messages, and throws when there is no session. `api/requestCache.js` shares in-flight promises and keeps a short client-side cache. Each sign-out clears it and bumps a generation counter, so a response from before sign-out is never cached or shared.
+- **API client** (`api/fleetApi.js`): attaches and refreshes the Supabase token, maps HTTP errors to messages, and throws when there is no session. `api/requestCache.js` shares in-flight promises and keeps a short client-side cache. Each sign-out clears it and bumps a generation counter, so a response from before sign-out is never cached or shared. Requests for UAE calendar timeframes (`today`, `yesterday`, ...) are keyed with the UAE date, so one day's response is never reused for the next. `peekClientCache` lets a page show an earlier visit's response (live vehicles up to 2 min old, reports up to 10 min) while it refetches; the Dashboard labels such data "Earlier result · refreshing" until this visit's request succeeds, and shows a report only for the UAE day its window starts on.
+- **Code splitting**: operational pages are lazy-loaded; after sign-in their code (not data) is prefetched in the background.
 - **AI widget**: `components/AI/AiAssistantWidget.jsx` renders only for authenticated users.
 - **Maps / charts**: `react-leaflet` with custom status markers; `recharts`.
 
@@ -85,13 +86,16 @@ All caches are per-process, bounded, thread-safe `TTLCache` instances (`app/util
 
 | Cache | Location | Freshness |
 | --- | --- | --- |
-| `_cache` (128 entries, LRU, evicted after 600 s) | `main.py`, via `cached(key, ttl_seconds)` / `set_cache()` | Per route, see §9 |
-| Fleet analytics | `fleet_analytics.py` | Alerts: fresh 180 s, background refresh-ahead after 120 s, 30 s retry back-off after a failed refresh |
-| Validated tokens (1024 entries) | `auth.py` | 300 s; reused up to 600 s only while Supabase is unreachable, never past the JWT `exp` |
+| `_cache` (128 entries, LRU, evicted after 600 s or the entry's own TTL if longer) | `main.py`, via `cached(key, ttl_seconds)` / `set_cache()` | Per route, see §9 |
+| Fleet analytics (same retention rule) | `fleet_analytics.py` | Alerts: fresh 180 s, background refresh-ahead after 120 s, 30 s retry back-off after a failed refresh. Health, utilization, trips (180 s for an open window), safety, groups: concurrent identical calls run once and share the result or exception. One groups / units / calc_last read is shared by builders for 5 s. |
+| Group Trips snapshot | `fleet_analytics.py` (`group_trips_snapshot`) | One report run per report group and window, shared by `/api/dashboard/mileage` and `/api/fleet/trips` (timeframe, date and exact windows; `hours=N` trips run their own report). 60 s open, 1800 s closed, 30 s with unreadable cells or guessed columns. Both results report its window and `retrieved_at` and never outlive it; a failure is never cached. |
+| Validated tokens (1024 entries) | `auth.py` | 300 s; reused up to 600 s only while Supabase is unreachable, never past the JWT `exp`. Concurrent validations of one token share one Supabase round trip and its outcome. |
 | Fuel telematics bundles | `fuel/wialon_distance.py` | 120 s for ranges ending today, 3600 s for closed ranges, 30 s for incomplete bundles (`FUEL_TELEMATICS_TTL_*`) |
 
 - Cache keys include every parameter that changes the result.
-- The unit trips, unit idle and dashboard mileage routes never cache a report result flagged incomplete.
+- A window that ended before today's UAE midnight (e.g. `yesterday`) is a closed report: mileage, idle analytics and fleet trips cache it for 1800 s (`CLOSED_WINDOW_TTL_SECONDS`).
+- Report-result policy: complete results, and results partial only through permanent gaps (unmatched rows, ambiguous names, units outside the report group), use the normal TTL and keep their partial flags. Results partial through a possibly transient read problem (unreadable cells, guessed columns, a group member without a row) are kept 30 s; so is a partial safety scan. The utilization raw-message fallback is never cached. The unit trips and unit idle routes do not cache a result flagged incomplete.
+- After a Wialon failure, mileage and idle analytics serve the last good result marked `stale`, with its own `retrieved_at` (the Wialon read time).
 - Fuel efficiency's `period_key_for_date` is memoized (`lru_cache`), because it dominated trip bucketing time.
 
 ### 4.2 Performance diagnostics
@@ -214,9 +218,9 @@ Every route except `/`, `/health` and `/api/health` needs a Supabase bearer toke
 | `/api/wialon/audit` | GET | Fleet sensor/configuration audit | — |
 | `/api/dashboard/summary` | GET | Fleet distance, trips, safety for a rolling window | 60 s |
 | `/api/dashboard/fleet-health` | GET | Status counts, sensor availability, odometer | 300 s |
-| `/api/dashboard/mileage` | GET | Mileage ranking (`timeframe`, `from_time`/`to_time`, `from_date`/`to_date`, `group_id`) | 60 s (complete results only) |
+| `/api/dashboard/mileage` | GET | Mileage ranking (`timeframe`, `from_time`/`to_time`, `from_date`/`to_date`, `group_id`) | 60 s open / 1800 s closed window, 30 s transient partial; never past the shared Group Trips snapshot |
 | `/api/dashboard/trends` | GET | Hourly motion/mileage trend | 600 s |
-| `/api/idle/fleet-analytics` | GET | Fleet idle totals, events, hotspots, trend, groups; `events_complete` | 180 s (`refresh` / `skip_cache` bypass) |
+| `/api/idle/fleet-analytics` | GET | Fleet idle totals, events, hotspots, trend, groups; `events_complete` | 180 s open / 1800 s closed window (`refresh` / `skip_cache` bypass) |
 | `/api/fleet/health`, `/utilization`, `/trips`, `/safety`, `/alerts`, `/groups` | GET | Fleet analytics rollups | fleet analytics cache |
 | `/api/ai/chat` | POST | AI assistant | — |
 

@@ -28,6 +28,15 @@ export function setClientCache(key, data) {
     }
 }
 
+// The cached entry for key if it is younger than maxAgeMs, whether or not its fetch TTL has passed, as
+// { data, fetchedAt } (epoch ms); else null. Pages use it to show the last response, marked as not yet refreshed,
+// while a new request runs. Never fetches.
+export function peekClientCache(key, maxAgeMs) {
+    const entry = clientCache.get(key)
+    if (!entry || (Date.now() - entry.timestamp) >= maxAgeMs) return null
+    return { data: entry.data, fetchedAt: entry.timestamp }
+}
+
 export function clientCacheSize() {
     return clientCache.size
 }
@@ -52,16 +61,18 @@ export function clearClientCache(keyPrefix = "") {
 }
 
 // `fetchJson()` performs the request and resolves to the parsed body (fleetApi passes apiFetch + json()).
+// `options.cacheKey` (default: the URL) keys the cache and in-flight sharing, e.g. a URL tagged with its UAE date.
 export async function deduplicatedFetch(url, fetchJson, options = {}, ttlMs = 0) {
+    const key = options.cacheKey || url
     if (ttlMs > 0 && (!options.method || options.method === "GET") && !options.skipCache) {
-        const cachedData = getFromClientCache(url, ttlMs)
+        const cachedData = getFromClientCache(key, ttlMs)
         if (cachedData !== null) {
             return cachedData
         }
     }
 
-    if (inFlightRequests.has(url)) {
-        return inFlightRequests.get(url)
+    if (inFlightRequests.has(key)) {
+        return inFlightRequests.get(key)
     }
 
     const generation = cacheGeneration
@@ -69,17 +80,17 @@ export async function deduplicatedFetch(url, fetchJson, options = {}, ttlMs = 0)
         try {
             const data = await fetchJson()
             if (ttlMs > 0 && generation === cacheGeneration) {
-                setClientCache(url, data)
+                setClientCache(key, data)
             }
             return data
         } finally {
             // A clear may have dropped this entry and a newer request may now own the key
-            if (inFlightRequests.get(url) === promise) {
-                inFlightRequests.delete(url)
+            if (inFlightRequests.get(key) === promise) {
+                inFlightRequests.delete(key)
             }
         }
     })()
 
-    inFlightRequests.set(url, promise)
+    inFlightRequests.set(key, promise)
     return promise
 }

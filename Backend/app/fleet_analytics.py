@@ -16,7 +16,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from app.utils.datetime_helpers import to_iso_uae, now_timestamp
+import functools
+from app.utils.datetime_helpers import to_iso_uae, now_timestamp, closed_window_ttl
 from app.performance_diagnostics import log_cache_state, log_data_window, map_with_request_context, new_trace_id, request_trace_id
 from collections import Counter, defaultdict
 from typing import Dict, List, Any, Optional
@@ -33,7 +34,7 @@ from app.wialon_reports import (
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name, parse_wialon_epoch
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
 from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS
-from app.utils.ttl_cache import TTLCache
+from app.utils.ttl_cache import InFlight, TTLCache
 
 # ── Simple in-memory cache with TTL ──────────────────────────────────────────
 # Bounded LRU (keys include client-chosen hours and windows). Entries are evicted after the longest
@@ -49,7 +50,105 @@ def get_cached(key: str, ttl_seconds: int = 120) -> Optional[Any]:
     return None
 
 def set_cached(key: str, data: Any, ttl_seconds: Optional[int] = None):
-    _analytics_cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds}, _ANALYTICS_CACHE_RETENTION_SECONDS)
+    # Retained at least as long as the entry's own TTL (closed report windows outlive the default retention)
+    _analytics_cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds},
+                         max(_ANALYTICS_CACHE_RETENTION_SECONDS, ttl_seconds or 0))
+
+
+# Concurrent calls of one analytics builder with the same arguments share a single run (cache check included) and
+# its result or exception, so a cold cache is filled by one Wialon read instead of one per caller. Nothing is
+# retained: caching stays with each builder's own rules.
+_builds = InFlight()
+
+
+def _coalesced(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        key = (func.__name__, args, tuple(sorted(kwargs.items())))
+        return _builds.run(key, lambda: func(*args, **kwargs))
+    return wrapper
+
+
+def _remaining_ttl(key: str) -> float:
+    """Seconds until the cached entry for key stops being fresh under its own TTL (0 when absent)."""
+    entry = _analytics_cache.get(key)
+    if not entry or not entry.get("ttl"):
+        return 0.0
+    return max(0.0, entry["ttl"] - (time.time() - entry["time"]))
+
+
+# ── Shared fleet discovery ───────────────────────────────────────────────────
+# Groups, unit list and calc_last read once for every analytics builder running within this many seconds (the
+# alerts, groups and summary builds call several builders back to back). Callers treat the data as read-only.
+FLEET_DISCOVERY_TTL_SECONDS = 5
+
+
+def _fleet_discovery(sid: str):
+    """(raw_groups, vehicles, calc_data), read from Wialon at most once per FLEET_DISCOVERY_TTL_SECONDS."""
+    def read():
+        hit = get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
+        if hit:
+            return hit
+        raw_groups = get_vehicle_groups(sid)
+        vehicles = get_all_vehicles(sid)
+        calc_data = get_calculated_data(sid, vehicles)
+        value = (raw_groups, vehicles, calc_data)
+        set_cached("fleet_discovery", value, ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
+        return value
+    return get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS) or _builds.run("fleet_discovery", read)
+
+
+# ── Shared Group Trips snapshot ──────────────────────────────────────────────
+# /api/dashboard/mileage (Distance) and /api/fleet/trips (Trips) read the same Wialon Group Trips report. For one
+# report group and window they share one report execution: both results carry its window and retrieval time and
+# expire with it, so the two KPIs always come from the same report run. Open windows: GROUP_TRIPS_SNAPSHOT_TTL_SECONDS
+# (the Dashboard mileage freshness); closed windows: the closed-window TTL; rows with unreadable cells, guessed
+# columns or column warnings: TRANSIENT_PARTIAL_TTL_SECONDS. A failure is never cached.
+GROUP_TRIPS_SNAPSHOT_TTL_SECONDS = 60
+# get_cached() bound for snapshots: each entry's own TTL (set below) decides its freshness
+_ENTRY_TTL_DECIDES = 10 ** 9
+
+
+def group_trips_snapshot(report_fn, sid: str, group_id, window_spec: str, from_ts: int, to_ts: int):
+    """
+    The shared Group Trips result for (group_id, window_spec) and the seconds it stays fresh:
+    ({"rows", "from_time", "to_time", "retrieved_at"}, remaining_seconds). `report_fn` is
+    execute_wialon_group_trips_report as imported by the caller; a falsy group_id is the account's 'All Unit' group,
+    resolved by the report. Concurrent callers share one execution; raises what report_fn raises.
+    """
+    key = _group_trips_snapshot_key(group_id, window_spec)
+
+    def read():
+        snapshot = get_cached(key, ttl_seconds=_ENTRY_TTL_DECIDES)
+        if snapshot is None:
+            rows = report_fn(sid=sid, from_time_utc=from_ts, to_time_utc=to_ts, group_id=group_id)
+            transient = any(r.get("incomplete_fields") or r.get("column_warnings") or r.get("unlocated_fields")
+                            for r in rows or [])
+            ttl = (TRANSIENT_PARTIAL_TTL_SECONDS if transient
+                   else closed_window_ttl(to_ts, GROUP_TRIPS_SNAPSHOT_TTL_SECONDS))
+            snapshot = {"rows": rows, "from_time": from_ts, "to_time": to_ts, "retrieved_at": now_timestamp()}
+            set_cached(key, snapshot, ttl_seconds=ttl)
+        return snapshot, _remaining_ttl(key)
+
+    hit = get_cached(key, ttl_seconds=_ENTRY_TTL_DECIDES)
+    return (hit, _remaining_ttl(key)) if hit else _builds.run(key, read)
+
+
+def _group_trips_snapshot_key(group_id, window_spec: str) -> str:
+    return f"group_trips_snapshot_{group_id or 'all'}_{window_spec}"
+
+
+def shorten_group_trips_snapshot(group_id, window_spec: str) -> float:
+    """
+    A consumer found a possibly transient gap the rows alone do not show (a report-group member without a row): the
+    snapshot is re-read TRANSIENT_PARTIAL_TTL_SECONDS after it was read, like that consumer's result. Returns the
+    seconds it stays fresh.
+    """
+    key = _group_trips_snapshot_key(group_id, window_spec)
+    entry = _analytics_cache.get(key)
+    if entry and (entry.get("ttl") or 0) > TRANSIENT_PARTIAL_TTL_SECONDS:
+        entry["ttl"] = TRANSIENT_PARTIAL_TTL_SECONDS
+    return _remaining_ttl(key)
 
 
 # A report result partial only through permanent gaps (a unit outside the report group, a name shared by several
@@ -310,6 +409,7 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 # 1. FLEET HEALTH SERVICE
 # =============================================================================
 
+@_coalesced
 def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
     cached = get_cached("fleet_health_analytics", ttl_seconds=180) if use_cache else None
     log_cache_state("/api/fleet/health", cached is not None)
@@ -317,9 +417,7 @@ def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
         return cached
 
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calc_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
 
     calc_map = {item.get("i"): item for item in calc_data}
@@ -370,6 +468,7 @@ def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
 # 2. FLEET UTILIZATION SERVICE
 # =============================================================================
 
+@_coalesced
 def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
     window_to = int(time.time())
     from_time_utc = window_to - hours * 3600
@@ -381,9 +480,7 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         return cached
 
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calc_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
 
     # Primary: Fast authoritative Wialon Group Engine Report (Template 2)
@@ -409,7 +506,9 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         unmatched_rows = sorted({name for name in engine_by_name if name not in fleet_names})
         if unmatched_rows:
             logging.warning("Engine report rows name no fleet unit, left out of utilization: %s", unmatched_rows)
-        report_incomplete = bool(unmatched_rows) or bool(
+        # Unmatched rows are a permanent gap (cached, still partial); unreadable cells or guessed columns may be
+        # transient and are re-read after TRANSIENT_PARTIAL_TTL_SECONDS
+        transient_incomplete = bool(
             group_engine.get("column_warnings") or group_engine.get("unlocated_fields")) or any(
             uv.get("incomplete_fields") for uv in group_engine.get("vehicles", []))
         unit_results = []
@@ -478,7 +577,7 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         # Fallback: segmented from raw messages, a different method from the engine report. Labelled as such and
         # never cached, so it cannot stand in for the authoritative report on later requests.
         source = "raw_message_fallback"
-        report_incomplete = True
+        transient_incomplete = True
         unmatched_rows = []
 
         def _unknown_utilization(v_record):
@@ -588,9 +687,10 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         "vehicles": sorted(unit_results, key=lambda x: (x["utilization_percentage"] is not None, x["utilization_percentage"] or 0), reverse=True)
     }
 
-    # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
-    if not report_incomplete:
-        set_cached(cache_key, result)
+    # The raw-message fallback is never cached. From the report: permanently partial (unmatched rows) uses the normal
+    # TTL, transiently partial (unreadable cells, guessed columns) TRANSIENT_PARTIAL_TTL_SECONDS; flags are kept.
+    if source == "wialon_group_engine_report":
+        set_cached(cache_key, result, ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else None)
     return result
 
 
@@ -615,6 +715,7 @@ def _ambiguous_report_names(fleet: List[Dict[str, Any]], report_rows: List[Dict[
 # 3. TRIPS & MILEAGE SERVICE
 # =============================================================================
 
+@_coalesced
 def get_trips_mileage_analytics(
     hours: int = 24,
     from_time: int = None,
@@ -652,27 +753,42 @@ def get_trips_mileage_analytics(
         window_spec = f"hours-{hours or 24}"
 
     cache_key = f"trips_mileage_v3_{window_spec}_uae"
-    cached = get_cached(cache_key, ttl_seconds=180)
+    # A window that ended before today (UAE), e.g. yesterday, is a closed report: cached longer
+    trips_ttl = closed_window_ttl(eff_to, 180)
+    cached = get_cached(cache_key, ttl_seconds=trips_ttl)
     log_cache_state("/api/fleet/trips", cached is not None)
     if cached:
         return cached
 
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calc_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
     calc_map = {item.get("i"): item for item in calc_data}
 
-    # Primary: Fast authoritative Wialon Group Trips Report (Template 5)
+    # Primary: Fast authoritative Wialon Group Trips Report (Template 5), shared with /api/dashboard/mileage for the
+    # same report group and window (group_trips_snapshot): the result then reports the snapshot's window and retrieval
+    # time and expires with it. An hours-N window has no mileage counterpart (mileage takes timeframes, dates and
+    # exact bounds only), so it runs its own report and keeps the normal trips TTL.
     group_report = None
+    retrieved_at = None
+    snapshot_fresh_for = None
     try:
-        group_report = execute_wialon_group_trips_report(
-            sid=sid,
-            from_time_utc=eff_from,
-            to_time_utc=eff_to,
-            group_id=GROUP_ID_ALL_UNITS
-        )
+        if window_spec.startswith("hours-"):
+            group_report = execute_wialon_group_trips_report(
+                sid=sid,
+                from_time_utc=eff_from,
+                to_time_utc=eff_to,
+                group_id=GROUP_ID_ALL_UNITS
+            )
+        else:
+            try:
+                snapshot_group_id = resolve_all_units_group_id(sid, raw_groups)
+            except WialonAPIError:
+                snapshot_group_id = GROUP_ID_ALL_UNITS  # resolved by the report itself, as before
+            snapshot, snapshot_fresh_for = group_trips_snapshot(
+                execute_wialon_group_trips_report, sid, snapshot_group_id, window_spec, eff_from, eff_to)
+            group_report = snapshot["rows"]
+            eff_from, eff_to, retrieved_at = snapshot["from_time"], snapshot["to_time"], snapshot["retrieved_at"]
     except Exception as e:
         logging.warning("Group trips report failed, falling back to unit analysis: %s", e)
         group_report = None
@@ -881,6 +997,8 @@ def get_trips_mileage_analytics(
         "period_hours": eff_hours,
         "from_time": eff_from,
         "to_time": eff_to,
+        # When this result was read from Wialon (UTC epoch seconds); a cached response keeps its original time
+        "retrieved_at": retrieved_at or now_timestamp(),
         "source": source,
         "summary": {
             "total_trips": total_trips,
@@ -901,7 +1019,14 @@ def get_trips_mileage_analytics(
         "vehicles": sorted(vehicle_trips, key=lambda x: (x["gps_mileage_km"] is not None, x["gps_mileage_km"] or 0), reverse=True)
     }
 
-    set_cached(cache_key, result, ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if report_incomplete else None)
+    result_ttl = TRANSIENT_PARTIAL_TTL_SECONDS if report_incomplete else trips_ttl
+    if snapshot_fresh_for is not None and report_incomplete:
+        snapshot_fresh_for = shorten_group_trips_snapshot(snapshot_group_id, window_spec)
+    if snapshot_fresh_for is not None:
+        # From the shared snapshot: never outlives it, so Trips and Distance move to the next report run together
+        result_ttl = min(result_ttl, snapshot_fresh_for)
+    if result_ttl > 0:
+        set_cached(cache_key, result, ttl_seconds=result_ttl)
     return result
 
 
@@ -909,6 +1034,7 @@ def get_trips_mileage_analytics(
 # 4. SAFETY ANALYTICS SERVICE
 # =============================================================================
 
+@_coalesced
 def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, Any]:
     window_to = int(time.time())
     log_data_window("/api/fleet/safety", window_to - hours * 3600, window_to)
@@ -919,9 +1045,7 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         return cached
 
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calc_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
 
     def _fetch_safety_events(v_record):
@@ -1064,9 +1188,9 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         "events": all_events[:100]  # Cap for snappy JSON response
     }
 
-    # A partial result is not cached; the next request re-reads the failed or truncated units
-    if not partial:
-        set_cached(cache_key, result)
+    # A partial result (failed or truncated units, still flagged) is kept only TRANSIENT_PARTIAL_TTL_SECONDS, so
+    # concurrent and back-to-back callers do not each rescan every unit's history
+    set_cached(cache_key, result, ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if partial else None)
     return result
 
 
@@ -1417,6 +1541,7 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
 # 6. DYNAMIC GROUP ANALYTICS SERVICE
 # =============================================================================
 
+@_coalesced
 def get_fleet_groups_analytics() -> Dict[str, Any]:
     cached = get_cached("fleet_groups_analytics", ttl_seconds=180)
     log_cache_state("/api/fleet/groups", cached is not None)
@@ -1424,9 +1549,7 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         return cached
 
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calc_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
 
     fleet_by_id = {v["vehicle_id"]: v for v in fleet}

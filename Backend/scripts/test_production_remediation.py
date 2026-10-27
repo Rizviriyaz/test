@@ -200,8 +200,11 @@ def test_safety_partial_not_cached_and_alerts_still_load():
         assert res["partial"] is True and res["failed_vehicles"] == ["B"], res
         assert res["summary"]["total_events"] == 1 and res["events"][0]["event_type"] == "Harsh Braking"
         assert res["vehicles_without_safety_source"] == 0, "A reports io_253"
-        assert fa.get_cached("safety_analytics_24", ttl_seconds=180) is None, "a partial result is not cached"
-    print("[PASS] A2: one unit's history failure makes safety partial (listed, uncached) instead of failing it.")
+        # A partial result is kept only for the short transient TTL (its flags intact), then re-read
+        assert fa._analytics_cache.get("safety_analytics_24")["ttl"] == fa.TRANSIENT_PARTIAL_TTL_SECONDS
+        with patch("time.time", return_value=time.time() + fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1):
+            assert fa.get_cached("safety_analytics_24", ttl_seconds=180) is None, "re-read after the transient TTL"
+    print("[PASS] A2: one unit's history failure makes safety partial (listed, cached 30 s only) instead of failing it.")
 
     health = {"generated_at": NOW, "vehicles": []}
     with patch.object(fa, "get_fleet_health_analytics", return_value=health), \

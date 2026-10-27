@@ -237,8 +237,9 @@ test("Today and Yesterday use one driving definition; the comparison covers unit
     const yesterday = drivingSecondsByVehicle(idlePayload([motionRow(1, 1800, 40), motionRow(2, 900, 20)], DAY - 86400))
     assert.deepEqual(sumKnownInBoth(today, yesterday), { a: 3600, b: 1800, units: 1 }, "unit 2 unknown today is left out of both sides")
     const page = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
-    assert.match(page, /calculateTimeframeActivity\(todayMileageData, tripsData, idleAnalyticsData\)/)
-    assert.match(page, /calculateTimeframeActivity\(yesterdayMileageData, yesterdayTripsData, yesterdayIdleAnalyticsData\)/)
+    // Both days pass their reports through the UAE day guard (a previous day's payload is dropped), same function
+    assert.match(page, /calculateTimeframeActivity\(todayMileage\.data, todayTrips, todayIdle\)/)
+    assert.match(page, /calculateTimeframeActivity\(yesterdayMileage, yesterdayTrips, yesterdayIdle\)/)
     assert.match(page, /drivingSecondsByVehicle\(\s*idleDataPayload, id =>/)
     assert.doesNotMatch(page, /engineMileageAgrees|engine_mileage_km/, "no cross-report mileage check on the Dashboard")
     assert.match(page, /sumKnownInBoth\(todayFleetActivity\.drivingByVehicle, yesterdayFleetActivity\.drivingByVehicle\)/)

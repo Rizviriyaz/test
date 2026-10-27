@@ -374,10 +374,12 @@ def test_utilization_unmatched_report_row_flagged_not_cached():
         assert "GHOST" not in {v["vehicle_name"] for v in res["vehicles"]} and set(res) == set(baseline), res
         engine = FakeReportEngine(tables=_tables_with_ghost_engine_row())
         stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        fa.get_fleet_utilization_analytics(hours=24)
-        assert engine.count("report/exec_report") == 1, "a result with an unmatched row must not be served from cache"
-    print("[PASS] D4: utilization with a report row naming no fleet unit -> partial (totals unchanged), not cached; "
-          "response keys unchanged.")
+        cached = fa.get_fleet_utilization_analytics(hours=24)
+        # An unmatched row is a permanent gap: cached for the normal TTL, still flagged partial
+        assert engine.count("report/exec_report") == 0 and cached["partial"] is True, "served from cache, still partial"
+        assert fa._analytics_cache.get("fleet_utilization_24")["ttl"] is None, "normal TTL"
+    print("[PASS] D4: utilization with a report row naming no fleet unit -> partial (totals unchanged), cached as a "
+          "permanent gap; response keys unchanged.")
 
 
 def _engine_tables_with_cells(**cells):
@@ -470,7 +472,8 @@ def test_engine_other_incomplete_cases_cache_policy():
             _assert_permanent_cache(
                 stack, lambda: FakeReportEngine(tables=tables), _idle_closed, label,
                 lambda r: {x["vehicle_name"]: x for x in r["by_vehicle"]}["UNIT-C"]["engine_mileage_km"] is None)
-    # Utilization (always a window ending now) is unchanged: a placeholder still prevents caching
+    # Utilization (always a window ending now): a row with an unreadable cell is treated as transient, kept only for
+    # the short transient TTL and then re-read
     tables = _engine_tables_with_cells(**{"UNIT-C": (MILEAGE_COL, "-----")})
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=tables))
@@ -478,10 +481,14 @@ def test_engine_other_incomplete_cases_cache_policy():
         engine = FakeReportEngine(tables=tables)
         stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
         fa.get_fleet_utilization_analytics(hours=24)
-        assert engine.count("report/exec_report") == 1, "utilization caching is unchanged"
+        assert engine.count("report/exec_report") == 0, "kept for the transient TTL"
+        assert fa._analytics_cache.get("fleet_utilization_24")["ttl"] == fa.TRANSIENT_PARTIAL_TTL_SECONDS
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        fa.get_fleet_utilization_analytics(hours=24)
+        assert engine.count("report/exec_report") == 1, "re-read after the transient TTL"
     print("[PASS] 69597 case: unreadable duration cells (with or without a placeholder) are re-read after the short "
           "transient TTL; an unreadable Engine Hours mileage cell no longer limits idle caching (value stays unknown); "
-          "utilization with a placeholder is still never cached.")
+          "utilization with a placeholder is kept only for the transient TTL.")
 
 
 def test_unit_routes_guessed_columns():

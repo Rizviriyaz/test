@@ -1,5 +1,6 @@
 import { supabase } from "../lib/supabase"
-import { clearClientCache, deduplicatedFetch as dedupeRequest, getFromClientCache } from "./requestCache"
+import { clearClientCache, deduplicatedFetch as dedupeRequest, getFromClientCache, peekClientCache } from "./requestCache"
+import { getUAETodayStr } from "../utils/datetime"
 
 export const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "")
 
@@ -64,12 +65,28 @@ async function apiFetch(url, options = {}) {
 // In-flight request sharing and the client cache live in requestCache.js (testable offline)
 export { getFromClientCache, setClientCache, clearClientCache } from "./requestCache"
 
+// How old a cached response may be and still be shown (marked as not yet refreshed) while a new request runs:
+// live positions only briefly, report-based analytics longer. Never used in place of a fetch.
+export const STALE_LIVE_MS = 2 * 60 * 1000
+export const STALE_REPORT_MS = 10 * 60 * 1000
+
+// UAE calendar timeframes ("today" ...) keep the same URL across midnight: their client cache key carries the UAE
+// date, so a response for one day is never served (or shown stale) for the next
+const CALENDAR_TIMEFRAMES = new Set(["today", "yesterday", "week", "month", "year"])
+function calendarCacheKey(url, timeframe) {
+    return CALENDAR_TIMEFRAMES.has(String(timeframe || "").toLowerCase()) ? `${url}#uae=${getUAETodayStr()}` : url
+}
+
 function deduplicatedFetch(url, options = {}, ttlMs = 0) {
     return dedupeRequest(url, async () => (await apiFetch(url, options)).json(), options, ttlMs)
 }
 
 export async function getVehicles(options = {}) {
     return deduplicatedFetch(`${API_URL}/api/vehicles`, options, 8000)
+}
+
+export function peekVehicles(maxAgeMs = STALE_LIVE_MS) {
+    return peekClientCache(`${API_URL}/api/vehicles`, maxAgeMs)
 }
 
 export async function getVehicleDetails(vehicleId, options = {}) {
@@ -224,18 +241,24 @@ function fleetIdleAnalyticsUrl(options = {}) {
         url += `?${queryString}`
     }
 
-    return { url, shouldBypass }
+    return { url, shouldBypass, cacheKey: calendarCacheKey(url, timeframe) }
 }
 
 export async function getFleetIdleAnalytics(options = {}) {
-    const { url, shouldBypass } = fleetIdleAnalyticsUrl(options)
-    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass }, FLEET_IDLE_TTL_MS)
+    const { url, shouldBypass, cacheKey } = fleetIdleAnalyticsUrl(options)
+    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass, cacheKey }, FLEET_IDLE_TTL_MS)
 }
 
 // The still-fresh client-cached response for these options, or null (never fetches)
 export function getCachedFleetIdleAnalytics(options = {}) {
-    const { url, shouldBypass } = fleetIdleAnalyticsUrl(options)
-    return shouldBypass ? null : getFromClientCache(url, FLEET_IDLE_TTL_MS)
+    const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl(options)
+    return shouldBypass ? null : getFromClientCache(cacheKey, FLEET_IDLE_TTL_MS)
+}
+
+// The last response for these options (up to maxAgeMs old, possibly past its TTL), or null (never fetches)
+export function peekFleetIdleAnalytics(options = {}, maxAgeMs = STALE_REPORT_MS) {
+    const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl(options)
+    return shouldBypass ? null : peekClientCache(cacheKey, maxAgeMs)
 }
 
 export async function sendAiChatMessage(messages) {
@@ -267,7 +290,7 @@ export async function getFleetUtilizationAnalytics(hours = 24, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fleet/utilization?hours=${hours}`, options, 30000)
 }
 
-export async function getFleetTripsAnalytics(options = {}) {
+function fleetTripsUrl(options = {}) {
     let url = `${API_URL}/api/fleet/trips`
     const params = new URLSearchParams()
 
@@ -285,8 +308,16 @@ export async function getFleetTripsAnalytics(options = {}) {
 
     const queryString = params.toString()
     if (queryString) url += `?${queryString}`
+    return { url, cacheKey: calendarCacheKey(url, options?.timeframe) }
+}
 
-    return deduplicatedFetch(url, options, 30000)
+export async function getFleetTripsAnalytics(options = {}) {
+    const { url, cacheKey } = fleetTripsUrl(options)
+    return deduplicatedFetch(url, { ...(typeof options === "object" ? options : {}), cacheKey }, 30000)
+}
+
+export function peekFleetTripsAnalytics(options = {}, maxAgeMs = STALE_REPORT_MS) {
+    return peekClientCache(fleetTripsUrl(options).cacheKey, maxAgeMs)
 }
 
 export async function getFleetSafetyAnalytics(hours = 168, options = {}) {
@@ -295,6 +326,14 @@ export async function getFleetSafetyAnalytics(hours = 168, options = {}) {
 
 export async function getFleetAlertsAnalytics(options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fleet/alerts`, options, 30000)
+}
+
+export function peekFleetAlertsAnalytics(maxAgeMs = STALE_REPORT_MS) {
+    return peekClientCache(`${API_URL}/api/fleet/alerts`, maxAgeMs)
+}
+
+export function peekFleetHealthAnalytics(maxAgeMs = STALE_REPORT_MS) {
+    return peekClientCache(`${API_URL}/api/fleet/health`, maxAgeMs)
 }
 
 export async function getFleetGroupsAnalytics(options = {}) {

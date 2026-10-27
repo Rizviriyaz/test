@@ -475,6 +475,7 @@ export default function FuelPerformance() {
                     <DrivingVsIdlingChart
                         efficiencyData={efficiency}
                         vehicles={vehiclesData.data}
+                        vehiclesUnavailable={Boolean(rankingsError)}
                         loading={loadingEfficiency || loadingRankings}
                         idleRate={idleRate}
                         onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}

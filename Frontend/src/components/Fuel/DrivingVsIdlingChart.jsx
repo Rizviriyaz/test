@@ -12,6 +12,8 @@ function formatCurrency(val) {
 export default function DrivingVsIdlingChart({
     efficiencyData,
     vehicles = [],
+    // True when the vehicle list could not be loaded: its section says so instead of "no vehicles"
+    vehiclesUnavailable = false,
     loading,
     idleRate = 2.0,
     onSelectVehicle,
@@ -185,7 +187,11 @@ export default function DrivingVsIdlingChart({
                             <span className="text-[11px] font-mono text-slate-400">Rate: {idleRate.toFixed(1)} L/h</span>
                         </div>
 
-                        {topIdleWasters.length === 0 ? (
+                        {vehiclesUnavailable ? (
+                            <p role="alert" className="py-8 text-center text-xs text-slate-500">
+                                Vehicle rankings could not be loaded; idle wasters are unavailable.
+                            </p>
+                        ) : topIdleWasters.length === 0 ? (
                             <p className="py-8 text-center text-xs text-slate-400">
                                 No vehicles with recorded idle fuel waste in this period.
                             </p>

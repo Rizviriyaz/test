@@ -5,8 +5,8 @@ import PageHeader from "../components/Common/PageHeader"
 import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
-import { EmptyState, ErrorState, LoadingState } from "../components/Common/StateViews"
-import { getFleetHealthAnalytics } from "../api/fleetApi"
+import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
+import { getFleetHealthAnalytics, peekFleetHealthAnalytics } from "../api/fleetApi"
 import { formatUAETime } from "../utils/datetime"
 import { isHealthyVehicle } from "../utils/fleetRules"
 
@@ -88,7 +88,8 @@ const FILTERS = [
 // ── Main Component ────────────────────────────────────────────────────────────
 
 export default function VehicleHealth() {
-    const [data, setData] = useState(null)
+    // An earlier visit's response (labelled with its own "Data as of" time) is shown while the page refetches
+    const [data, setData] = useState(() => peekFleetHealthAnalytics()?.data ?? null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [search, setSearch] = useState("")
@@ -149,38 +150,40 @@ export default function VehicleHealth() {
             />
 
             <div className="space-y-4">
+                {/* A failed refresh keeps the last data on screen, labelled by its "Data as of" time */}
+                {error && data && <ErrorBanner message={`Refresh failed: ${error}`} onRetry={refresh} />}
                 <KpiStrip label="Fleet health summary" className="grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
-                    <KpiCard label="Fleet vehicles" loading={loading} value={data?.total_vehicles ?? "—"} />
+                    <KpiCard label="Fleet vehicles" loading={loading && !data} value={data?.total_vehicles ?? "—"} />
                     <KpiCard
                         label="Healthy units"
                         dot="bg-status-moving"
-                        loading={loading}
+                        loading={loading && !data}
                         value={data?.healthy_vehicles ?? "—"}
                     />
                     <KpiCard
                         label="Avg health score"
-                        loading={loading}
+                        loading={loading && !data}
                         value={data?.average_health_score != null ? `${data.average_health_score}%` : "—"}
                     />
                     <KpiCard
                         label="Battery issues"
                         dot={data?.battery_warnings > 0 ? "bg-status-idling" : undefined}
-                        loading={loading}
-                        value={data?.battery_warnings ?? 0}
+                        loading={loading && !data}
+                        value={data?.battery_warnings ?? "—"}
                         valueColor={data?.battery_warnings > 0 ? "text-amber-800" : "text-slate-900"}
                     />
                     <KpiCard
                         label="GPS warnings"
                         dot={data?.gps_warnings > 0 ? "bg-status-idling" : undefined}
-                        loading={loading}
-                        value={data?.gps_warnings ?? 0}
+                        loading={loading && !data}
+                        value={data?.gps_warnings ?? "—"}
                         valueColor={data?.gps_warnings > 0 ? "text-amber-800" : "text-slate-900"}
                     />
                     <KpiCard
                         label="Offline / delayed"
                         dot={data?.connectivity_warnings > 0 ? "bg-status-offline" : undefined}
-                        loading={loading}
-                        value={data?.connectivity_warnings ?? 0}
+                        loading={loading && !data}
+                        value={data?.connectivity_warnings ?? "—"}
                         valueColor={data?.connectivity_warnings > 0 ? "text-rose-700" : "text-slate-900"}
                     />
                 </KpiStrip>
@@ -214,9 +217,9 @@ export default function VehicleHealth() {
                         </div>
                     </div>
 
-                    {loading ? (
+                    {loading && !data ? (
                         <LoadingState label="Loading vehicle health…" className="rounded-none border-0" />
-                    ) : error ? (
+                    ) : error && !data ? (
                         <ErrorState message={error} onRetry={refresh} className="rounded-none border-0" />
                     ) : filtered.length === 0 ? (
                         <EmptyState

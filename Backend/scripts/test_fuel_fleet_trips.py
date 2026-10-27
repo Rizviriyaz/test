@@ -366,13 +366,19 @@ def test_engine_idle_subrows_batched_for_used_rows_only():
     eng = FakeReportEngine()
     with patch("app.wialon_reports.wialon_request", eng):
         full = wr.execute_wialon_group_engine_idle_report("s", 0, 1, group_id=1)
-    assert eng.count("core/batch") == 1 and eng.count("report/get_result_subrows") == 3 - 2, eng.calls
+    # Fixture rows: UNIT-A idles with 3 sub-rows, UNIT-B with 1 (its single interval), UNIT-C has no idling: the two
+    # idling rows' first pages go out in one batch (the fake engine also counts each batched sub-row request)
+    assert eng.count("core/batch") == 1 and eng.count("report/get_result_subrows") == 2, eng.calls
     assert len(full["events"]) == 4 and full["vehicles"][0]["idle_events"] == 3
     eng = FakeReportEngine()
     with patch("app.wialon_reports.wialon_request", eng):
         scoped = wr.execute_wialon_group_engine_idle_report("s", 0, 1, group_id=1, event_vehicle_names={"UNIT-B"})
+    batched_rows = [c["params"]["rowIndex"] for s, p in eng.calls if s == "core/batch" for c in p["params"]]
+    assert batched_rows == [1], f"only the scoped unit's row is read: {batched_rows}"
+    eng = FakeReportEngine()
+    with patch("app.wialon_reports.wialon_request", eng):
         none = wr.execute_wialon_group_engine_idle_report("s", 0, 1, group_id=1, include_events=False)
-    assert eng.count("core/batch") == 0 and eng.count("report/get_result_subrows") == 0, "no sub-rows for rows not using them"
+    assert eng.count("core/batch") == 0 and eng.count("report/get_result_subrows") == 0, "no sub-rows for a summary report"
     assert scoped["vehicles"][0]["idle_events"] is None and none["vehicles"][0]["total_idle_seconds"] == 5400
     print("[PASS] Idle events: sub-rows of the used rows come in one core/batch call; scoped/summary reports fetch none.")
 

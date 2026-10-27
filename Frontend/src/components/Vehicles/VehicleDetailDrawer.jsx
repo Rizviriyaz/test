@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Link } from "react-router-dom"
 import { Loader2, ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
@@ -85,9 +85,15 @@ export default function VehicleDetailDrawer({
     const [refreshTick, setRefreshTick] = useState(0)
     useEffect(() => {
         if (!activeVehicleId) return undefined
-        const timer = setInterval(() => setRefreshTick(t => t + 1), DRAWER_REFRESH_MS)
+        // No refresh while the tab is hidden
+        const timer = setInterval(() => { if (!document.hidden) setRefreshTick(t => t + 1) }, DRAWER_REFRESH_MS)
         return () => clearInterval(timer)
     }, [activeVehicleId])
+
+    // Vehicle whose trips / idle events are shown: a periodic refresh of the same vehicle keeps them on screen
+    // (no loading state, kept on a failed refresh); another vehicle's are never shown for this one
+    const tripsLoadedForRef = useRef(null)
+    const idleLoadedForRef = useRef(null)
 
     useEffect(() => {
         if (!activeVehicleId) return
@@ -95,15 +101,19 @@ export default function VehicleDetailDrawer({
 
         async function fetchVehicleTripsData() {
             const vid = activeVehicleId
+            const refreshing = tripsLoadedForRef.current === vid
             try {
-                setLoadingTrips(true)
+                if (!refreshing) setLoadingTrips(true)
                 const { from_time, to_time } = getUAETodayBounds()
-                const res = await getVehicleTrips(vid, { from_time, to_time })
+                // The window end is rounded down to the minute so repeated requests share the client and server
+                // caches instead of each running a new Wialon report; the response states the window it covers
+                const res = await getVehicleTrips(vid, { from_time, to_time: Math.max(from_time, Math.floor(to_time / 60) * 60) })
                 if (!active) return
                 setTripsData(res)
+                tripsLoadedForRef.current = vid
             } catch (err) {
                 console.error("Failed to fetch vehicle trips:", err)
-                if (active) setTripsData(null)
+                if (active && !refreshing) setTripsData(null)
             } finally {
                 if (active) setLoadingTrips(false)
             }
@@ -116,17 +126,19 @@ export default function VehicleDetailDrawer({
                 setIdleEventsStatus(idleEventsComplete === false ? "partial" : "complete")
                 return
             }
+            const refreshing = idleLoadedForRef.current === vid
             try {
-                setLoadingIdleEvents(true)
+                if (!refreshing) setLoadingIdleEvents(true)
                 const res = await getFleetIdleAnalytics({ vehicle_id: vid, timeframe: "today", include_events: true })
                 if (!active) return
                 const evs = (res?.events || []).filter(e => String(e.vehicle_id) === String(vid))
                 setVehicleIdleEvents(evs)
                 // Scoped to this vehicle, so events_complete describes its event list alone
                 setIdleEventsStatus(res?.events_complete === false ? "partial" : "complete")
+                idleLoadedForRef.current = vid
             } catch (err) {
                 console.error("Failed to fetch vehicle idle events:", err)
-                if (active) {
+                if (active && !refreshing) {
                     setVehicleIdleEvents(null)
                     setIdleEventsStatus("error")
                 }

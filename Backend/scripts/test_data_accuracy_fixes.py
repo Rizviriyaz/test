@@ -58,6 +58,9 @@ def _patches(stack, engine, units=UNITS, groups=GROUPS, calculated=CALCULATED, l
     stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
     stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=groups))
     for target in ("app.main", "app.fleet_analytics"):
+        # The fixture window is fixed in the past; these tests cover the cache rules of an open (today's) window,
+        # so it is treated as open. The closed-window TTL is covered by test_cache_coalescing.py.
+        stack.enter_context(patch(f"{target}.closed_window_ttl", side_effect=lambda _eff_to, open_ttl: open_ttl))
         stack.enter_context(patch(f"{target}.login", return_value="sid"))
         stack.enter_context(patch(f"{target}.get_vehicle_groups", return_value=groups))
         stack.enter_context(patch(f"{target}.get_all_vehicles", return_value=units))
@@ -319,7 +322,7 @@ def test_transient_failure_serves_last_good_with_backoff():
         stale = _mileage()
         assert stale["stale"] is True and failing.count("report/exec_report") == 1, stale
         assert stale["total_km"] == good["total_km"] and stale["all_units"] == good["all_units"], "last good result"
-        assert stale["retrieved_at"] <= retrieved - main.MILEAGE_TTL_SECONDS, "its real (older) retrieval time"
+        assert stale["retrieved_at"] == retrieved, "its own (older) Wialon retrieval time, not when it was cached"
         _mileage()
         assert failing.count("report/exec_report") == 1, "within the backoff Wialon is not asked again"
         failures, retry_at = main._failure_backoff.get(next(iter(main._failure_backoff._data)))

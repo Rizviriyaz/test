@@ -2,7 +2,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
-from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES
+from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES, closed_window_ttl
 import logging
 import os
 import sys
@@ -269,7 +269,9 @@ def cached(key, ttl_seconds=300):
     return None
 
 def set_cache(key, data, ttl_seconds=None):
-    _cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds}, _CACHE_RETENTION_SECONDS)
+    # Retained at least as long as the entry's own TTL (closed report windows outlive the default retention)
+    _cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds},
+               max(_CACHE_RETENTION_SECONDS, ttl_seconds or 0))
 
 
 # ─── Report-result cache policy ───
@@ -292,7 +294,12 @@ def _last_good(key):
     entry = _cache.get(key)
     if not entry or not isinstance(entry.get("data"), dict):
         return None
-    return {**entry["data"], "stale": True, "retrieved_at": int(entry["time"])}
+    # The result's own retrieval time when it has one (e.g. a shared Group Trips snapshot read before it was cached),
+    # else when it was cached
+    retrieved_at = entry["data"].get("retrieved_at")
+    if isinstance(retrieved_at, bool) or not isinstance(retrieved_at, (int, float)) or retrieved_at <= 0:
+        retrieved_at = entry["time"]
+    return {**entry["data"], "stale": True, "retrieved_at": int(retrieved_at)}
 
 
 def _in_failure_backoff(key):
@@ -381,24 +388,30 @@ def get_vehicles():
         return hit
 
     try:
-        # Login to Wialon
-        sid = login()
+        # Overlapping polls (several tabs or users) wait for the read already running and reuse its result
+        with _single_flight("fleet-vehicles-live"):
+            hit = cached("fleet-vehicles-live", ttl_seconds=5)
+            if hit:
+                return hit
 
-        # Get all vehicles
-        vehicles = get_all_vehicles(sid)
+            # Login to Wialon
+            sid = login()
 
-        # Get latest calculated data
-        calculated_data = get_calculated_data(sid, vehicles)
+            # Get all vehicles
+            vehicles = get_all_vehicles(sid)
 
-        # Build final vehicle data
-        fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
+            # Get latest calculated data
+            calculated_data = get_calculated_data(sid, vehicles)
 
-        result = {
-            "count": len(fleet),
-            "vehicles": fleet
-        }
-        set_cache("fleet-vehicles-live", result)
-        return result
+            # Build final vehicle data
+            fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
+
+            result = {
+                "count": len(fleet),
+                "vehicles": fleet
+            }
+            set_cache("fleet-vehicles-live", result)
+            return result
 
     except Exception as e:
         raise _internal_error("/api/vehicles")
@@ -909,62 +922,72 @@ def get_dashboard_summary(request: Request = None, hours: Annotated[int, Query(g
     enforce_rate_limit(request, "heavy")
 
     try:
-        from app.fleet_analytics import (
-            get_fleet_utilization_analytics,
-            get_trips_mileage_analytics,
-            get_safety_analytics
-        )
-
-        sid = login()
-        vehicles = get_all_vehicles(sid)
-        vehicles_by_id = {vehicle.get("id"): vehicle for vehicle in vehicles}
-        calculated_data = get_calculated_data(sid, vehicles)
-        fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
-
-        # Authoritative live counts
-        moving = sum(1 for v in fleet if v.get("status") == "MOVING")
-        idling = sum(1 for v in fleet if v.get("status") == "IDLING")
-        stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
-        delayed = sum(1 for v in fleet if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
-        offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
-
-        # Authoritative analytics
-        trips_data = get_trips_mileage_analytics(hours=hours)
-        # Safety loads raw history for every unit: only computed for windows up to MAX_SAFETY_HOURS; longer windows
-        # report the count as unknown (null) instead of loading weeks of messages per unit
-        safety_supported = hours <= MAX_SAFETY_HOURS
-        safety_data = get_safety_analytics(hours=hours) if safety_supported else None
-        util_data = get_fleet_utilization_analytics(hours=hours)
-
-        result = {
-            "hours": hours,
-            "summary": {
-                "total_vehicles": len(fleet),
-                "moving": moving,
-                "idling": idling,
-                "stopped": stopped,
-                "delayed": delayed,
-                "offline": offline,
-                "total_distance_km": trips_data.get("summary", {}).get("total_distance_km", 0.0),
-                # The totals above cover vehicles with known values only; these flag when some were unknown
-                "total_distance_partial": bool(trips_data.get("summary", {}).get("total_distance_partial")),
-                "total_idle_minutes": round(util_data["total_idle_hours"] * 60, 1) if util_data.get("total_idle_hours") is not None else None,
-                "total_idle_partial": bool(util_data.get("partial")),
-                "total_trips": trips_data.get("summary", {}).get("total_trips", 0),
-                "total_trips_partial": bool(trips_data.get("summary", {}).get("total_trips_partial")),
-                "total_safety_events": safety_data.get("summary", {}).get("total_events", 0) if safety_data else None,
-                "total_safety_partial": bool(safety_data.get("partial")) if safety_data else False,
-                "safety_window_supported": safety_supported,
-            }
-        }
-
-        # A partial total is not cached; the next request re-reads the reports
-        if not (result["summary"]["total_distance_partial"] or result["summary"]["total_idle_partial"]
-                or result["summary"]["total_safety_partial"]):
-            set_cache(cache_key, result)
-        return result
+        # Overlapping identical requests wait for the one already running and reuse its cached result
+        with _single_flight(cache_key):
+            hit = cached(cache_key, ttl_seconds=60)
+            if hit:
+                return hit
+            return _build_dashboard_summary(cache_key, hours)
     except Exception as e:
         raise _internal_error("/api/dashboard/summary")
+
+
+def _build_dashboard_summary(cache_key, hours):
+    """Build the /api/dashboard/summary payload and cache it under cache_key when no total is partial."""
+    from app.fleet_analytics import (
+        get_fleet_utilization_analytics,
+        get_trips_mileage_analytics,
+        get_safety_analytics
+    )
+
+    sid = login()
+    vehicles = get_all_vehicles(sid)
+    vehicles_by_id = {vehicle.get("id"): vehicle for vehicle in vehicles}
+    calculated_data = get_calculated_data(sid, vehicles)
+    fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
+
+    # Authoritative live counts
+    moving = sum(1 for v in fleet if v.get("status") == "MOVING")
+    idling = sum(1 for v in fleet if v.get("status") == "IDLING")
+    stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
+    delayed = sum(1 for v in fleet if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
+    offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
+
+    # Authoritative analytics
+    trips_data = get_trips_mileage_analytics(hours=hours)
+    # Safety loads raw history for every unit: only computed for windows up to MAX_SAFETY_HOURS; longer windows
+    # report the count as unknown (null) instead of loading weeks of messages per unit
+    safety_supported = hours <= MAX_SAFETY_HOURS
+    safety_data = get_safety_analytics(hours=hours) if safety_supported else None
+    util_data = get_fleet_utilization_analytics(hours=hours)
+
+    result = {
+        "hours": hours,
+        "summary": {
+            "total_vehicles": len(fleet),
+            "moving": moving,
+            "idling": idling,
+            "stopped": stopped,
+            "delayed": delayed,
+            "offline": offline,
+            "total_distance_km": trips_data.get("summary", {}).get("total_distance_km", 0.0),
+            # The totals above cover vehicles with known values only; these flag when some were unknown
+            "total_distance_partial": bool(trips_data.get("summary", {}).get("total_distance_partial")),
+            "total_idle_minutes": round(util_data["total_idle_hours"] * 60, 1) if util_data.get("total_idle_hours") is not None else None,
+            "total_idle_partial": bool(util_data.get("partial")),
+            "total_trips": trips_data.get("summary", {}).get("total_trips", 0),
+            "total_trips_partial": bool(trips_data.get("summary", {}).get("total_trips_partial")),
+            "total_safety_events": safety_data.get("summary", {}).get("total_events", 0) if safety_data else None,
+            "total_safety_partial": bool(safety_data.get("partial")) if safety_data else False,
+            "safety_window_supported": safety_supported,
+        }
+    }
+
+    # A partial total is not cached; the next request re-reads the reports
+    if not (result["summary"]["total_distance_partial"] or result["summary"]["total_idle_partial"]
+            or result["summary"]["total_safety_partial"]):
+        set_cache(cache_key, result)
+    return result
 
 
 @app.get("/api/dashboard/fleet-health")
@@ -1106,7 +1129,9 @@ def get_dashboard_mileage(
         window_spec = f"tf-{timeframe_norm}-{eff_from}"
 
     cache_key = f"dashboard-mileage-v3-{window_spec}-{group_id}-uae"
-    hit = cached(cache_key, ttl_seconds=MILEAGE_TTL_SECONDS)
+    # A window that ended before today (UAE), e.g. yesterday, is a closed report: cached longer
+    mileage_ttl = closed_window_ttl(eff_to, MILEAGE_TTL_SECONDS)
+    hit = cached(cache_key, ttl_seconds=mileage_ttl)
     log_cache_state("/api/dashboard/mileage", hit is not None)
     if hit:
         return hit
@@ -1141,6 +1166,8 @@ def get_dashboard_mileage(
         # Partial through a possibly transient read problem (see the report-result cache policy); permanent gaps
         # (unmatched rows, ambiguous names, units outside the report group) do not set it
         transient_incomplete = False
+        # The reported window and read time (the shared Group Trips snapshot's, when the report is used)
+        window_from, window_to, retrieved_at, snapshot_fresh_for = eff_from, eff_to, None, None
 
         if timeframe_norm in ["all", "all_time", "odometer"]:
             for vehicle in vehicles:
@@ -1162,12 +1189,12 @@ def get_dashboard_mileage(
         else:
             # Authoritative source: Wialon Group Trips Report (Template 5)
             report_group_id = int(group_id) if group_id else resolve_all_units_group_id(sid, raw_groups)
-            group_report = execute_wialon_group_trips_report(
-                sid=sid,
-                from_time_utc=eff_from,
-                to_time_utc=eff_to,
-                group_id=report_group_id
-            )
+            # Shared with /api/fleet/trips for the same report group and window: this result reports the snapshot's
+            # window and retrieval time and expires with it, so Distance and Trips come from one report run
+            snapshot, snapshot_fresh_for = group_trips_snapshot(
+                execute_wialon_group_trips_report, sid, report_group_id, window_spec, eff_from, eff_to)
+            group_report = snapshot["rows"]
+            window_from, window_to, retrieved_at = snapshot["from_time"], snapshot["to_time"], snapshot["retrieved_at"]
 
             # The report covers the group's members only, so when membership is known a name is ambiguous only if
             # several members share it. A row naming no member, or a group with unknown membership, is matched
@@ -1294,8 +1321,8 @@ def get_dashboard_mileage(
         result = {
             "timeframe": timeframe_norm,
             "timezone": "Asia/Dubai",
-            "effective_from": eff_from,
-            "effective_to": eff_to,
+            "effective_from": window_from,
+            "effective_to": window_to,
             "total_km": total_km,
             "average_km": avg_km,
             "available_units": len(mileage_units),
@@ -1306,20 +1333,26 @@ def get_dashboard_mileage(
             "unmatched_report_rows": sorted(unmatched_rows),
             # When this result was read from Wialon (UTC epoch seconds); `stale` is true only when a cached result
             # is served because Wialon failed
-            "retrieved_at": now_timestamp(),
+            "retrieved_at": retrieved_at or now_timestamp(),
             "stale": False,
         }
 
         # Complete or permanently partial: the normal TTL; partial through unreadable cells, an unlocated column or
-        # a member missing from the report: re-read after TRANSIENT_PARTIAL_TTL_SECONDS
-        set_cache(cache_key, result,
-                  ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else MILEAGE_TTL_SECONDS)
+        # a member missing from the report: re-read after TRANSIENT_PARTIAL_TTL_SECONDS. Never past the shared
+        # snapshot's own freshness.
+        result_ttl = TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else mileage_ttl
+        if snapshot_fresh_for is not None and transient_incomplete:
+            snapshot_fresh_for = shorten_group_trips_snapshot(report_group_id, window_spec)
+        if snapshot_fresh_for is not None:
+            result_ttl = min(result_ttl, snapshot_fresh_for)
+        if result_ttl > 0:
+            set_cache(cache_key, result, ttl_seconds=result_ttl)
         return result
 
     try:
         # Overlapping identical requests wait for the one already running and reuse its cached result
         with _single_flight(cache_key):
-            hit = cached(cache_key, ttl_seconds=MILEAGE_TTL_SECONDS)
+            hit = cached(cache_key, ttl_seconds=mileage_ttl)
             if hit:
                 return hit
             return _compute_with_last_good(cache_key, _build, "/api/dashboard/mileage")
@@ -1643,8 +1676,10 @@ def get_fleet_idle_analytics(
 
     events_tag = "full" if include_events else "summary"
     cache_key = f"fleet-idle-v10-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
+    # A window that ended before today (UAE), e.g. yesterday, is a closed report: cached longer
+    idle_ttl = closed_window_ttl(eff_to, IDLE_ANALYTICS_TTL_SECONDS)
     if not refresh and not skip_cache:
-        hit = cached(cache_key, ttl_seconds=IDLE_ANALYTICS_TTL_SECONDS)
+        hit = cached(cache_key, ttl_seconds=idle_ttl)
         log_cache_state("/api/idle/fleet-analytics", hit is not None)
         if hit:
             return hit
@@ -1657,7 +1692,7 @@ def get_fleet_idle_analytics(
     # result instead of each paging the same Wialon report; a refresh still recomputes after it.
     with _single_flight(cache_key):
         if not refresh and not skip_cache:
-            hit = cached(cache_key, ttl_seconds=IDLE_ANALYTICS_TTL_SECONDS)
+            hit = cached(cache_key, ttl_seconds=idle_ttl)
             if hit:
                 return hit
         return _compute_with_last_good(cache_key, lambda: _compute_fleet_idle_analytics(
@@ -2107,7 +2142,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
                for bv in by_vehicle)
     )
     set_cache(cache_key, response_payload,
-              ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else IDLE_ANALYTICS_TTL_SECONDS)
+              ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete
+              else closed_window_ttl(eff_to, IDLE_ANALYTICS_TTL_SECONDS))
     return response_payload
 
 
@@ -2169,6 +2205,8 @@ from app.fleet_analytics import (
     get_fleet_alerts_analytics,
     get_fleet_groups_analytics,
     get_single_vehicle_deep_analytics,
+    group_trips_snapshot,
+    shorten_group_trips_snapshot,
 )
 
 

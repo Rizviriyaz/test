@@ -111,7 +111,8 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 
 - [x] Health check endpoints.
 - [x] `PERF` trace logging (request, calculation, cache, data window, report-lock wait/hold).
-- [x] TTL caching to limit Wialon load. Complete and permanently partial report results use the normal TTL (idle analytics 180 s, mileage 60 s, fleet trips 180 s) and stay flagged partial; transiently partial ones 30 s. On a Wialon failure, idle analytics and mileage serve the last good result marked `stale` with `retrieved_at` and back off (15 s doubling to 120 s); identical concurrent requests run once.
+- [x] TTL caching to limit Wialon load. Complete and permanently partial report results use the normal TTL (idle analytics 180 s, mileage 60 s, fleet trips 180 s) and stay flagged partial; transiently partial ones (and partial safety scans) 30 s. Windows that ended before today's UAE midnight are cached 1800 s. Distance (mileage) and Trips share one Group Trips run per report group and window (60 s while open), so fleet trips for a timeframe, date or exact window refresh with it; `hours=N` trips keep their own run and 180 s. On a Wialon failure, idle analytics and mileage serve the last good result marked `stale` with its own `retrieved_at` and back off (15 s doubling to 120 s); identical concurrent requests (including analytics builders and token validations) run once (uncommitted).
+- [x] Dashboard: sections render at once with skeletons; an earlier visit's cached responses are shown labelled "Earlier result · refreshing"; every today/yesterday section uses a report only for the UAE day its window starts on (uncommitted).
 - [x] Offline or silent vehicles handled with null checks.
 
 ---
@@ -140,17 +141,18 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 
 ## Verification Status
 
-Run on 2026-10-27 against the uncommitted data-accuracy fixes (audit F1–F17) on top of `9b5e272`, on Windows with Python 3.13 and Node 24. Automated checks called no live service: backend scripts ran under `OfflineGuard`, which blocks all outbound HTTP. One approved read-only live check is recorded below.
+Run on 2026-10-27 against the uncommitted performance, caching and Dashboard changes on top of `885d944`, on Windows with Python 3.13 and Node 24. Automated checks called no live service: backend scripts ran under `OfflineGuard`, which blocks all outbound HTTP. One earlier approved read-only live check is recorded below.
 
 | Check | Result |
 | --- | --- |
 | `npm run lint` | Pass (no issues) |
-| `npm test` | 107/107 pass |
-| `npm run build` with an absolute non-loopback URL | Pass (built to a temporary directory outside the repository; no tracked or ignored file changed) |
+| `npm test` | 137/137 pass |
+| `npm run build` with an absolute non-loopback URL | Pass (built to a directory outside the repository; no tracked or ignored file changed) |
 | `npm run build` with `VITE_API_URL` unset or loopback | Not re-run (last verified failing as designed at `0040ae0`) |
-| Backend `scripts/test_*.py` with `offline_guard` (31 scripts, incl. the new `test_data_accuracy_fixes.py`) | 31 pass |
+| Backend `scripts/test_*.py` under `OfflineGuard` (directly or via the fuel test runner; 40 scripts, incl. the new `test_cache_coalescing.py`) | 40 pass |
 | `test_vehicle_history_chunking.py`, `test_wialon_report_batching.py` (fully mocked, no `offline_guard`) | Pass |
-| Other backend scripts without `OfflineGuard` (12 fuel scripts, incl. `test_fuel_efficiency.py`, `test_ai_fuel_assistant.py`) | Not run (may contact live services; fuel code unchanged) |
+| `test_fuel_fleet_trips.py` | 12/12 pass. It failed 11/12 before this fix: commit `e85b501` gave fixture unit UNIT-B one idle sub-row, but `test_engine_idle_subrows_batched_for_used_rows_only` still expected none. The expectation was updated; report code is unchanged. |
+| `test_ai_fuel_assistant.py`, `test_fuel_efficiency.py`, `test_fuel_efficiency_accuracy.py`, `test_fuel_preview.py` (no `OfflineGuard`) | Not run (may contact live services; fuel code unchanged) |
 | Live, read-only: Wialon Engine Hours template 2 for 2026-10-26 (report executed and cleaned up; nothing modified) | 103 rows; 83 with idling, all 83 with event sub-rows; 0 rows with idling but no sub-rows; sampled sub-rows are engine-on periods whose Idling sums to the row total |
 
 **Not verified**:
@@ -163,7 +165,7 @@ Run on 2026-10-27 against the uncommitted data-accuracy fixes (audit F1–F17) o
 
 **Known limitations** (documented, not fixed):
 
-- Dashboard driving time is Engine Hours (template 2) "In motion" as reported, never checked against Trips (template 5) mileage, which Wialon measures differently; a unit is unknown only when its value is missing, unreadable or unattributable. The two reports' windows can differ by up to the 60–180 s cache times.
+- Dashboard driving time is Engine Hours (template 2) "In motion" as reported, never checked against Trips (template 5) mileage, which Wialon measures differently; a unit is unknown only when its value is missing, unreadable or unattributable. Distance and Trips come from one shared Group Trips run; the Engine Hours report's window can still differ from it by up to its 180 s cache time.
 - Fuel: 138 identifiers / 942 of 2,335 rows (40%) do not match the current Wialon fleet. They are excluded from KPIs and shown only in the excluded-record views, labelled "No Wialon unit" / "Several Wialon units", not as untracked vehicles. Business question for ATS, per identifier: (a) a vehicle without a tracker, (b) a tracked vehicle whose fuel-card identifier differs from Wialon (needs an alias), or (c) a vehicle sold or transferred before the period. 100 identifiers / 1,393 rows match, with no plate-code conflicts.
 - Stale GPS fix: only a unit last seen MOVING is judged by fix age (`position_stale` / `telemetry_stale`, Health GPS STALE). A unit last seen IDLING or STOPPED with an old fix is not flagged (a stationary tracker may not send new fixes); its fix time is shown in the drawer. The drawer shows the fix time of day without a date.
 - Follow-up (not fixed): a future `pos.t` (clock skew) gives a negative `seconds_since_position` (never stale; the AI tools would report a negative `gps_fix_age_minutes`). A malformed `pos.t` or `lmsg.t` is handled in `/api/vehicles` and Vehicle Health.

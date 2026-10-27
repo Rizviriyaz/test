@@ -6,7 +6,7 @@ import {
     Search,
 } from "lucide-react"
 
-import { getVehicles } from "../api/fleetApi"
+import { getVehicles, peekVehicles } from "../api/fleetApi"
 import FleetMap from "../components/FleetMap"
 import { isValidCoordinate } from "../utils/coordinates"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
@@ -41,7 +41,10 @@ function formatLastUpdate(vehicle) {
 function Tracking() {
     const [searchParams, setSearchParams] = useSearchParams()
 
-    const [vehicles, setVehicles] = useState([])
+    // An earlier visit's vehicles (at most STALE_LIVE_MS old) are shown at once with the time they were fetched,
+    // until the first live poll replaces them
+    const [cachedVehicles] = useState(() => peekVehicles())
+    const [vehicles, setVehicles] = useState(() => cachedVehicles?.data?.vehicles || [])
     const [isPanelOpen, setIsPanelOpen] = useState(true)
 
     const [selectedVehicleId, setSelectedVehicleId] = useState(() => {
@@ -65,10 +68,12 @@ function Tracking() {
     })
 
     const [searchTerm, setSearchTerm] = useState("")
-    const [loading, setLoading] = useState(true)
+    const [loading, setLoading] = useState(() => !cachedVehicles)
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState(null)
-    const [lastSyncTime, setLastSyncTime] = useState(null)
+    const [lastSyncTime, setLastSyncTime] = useState(() => (cachedVehicles
+        ? new Date(cachedVehicles.fetchedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+        : null))
 
     // Synchronize query parameters without re-opening a closed drawer. Adjusted during render (React's pattern for
     // state derived from changing input), not in an effect, so a URL change never renders the stale state first.

@@ -10,8 +10,8 @@ import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
-import { EmptyState, ErrorState, LoadingState } from "../components/Common/StateViews"
-import { getFleetAlertsAnalytics } from "../api/fleetApi"
+import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
+import { getFleetAlertsAnalytics, peekFleetAlertsAnalytics } from "../api/fleetApi"
 import { formatUAEDateTime, formatUAETime } from "../utils/datetime"
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -96,7 +96,8 @@ export default function FleetAlerts() {
     const [searchParams, setSearchParams] = useSearchParams()
     const initialSev = (searchParams.get("severity") || "ALL").toUpperCase()
 
-    const [data, setData] = useState(null)
+    // An earlier visit's response (labelled with its own "Data as of" time) is shown while the page refetches
+    const [data, setData] = useState(() => peekFleetAlertsAnalytics()?.data ?? null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [search, setSearch] = useState("")
@@ -180,6 +181,8 @@ export default function FleetAlerts() {
             />
 
             <div className="space-y-4">
+                {/* A failed refresh keeps the last alerts on screen, labelled by their "Data as of" time */}
+                {error && data && <ErrorBanner message={`Refresh failed: ${error}`} onRetry={refresh} />}
                 {data?.safety_partial && (
                     <div role="status" className="flex items-center gap-2 rounded-lg border border-amber-200/80 bg-amber-50/70 px-3 py-2 text-xs text-amber-900 shadow-2xs">
                         <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
@@ -193,7 +196,7 @@ export default function FleetAlerts() {
                 <KpiStrip label="Alert severity filter" className="grid-cols-2 md:grid-cols-4">
                     <KpiCard
                         label="All alerts"
-                        value={counts.total}
+                        value={data ? counts.total : "—"}
                         selected={sevFilter === "ALL"}
                         onClick={() => handleFilterChange("ALL")}
                         loading={loading && !data}
@@ -202,7 +205,7 @@ export default function FleetAlerts() {
                     <KpiCard
                         label="Critical"
                         dot="bg-status-offline"
-                        value={counts.critical}
+                        value={data ? counts.critical : "—"}
                         valueColor={counts.critical > 0 ? "text-rose-700" : "text-slate-900"}
                         selected={sevFilter === "CRITICAL"}
                         onClick={() => handleFilterChange("CRITICAL")}
@@ -212,7 +215,7 @@ export default function FleetAlerts() {
                     <KpiCard
                         label="Warning"
                         dot="bg-status-idling"
-                        value={counts.warning}
+                        value={data ? counts.warning : "—"}
                         valueColor={counts.warning > 0 ? "text-amber-800" : "text-slate-900"}
                         selected={sevFilter === "WARNING"}
                         onClick={() => handleFilterChange("WARNING")}
@@ -222,7 +225,7 @@ export default function FleetAlerts() {
                     <KpiCard
                         label="Info"
                         dot="bg-slate-400"
-                        value={counts.info}
+                        value={data ? counts.info : "—"}
                         selected={sevFilter === "INFO"}
                         onClick={() => handleFilterChange("INFO")}
                         loading={loading && !data}
@@ -254,7 +257,7 @@ export default function FleetAlerts() {
 
                     {loading && !data ? (
                         <LoadingState label="Loading fleet alerts…" className="border-0" />
-                    ) : error ? (
+                    ) : error && !data ? (
                         <ErrorState message={error} onRetry={refresh} className="border-0" />
                     ) : filtered.length === 0 ? (
                         <EmptyState

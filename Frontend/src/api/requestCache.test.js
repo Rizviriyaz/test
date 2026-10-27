@@ -3,7 +3,7 @@
 import { test, beforeEach } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { MAX_CLIENT_CACHE_ENTRIES, clearClientCache, clientCacheSize, deduplicatedFetch, getFromClientCache, setClientCache } from "./requestCache.js"
+import { MAX_CLIENT_CACHE_ENTRIES, clearClientCache, clientCacheSize, deduplicatedFetch, getFromClientCache, peekClientCache, setClientCache } from "./requestCache.js"
 
 function deferred() {
     let resolve, reject
@@ -149,4 +149,41 @@ test("the client cache is bounded: least recently used entries are evicted", () 
     setClientCache("/api/x?new", { n: 1 })
     assert.deepEqual(getFromClientCache("/api/x?i=25", 60000), { i: 25 })
     assert.equal(getFromClientCache("/api/x?i=26", 60000), null)
+})
+
+test("stale peek: an expired response is returned with its fetch time, never refetched, and bounded by maxAge", async (t) => {
+    let now = Date.UTC(2026, 9, 27, 8, 0, 0)
+    t.mock.method(Date, "now", () => now)
+    let calls = 0
+    await deduplicatedFetch("/api/fleet/alerts", async () => { calls += 1; return { n: 1 } }, {}, 30000)
+    now += 60000 // past the 30 s fetch TTL
+    assert.equal(getFromClientCache("/api/fleet/alerts", 30000), null, "expired for fetching")
+    assert.deepEqual(peekClientCache("/api/fleet/alerts", 10 * 60000), { data: { n: 1 }, fetchedAt: Date.UTC(2026, 9, 27, 8, 0, 0) })
+    assert.equal(peekClientCache("/api/fleet/alerts", 30000), null, "older than maxAge is not shown")
+    assert.equal(peekClientCache("/api/missing", 60000), null)
+    assert.equal(calls, 1)
+})
+
+test("stale peek: nothing survives a sign-out clear", async () => {
+    await deduplicatedFetch("/api/vehicles", async () => ({ owner: "A" }), {}, 8000)
+    clearClientCache()
+    assert.equal(peekClientCache("/api/vehicles", 120000), null)
+})
+
+test("cacheKey: a UAE-date-tagged key separates days and in-flight sharing for the same URL", async () => {
+    const url = "/api/fleet/trips?timeframe=today"
+    let calls = 0
+    const fetchJson = async () => { calls += 1; return { call: calls } }
+    assert.deepEqual(await deduplicatedFetch(url, fetchJson, { cacheKey: `${url}#uae=2026-10-26` }, 30000), { call: 1 })
+    assert.deepEqual(await deduplicatedFetch(url, fetchJson, { cacheKey: `${url}#uae=2026-10-26` }, 30000), { call: 1 })
+    assert.deepEqual(await deduplicatedFetch(url, fetchJson, { cacheKey: `${url}#uae=2026-10-27` }, 30000), { call: 2 },
+        "the next UAE day never reuses the previous day's response")
+    assert.equal(peekClientCache(url, 60000), null, "entries are stored under the tagged key only")
+})
+
+test("fleetApi tags calendar timeframes (today, yesterday...) with the UAE date for trips and idle analytics", () => {
+    const source = readFileSync(new URL("./fleetApi.js", import.meta.url), "utf8")
+    assert.match(source, /function calendarCacheKey\(url, timeframe\)/)
+    assert.match(source, /cacheKey: calendarCacheKey\(url, options\?\.timeframe\)/, "fleet trips")
+    assert.match(source, /cacheKey: calendarCacheKey\(url, timeframe\)/, "fleet idle analytics")
 })

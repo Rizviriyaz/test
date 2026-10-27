@@ -527,8 +527,9 @@ def test_incomplete_reports_not_cached():
             mileage = main.get_dashboard_mileage(timeframe="custom", from_time=1000, to_time=5000)
         # Dashboard mileage (report-result cache policy): an unreadable cell is transient, so the partial result
         # is served for TRANSIENT_PARTIAL_TTL_SECONDS only, then re-read
-        mileage_key = next(k for k in main._cache._data if str(k).startswith("dashboard-mileage-"))
-        main._cache.get(mileage_key)["time"] -= main.TRANSIENT_PARTIAL_TTL_SECONDS + 1
+        # Ages the mileage result and the Group Trips snapshot it shares with /api/fleet/trips
+        from wialon_report_fixtures import age_report_caches
+        age_report_caches(main.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
         mileage = main.get_dashboard_mileage(timeframe="custom", from_time=1000, to_time=5000)
     main._cache.clear()
     assert calls == {"trips": 2, "engine": 2, "group": 2}, f"incomplete results were cached: {calls}"
