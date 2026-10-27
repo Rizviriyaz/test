@@ -27,7 +27,8 @@ from app.wialon_reports import (
     execute_wialon_group_trips_report,
     execute_wialon_group_engine_idle_report,
     parse_duration_to_seconds,
-    GROUP_ID_ALL_UNITS
+    GROUP_ID_ALL_UNITS,
+    resolve_all_units_group_id,
 )
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name, parse_wialon_epoch
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
@@ -42,12 +43,19 @@ _analytics_cache = TTLCache(max_entries=128)
 
 def get_cached(key: str, ttl_seconds: int = 120) -> Optional[Any]:
     entry = _analytics_cache.get(key)
-    if entry and (time.time() - entry["time"]) < ttl_seconds:
+    # An entry stored with its own (shorter) ttl is fresh only for that long, whatever the caller passes
+    if entry and (time.time() - entry["time"]) < min(ttl_seconds, entry.get("ttl") or ttl_seconds):
         return entry["data"]
     return None
 
-def set_cached(key: str, data: Any):
-    _analytics_cache.set(key, {"data": data, "time": time.time()}, _ANALYTICS_CACHE_RETENTION_SECONDS)
+def set_cached(key: str, data: Any, ttl_seconds: Optional[int] = None):
+    _analytics_cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds}, _ANALYTICS_CACHE_RETENTION_SECONDS)
+
+
+# A report result partial only through permanent gaps (a unit outside the report group, a name shared by several
+# units, a row naming no unit) is cached like a complete one and keeps its partial flags; one partial through a
+# possibly transient read problem (unreadable cell, guessed column, failed group report) only this long
+TRANSIENT_PARTIAL_TTL_SECONDS = 30
 
 
 # ── Health Threshold Constants ───────────────────────────────────────────────
@@ -414,8 +422,8 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
             # The group report emits a row (with explicit zeros) for every member even without activity,
             # so a vehicle with no row was not covered by the report
             missing_row = vname not in engine_by_name
-            if missing_row or vname in ambiguous_names or unreadable & {"in_motion_seconds", "total_idle_seconds", "engine_hours_seconds"}:
-                # Unattributable, missing or unreadable (or guessed-column) row: utilization is unknown, not 0
+            if missing_row or vname in ambiguous_names:
+                # Unattributable or missing row: utilization is unknown, not 0
                 unit_results.append({
                     "vehicle_id": vid,
                     "vehicle_name": vname,
@@ -430,12 +438,21 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                     "trip_count": None
                 })
                 continue
-            driving_sec = uv.get("in_motion_seconds", 0)
-            idle_sec = uv.get("total_idle_seconds", 0)
-            engine_on_sec = uv.get("engine_hours_seconds", 0) or (driving_sec + idle_sec)
-            stopped_sec = max(0, total_sec - (driving_sec + idle_sec))
-            util_pct = round((driving_sec / total_sec) * 100, 1) if total_sec > 0 else 0
-            drive_idle_ratio = round(driving_sec / max(1, idle_sec), 2)
+            # Each field is decided on its own: an unreadable (or guessed-column) cell makes only the values that
+            # depend on it unknown (None), so one bad cell does not erase the unit's other valid measurements
+            driving_sec = None if "in_motion_seconds" in unreadable else uv.get("in_motion_seconds", 0)
+            idle_sec = None if "total_idle_seconds" in unreadable else uv.get("total_idle_seconds", 0)
+            both_known = driving_sec is not None and idle_sec is not None
+            if "engine_hours_seconds" in unreadable:
+                engine_on_sec = None
+            else:
+                engine_on_sec = uv.get("engine_hours_seconds", 0) or ((driving_sec + idle_sec) if both_known else 0)
+            stopped_sec = max(0, total_sec - (driving_sec + idle_sec)) if both_known else None
+            util_pct = (round((driving_sec / total_sec) * 100, 1) if total_sec > 0 else 0) if driving_sec is not None else None
+            drive_idle_ratio = round(driving_sec / max(1, idle_sec), 2) if both_known else None
+
+            def _mins(sec):
+                return round(sec / 60, 1) if sec is not None else None
 
             unit_results.append({
                 "vehicle_id": vid,
@@ -444,10 +461,10 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                 "status": v_record.get("status", "STOPPED"),
                 "connection_status": v_record.get("connection_status", "STABLE"),
                 "is_offline": v_record.get("is_offline", False),
-                "driving_minutes": round(driving_sec / 60, 1),
-                "idle_minutes": round(idle_sec / 60, 1),
-                "stopped_minutes": round(stopped_sec / 60, 1),
-                "engine_on_minutes": round(engine_on_sec / 60, 1),
+                "driving_minutes": _mins(driving_sec),
+                "idle_minutes": _mins(idle_sec),
+                "stopped_minutes": _mins(stopped_sec),
+                "engine_on_minutes": _mins(engine_on_sec),
                 "driving_seconds": driving_sec,
                 "idle_seconds": idle_sec,
                 "stopped_seconds": stopped_sec,
@@ -529,30 +546,44 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
         with ThreadPoolExecutor(max_workers=8) as executor:
             unit_results = list(map_with_request_context(executor, _process_unit_utilization, fleet))
 
-    # Fleet totals cover vehicles with known values only; unknown ones are listed, never counted as 0
-    known_units = [u for u in unit_results if u["driving_seconds"] is not None]
-    unknown_vehicles = sorted(u["vehicle_name"] for u in unit_results if u["driving_seconds"] is None)
-    total_driving_sec = sum(u["driving_seconds"] for u in known_units)
-    total_idle_sec    = sum(u["idle_seconds"] for u in known_units)
-    total_engine_sec  = sum(u["engine_on_seconds"] for u in known_units)
-    total_fleet_time  = len(known_units) * hours * 3600
+    # Fleet totals cover vehicles with a known value for that field only; unknown ones are listed, never counted
+    # as 0. Every vehicle unknown for a field: there is no known basis for that total (None, not 0).
+    def _known(field):
+        return [u[field] for u in unit_results if u[field] is not None]
 
-    fleet_util_pct = round((total_driving_sec / total_fleet_time) * 100, 1) if total_fleet_time > 0 else 0
-    fleet_ratio    = round(total_driving_sec / max(1, total_idle_sec), 2)
-    # Every vehicle unknown: there is no known basis for any fleet total (None, not 0)
-    all_unknown = bool(unknown_vehicles) and not known_units
+    def _field_unknown(field):
+        return sorted(u["vehicle_name"] for u in unit_results if u[field] is None)
+
+    def _hours_total(field):
+        values = _known(field)
+        return round(sum(values) / 3600, 1) if values or not unit_results else None
+
+    driving_known = _known("driving_seconds")
+    total_driving_sec = sum(driving_known)
+    total_fleet_time = len(driving_known) * hours * 3600
+    fleet_util_pct = (round((total_driving_sec / total_fleet_time) * 100, 1) if total_fleet_time > 0 else 0) \
+        if driving_known or not unit_results else None
+    ratio_units = [u for u in unit_results if u["driving_seconds"] is not None and u["idle_seconds"] is not None]
+    fleet_ratio = round(sum(u["driving_seconds"] for u in ratio_units) / max(1, sum(u["idle_seconds"] for u in ratio_units)), 2) \
+        if ratio_units or not unit_results else None
+    unknown_vehicles = sorted({u["vehicle_name"] for u in unit_results
+                               if u["driving_seconds"] is None or u["idle_seconds"] is None or u["engine_on_seconds"] is None})
 
     result = {
         "hours": hours,
         # wialon_group_engine_report (authoritative) or raw_message_fallback (segmented messages; partial, uncached)
         "source": source,
-        "fleet_utilization_pct": None if all_unknown else fleet_util_pct,
-        "total_driving_hours": None if all_unknown else round(total_driving_sec / 3600, 1),
-        "total_idle_hours": None if all_unknown else round(total_idle_sec / 3600, 1),
-        "total_engine_on_hours": None if all_unknown else round(total_engine_sec / 3600, 1),
-        "driving_to_idle_ratio": None if all_unknown else fleet_ratio,
+        "fleet_utilization_pct": fleet_util_pct,
+        "total_driving_hours": _hours_total("driving_seconds"),
+        "total_idle_hours": _hours_total("idle_seconds"),
+        "total_engine_on_hours": _hours_total("engine_on_seconds"),
+        "driving_to_idle_ratio": fleet_ratio,
         "partial": bool(unknown_vehicles or unmatched_rows or source != "wialon_group_engine_report"),
+        # Vehicles with any unknown field; the per-field lists say which totals leave them out
         "unknown_vehicles": unknown_vehicles,
+        "driving_unknown_vehicles": _field_unknown("driving_seconds"),
+        "idle_unknown_vehicles": _field_unknown("idle_seconds"),
+        "engine_on_unknown_vehicles": _field_unknown("engine_on_seconds"),
         # Unknown (None) utilization sorts after all known values
         "vehicles": sorted(unit_results, key=lambda x: (x["utilization_percentage"] is not None, x["utilization_percentage"] or 0), reverse=True)
     }
@@ -561,6 +592,16 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
     if not report_incomplete:
         set_cached(cache_key, result)
     return result
+
+
+# Harsh-driving alerts listed on the Alerts page (newest first); the alert totals count every event
+HARSH_ALERTS_DISPLAY_LIMIT = 15
+
+
+def harsh_event_severity(ev: Dict[str, Any]) -> str:
+    """Alert severity of a harsh-driving event: CRITICAL at 0.7 G or more, else WARNING."""
+    g_force = ev.get("g_force")
+    return "CRITICAL" if (g_force and g_force >= 0.7) else "WARNING"
 
 
 def _ambiguous_report_names(fleet: List[Dict[str, Any]], report_rows: List[Dict[str, Any]]) -> set:
@@ -647,14 +688,19 @@ def get_trips_mileage_analytics(
         # A row naming no fleet unit is left out of the totals and listed, so the total is flagged partial
         fleet_names = {v["vehicle_name"] for v in fleet}
         unmatched_rows = sorted({item["vehicle_name"] for item in group_report if item["vehicle_name"] not in fleet_names})
-        report_incomplete = bool(unmatched_rows) or any(
+        # Unmatched rows, ambiguous names and fleet units outside the report group are permanent gaps (cached, still
+        # partial); unreadable cells, guessed columns or a report-group member without a row are re-read sooner
+        try:
+            report_group_id = resolve_all_units_group_id(sid, raw_groups)
+            report_group = next((g for g in raw_groups if g.get("id") == report_group_id), None)
+        except WialonAPIError:
+            report_group = None
+        members = set(report_group.get("u") or []) if report_group is not None else set()
+        report_incomplete = any(
             item.get("incomplete_fields") or item.get("column_warnings") or item.get("unlocated_fields")
             for item in group_report
-        ) or any(
-            # A fleet unit with no report row, or one whose name cannot be attributed, is unknown: not cached either
-            v["vehicle_name"] in ambiguous_names or v["vehicle_name"] not in rep_by_name
-            for v in fleet
-        )
+        ) or any(v["vehicle_id"] in members and v["vehicle_name"] not in rep_by_name and v["vehicle_name"] not in ambiguous_names
+                 for v in fleet)
         vehicle_trips = []
         for v_record in fleet:
             vname = v_record["vehicle_name"]
@@ -671,7 +717,8 @@ def get_trips_mileage_analytics(
             )
             raw_mileage = float(rep_item.get("mileage_km", 0.0)) if rep_item else 0.0
             avg_spd = _parse_speed_kmh(rep_item.get("avg_speed")) if rep_item else None
-            max_spd = _parse_speed_kmh(rep_item.get("max_speed")) if rep_item else 0.0
+            # Unknown (unreadable or no row) maximum speed stays None, never 0
+            max_spd = _parse_speed_kmh(rep_item.get("max_speed")) if rep_item else None
 
             vehicle_trips.append({
                 "vehicle_id": vid,
@@ -682,8 +729,9 @@ def get_trips_mileage_analytics(
                 "trip_count": rep_item.get("trip_count"),
                 "gps_mileage_km": None if mileage_unknown else round(raw_mileage, 2),
                 "hardware_mileage_km": None,
-                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
-                "max_speed_kmh": round(max_spd or 0.0, 1),
+                # A genuine 0 km odometer reading is kept; only a missing reading is None
+                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage is not None else None,
+                "max_speed_kmh": round(max_spd, 1) if max_spd is not None else None,
                 "avg_speed_kmh": round(avg_spd, 1) if avg_spd is not None else None,
                 "trips": []
             })
@@ -706,8 +754,8 @@ def get_trips_mileage_analytics(
                     "trip_count": None,
                     "gps_mileage_km": None,
                     "hardware_mileage_km": None,
-                    "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
-                    "max_speed_kmh": 0.0,
+                    "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage is not None else None,
+                    "max_speed_kmh": None,
                     "avg_speed_kmh": None,
                     "trips": [],
                 }
@@ -750,7 +798,7 @@ def get_trips_mileage_analytics(
                 "trip_count": len(w_trips),
                 "gps_mileage_km": gps_dist,
                 "hardware_mileage_km": None,
-                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage else None,
+                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage is not None else None,
                 "max_speed_kmh": round(max_spd, 1),
                 "avg_speed_kmh": avg_spd,
                 "trips": [
@@ -774,9 +822,12 @@ def get_trips_mileage_analytics(
         # A failed or partial unit report leaves that unit unknown: not cached, so the next request re-reads it
         report_incomplete = any(v["gps_mileage_km"] is None or v["trip_count"] is None for v in vehicle_trips)
 
-    # Trip metrics need every vehicle's real trip list; one unknown count makes the fleet totals unknown.
+    # The trip total sums the known counts and lists the vehicles whose count is unknown (as distance does), never
+    # counting them as 0; no known count at all is unknown (None). Per-trip metrics still need every trip list.
     trips_known = all(v["trip_count"] is not None for v in vehicle_trips)
-    total_trips = sum(v["trip_count"] for v in vehicle_trips) if trips_known else None
+    known_trip_counts = [v["trip_count"] for v in vehicle_trips if v["trip_count"] is not None]
+    trip_count_unknown_vehicles = sorted(v["vehicle_name"] for v in vehicle_trips if v["trip_count"] is None)
+    total_trips = sum(known_trip_counts) if known_trip_counts or not vehicle_trips else None
     # Unknown (None) distances are left out of the total and listed, never counted as 0 km
     known_dists = [v["gps_mileage_km"] for v in vehicle_trips if v["gps_mileage_km"] is not None]
     distance_unknown_vehicles = sorted(v["vehicle_name"] for v in vehicle_trips if v["gps_mileage_km"] is None)
@@ -794,22 +845,37 @@ def get_trips_mileage_analytics(
     all_single_trips = [t for v in vehicle_trips for t in v.get("trips", [])] if trips_known else []
     # No trips (or unknown trips) means no average or longest trip: None, never 0 or a vehicle's daily mileage
     # A distance unknown for any vehicle makes the fleet average and longest trip unknown, not a partial figure
-    avg_trip_dist = round(total_gps_dist / total_trips, 2) if total_trips and not distance_unknown_vehicles else None
+    avg_trip_dist = round(total_gps_dist / total_trips, 2) if total_trips and trips_known and not distance_unknown_vehicles else None
     avg_trip_dur  = round(sum(_to_float(t.get("duration_minutes")) for t in all_single_trips) / len(all_single_trips), 1) if all_single_trips else None
     longest_trip_dist = None if distance_unknown_vehicles else max((t["distance_km"] for t in all_single_trips), default=None)
-    fleet_max_spd = max((v["max_speed_kmh"] for v in vehicle_trips), default=0)
+    # Maximum over the known values; None when no vehicle's maximum speed is known
+    fleet_max_spd = max((v["max_speed_kmh"] for v in vehicle_trips if v["max_speed_kmh"] is not None), default=None)
 
-    # Mileage by group
+    # Mileage by group (primary group): known values are summed and the vehicles with an unknown value counted, as for
+    # the fleet totals. A group whose every vehicle is unknown for a field has an unknown (None) total.
     by_group: Dict[str, Dict[str, Any]] = {}
     for vt in vehicle_trips:
         g = vt["group"]
         if g not in by_group:
-            by_group[g] = {"group": g, "trips": 0, "distance_km": 0.0, "vehicle_count": 0}
-        if by_group[g]["trips"] is not None:
-            by_group[g]["trips"] = None if vt["trip_count"] is None else by_group[g]["trips"] + vt["trip_count"]
-        if by_group[g]["distance_km"] is not None:
-            by_group[g]["distance_km"] = None if vt["gps_mileage_km"] is None else round(by_group[g]["distance_km"] + vt["gps_mileage_km"], 2)
-        by_group[g]["vehicle_count"] += 1
+            by_group[g] = {"group": g, "trips": 0, "distance_km": 0.0, "vehicle_count": 0,
+                           "trips_unknown_vehicles": 0, "distance_unknown_vehicles": 0}
+        bg = by_group[g]
+        if vt["trip_count"] is None:
+            bg["trips_unknown_vehicles"] += 1
+        else:
+            bg["trips"] += vt["trip_count"]
+        if vt["gps_mileage_km"] is None:
+            bg["distance_unknown_vehicles"] += 1
+        else:
+            bg["distance_km"] = round(bg["distance_km"] + vt["gps_mileage_km"], 2)
+        bg["vehicle_count"] += 1
+    for bg in by_group.values():
+        bg["trips_partial"] = bg["trips_unknown_vehicles"] > 0
+        bg["distance_partial"] = bg["distance_unknown_vehicles"] > 0
+        if bg["trips_unknown_vehicles"] == bg["vehicle_count"]:
+            bg["trips"] = None
+        if bg["distance_unknown_vehicles"] == bg["vehicle_count"]:
+            bg["distance_km"] = None
 
     result = {
         "period_hours": eff_hours,
@@ -818,6 +884,8 @@ def get_trips_mileage_analytics(
         "source": source,
         "summary": {
             "total_trips": total_trips,
+            "total_trips_partial": bool(trip_count_unknown_vehicles),
+            "trip_count_unknown_vehicles": trip_count_unknown_vehicles,
             "total_distance_km": total_gps_dist,
             "total_distance_partial": bool(distance_unknown_vehicles or unmatched_rows),
             "distance_unknown_vehicles": distance_unknown_vehicles,
@@ -833,9 +901,7 @@ def get_trips_mileage_analytics(
         "vehicles": sorted(vehicle_trips, key=lambda x: (x["gps_mileage_km"] is not None, x["gps_mileage_km"] or 0), reverse=True)
     }
 
-    # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
-    if not report_incomplete:
-        set_cached(cache_key, result)
+    set_cached(cache_key, result, ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if report_incomplete else None)
     return result
 
 
@@ -949,6 +1015,7 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
     partial = bool(failed_vehicles or truncated_vehicles)
     all_events.sort(key=lambda x: x["timestamp"], reverse=True)
 
+    severity_counts = Counter(harsh_event_severity(e) for e in all_events)
     braking_count = sum(1 for e in all_events if e["event_type"] == "Harsh Braking")
     accel_count   = sum(1 for e in all_events if e["event_type"] == "Harsh Acceleration")
     corner_count  = sum(1 for e in all_events if e["event_type"] == "Harsh Cornering")
@@ -992,6 +1059,8 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         "vehicles_without_safety_source_names": without_source[:50],
         "by_vehicle": sorted(list(by_veh.values()), key=lambda x: x["total"], reverse=True),
         "by_group": sorted(list(by_grp.values()), key=lambda x: x["total"], reverse=True),
+        # Alert severity of every event (independent of the `events` cap below)
+        "event_severity_counts": {"CRITICAL": severity_counts.get("CRITICAL", 0), "WARNING": severity_counts.get("WARNING", 0)},
         "events": all_events[:100]  # Cap for snappy JSON response
     }
 
@@ -1237,10 +1306,11 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
             })
             alert_counter += 1
 
-    # 4. Harsh Driving Safety Alerts
-    for ev in safety.get("events", [])[:15]:
+    # 4. Harsh Driving Safety Alerts: only the newest HARSH_ALERTS_DISPLAY_LIMIT are listed; the totals below count
+    # every event of the safety scan
+    for ev in safety.get("events", [])[:HARSH_ALERTS_DISPLAY_LIMIT]:
         g_force = ev.get("g_force")
-        sev = "CRITICAL" if (g_force and g_force >= 0.7) else "WARNING"
+        sev = harsh_event_severity(ev)
         alerts.append({
             "id": f"alt-{alert_counter}",
             "vehicle_id": ev["vehicle_id"],
@@ -1272,26 +1342,53 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
     order = {"CRITICAL": 0, "WARNING": 1, "INFO": 2}
     alerts.sort(key=lambda a: (order.get(a["severity"], 9), -(a.get("timestamp") or 0)))
 
-    critical_count = sum(1 for a in alerts if a["severity"] == "CRITICAL")
-    warning_count  = sum(1 for a in alerts if a["severity"] == "WARNING")
-    info_count     = sum(1 for a in alerts if a["severity"] == "INFO")
+    # Counts: every listed non-harsh alert plus every harsh-driving event of the scan, not only the listed ones.
+    # A cached safety result without the severity counts falls back to the events it carries.
+    other_alerts = [a for a in alerts if a["alert_type"] != "HARSH_DRIVING"]
+    harsh_listed = len(alerts) - len(other_alerts)
+    safety_events = safety.get("events", [])
+    harsh_total = (safety.get("summary") or {}).get("total_events", len(safety_events))
+    harsh_severity = safety.get("event_severity_counts") or dict(Counter(harsh_event_severity(e) for e in safety_events))
+    critical_count = sum(1 for a in other_alerts if a["severity"] == "CRITICAL") + harsh_severity.get("CRITICAL", 0)
+    warning_count  = sum(1 for a in other_alerts if a["severity"] == "WARNING") + harsh_severity.get("WARNING", 0)
+    info_count     = sum(1 for a in other_alerts if a["severity"] == "INFO")
 
     by_vehicle: Dict[str, int] = defaultdict(int)
     by_group: Dict[str, int] = defaultdict(int)
-    for a in alerts:
+    for a in other_alerts:
         vid = str(a.get("vehicle_id") or "")
         if vid:
             by_vehicle[vid] += 1
         grp = str(a.get("group") or "").strip()
         if grp:
             by_group[grp] += 1
+    # Harsh-driving counts per vehicle and group over every event (safety by_vehicle / by_group); a safety result
+    # without them falls back to the events it carries
+    if "by_vehicle" in safety or "by_group" in safety:
+        harsh_by_vehicle = [(sv.get("vehicle_id"), sv.get("total", 0)) for sv in safety.get("by_vehicle") or []]
+        harsh_by_group = [(sg.get("group"), sg.get("total", 0)) for sg in safety.get("by_group") or []]
+    else:
+        harsh_by_vehicle = [(e.get("vehicle_id"), 1) for e in safety_events]
+        harsh_by_group = [(e.get("group"), 1) for e in safety_events]
+    for vid, n in harsh_by_vehicle:
+        if str(vid or ""):
+            by_vehicle[str(vid)] += n
+    for grp, n in harsh_by_group:
+        if str(grp or "").strip():
+            by_group[str(grp).strip()] += n
 
     safety_partial = bool(safety.get("partial"))
     result = {
         # When the underlying health/safety data was read (UTC epoch seconds); `timestamp` on an alert is the
         # vehicle's last reported message (or GPS fix), not when the condition began
         "generated_at": min(filter(None, [health.get("generated_at"), safety.get("generated_at")]), default=now_timestamp()),
-        "total_alerts": len(alerts),
+        "total_alerts": len(other_alerts) + harsh_total,
+        # The list below holds displayed_alerts of total_alerts: harsh-driving events beyond the newest
+        # HARSH_ALERTS_DISPLAY_LIMIT are counted but not listed
+        "displayed_alerts": len(alerts),
+        "alerts_capped": harsh_total > harsh_listed,
+        "harsh_driving_total": harsh_total,
+        "harsh_driving_displayed": harsh_listed,
         "critical_count": critical_count,
         "warning_count": warning_count,
         "info_count": info_count,
@@ -1352,18 +1449,22 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         moving = sum(1 for v in g_vehicles if v.get("status") == "MOVING")
         idling = sum(1 for v in g_vehicles if v.get("status") == "IDLING")
         stopped = sum(1 for v in g_vehicles if v.get("status") == "STOPPED")
-        delayed = sum(1 for v in g_vehicles if v.get("status") == "DELAYED")  # stale telemetry, not live
+        delayed = sum(1 for v in g_vehicles if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
         offline = sum(1 for v in g_vehicles if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
+        # Known values are summed and the members with an unknown value counted (as for the fleet totals), never
+        # counted as 0; a group whose every member is unknown has an unknown (None) total. Every member counts (a
+        # vehicle in several groups counts in each).
         distances = [trips_by_veh.get(v["vehicle_id"], {}).get("gps_mileage_km") for v in g_vehicles]
-        # One unknown vehicle distance makes the group distance unknown (None), never a silent 0
-        total_distance = None if any(d is None for d in distances) else sum(distances)
+        known_distances = [d for d in distances if d is not None]
+        total_distance = sum(known_distances) if known_distances or not g_vehicles else None
         trip_counts = [trips_by_veh.get(v["vehicle_id"], {}).get("trip_count") for v in g_vehicles]
-        total_trips = None if any(c is None for c in trip_counts) else sum(trip_counts)
-        # Every member counts, as for distance (a vehicle in several groups counts in each); unknown when a member's
-        # history could not be read
-        total_safety = None if any(v["vehicle_name"] in safety_unknown for v in g_vehicles) else sum(
-            safety_by_vehicle.get(v["vehicle_id"], 0) for v in g_vehicles)
+        known_trips = [c for c in trip_counts if c is not None]
+        total_trips = sum(known_trips) if known_trips or not g_vehicles else None
+        # A member's safety events are unknown when its history could not be read
+        safety_known = [v for v in g_vehicles if v["vehicle_name"] not in safety_unknown]
+        total_safety = sum(safety_by_vehicle.get(v["vehicle_id"], 0) for v in safety_known) \
+            if safety_known or not g_vehicles else None
 
         groups_summary.append({
             "group_id": gid,
@@ -1375,8 +1476,11 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
             "delayed": delayed,
             "offline": offline,
             "distance_24h_km": round(total_distance, 1) if total_distance is not None else None,
+            "distance_unknown_vehicles": len(distances) - len(known_distances),
             "trips_24h": total_trips,
+            "trips_unknown_vehicles": len(trip_counts) - len(known_trips),
             "safety_events_24h": total_safety,
+            "safety_unknown_vehicles": len(g_vehicles) - len(safety_known),
             "vehicles": [
                 {
                     "vehicle_id": v["vehicle_id"],

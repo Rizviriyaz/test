@@ -164,7 +164,7 @@ export default function VehicleDetailDrawer({
     const morphId = `vehicle-${vehicleId}`
 
     const statusStr = normalizeVehicleStatus({ ...currentVehicle, status: currentVehicle.status || currentVehicle.normalizedStatus })
-    // DELAYED/OFFLINE: speed and ignition are the last reported values, not the current state
+    // Telemetry-stale or OFFLINE: status, speed and ignition are the last reported values, not the current state
     const lastSeen = lastSeenLabel(currentVehicle)
     // Last seen Moving with a GPS fix older than 10 min although messages are recent
     const positionStale = isPositionStale(currentVehicle)
@@ -181,7 +181,9 @@ export default function VehicleDetailDrawer({
     const speed = Math.round(Number(currentVehicle.speed ?? currentVehicle.location?.speed ?? 0))
 
     const batteryVoltage = currentVehicle.sensors?.battery_voltage ?? currentVehicle.battery?.voltage ?? currentVehicle.battery_voltage ?? null
-    const ignitionState = currentVehicle.ignition !== undefined ? (currentVehicle.ignition ? "ON" : "OFF") : (currentVehicle.sensors?.ignition !== undefined ? (currentVehicle.sensors.ignition ? "ON" : "OFF") : null)
+    // A missing or invalid ignition reading arrives as null: shown as Unknown, never Off
+    const rawIgnition = currentVehicle.ignition !== undefined ? currentVehicle.ignition : currentVehicle.sensors?.ignition
+    const ignitionState = rawIgnition === undefined ? null : (rawIgnition === null ? "UNKNOWN" : (rawIgnition ? "ON" : "OFF"))
     const driverId = currentVehicle.driver?.id || currentVehicle.driver_id || currentVehicle.sensors?.driver_id || null
     const cleanDriverId = driverId && !["0000000000000000", "0", "---", "none", "null"].includes(String(driverId).toLowerCase().trim()) ? String(driverId) : null
 
@@ -231,7 +233,7 @@ export default function VehicleDetailDrawer({
                             )}
                             {ignitionState !== null && (
                                 <Row label={lastSeen ? "Last ignition" : "Ignition"}>
-                                    <span className={ignitionState === "ON" ? "text-slate-900" : "text-slate-500"}>{ignitionState === "ON" ? "On" : "Off"}</span>
+                                    <span className={ignitionState === "ON" ? "text-slate-900" : "text-slate-500"}>{ignitionState === "ON" ? "On" : (ignitionState === "UNKNOWN" ? "Unknown" : "Off")}</span>
                                 </Row>
                             )}
                             {batteryVoltage !== null && (
@@ -293,6 +295,7 @@ export default function VehicleDetailDrawer({
                                                     startTime={currentVehicle.idle_start}
                                                     baseDuration={currentVehicle.idle_duration}
                                                     status={statusStr}
+                                                    endTime={currentVehicle.last_message_timestamp}
                                                 />
                                                 {idleStatus === "lower_bound" && <span>+</span>}
                                             </span>

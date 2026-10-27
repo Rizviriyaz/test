@@ -240,8 +240,21 @@ def test_group_report_path_real_trip_counts():
     with ExitStack() as stack:
         _base_patches(stack, group_trips=rows)
         res = fa.get_trips_mileage_analytics(hours=24)
-    assert res["summary"]["total_trips"] is None, "one unknown count makes the fleet total unknown"
-    print("[PASS] Group report path: Wialon trip counts summed (3/1/0 -> 4); one unknown count -> total None.")
+    s = res["summary"]
+    unknown_name = next(v["vehicle_name"] for v in res["vehicles"] if v["vehicle_id"] == 101)
+    # One unknown count: the known counts are summed (1 + 0) and the unknown vehicle listed, never counted as 0
+    assert s["total_trips"] == 1 and s["total_trips_partial"] is True, s
+    assert s["trip_count_unknown_vehicles"] == [unknown_name], s
+    assert s["average_trip_distance_km"] is None, "a per-trip average needs every vehicle's trip count"
+    logistics = next(g for g in res["by_group"] if g["group"] == "Logistics")
+    assert logistics["trips"] == 1 and logistics["trips_unknown_vehicles"] == 1 and logistics["trips_partial"], logistics
+    rows = [dict(r, trip_count=None) for r in rows]
+    with ExitStack() as stack:
+        _base_patches(stack, group_trips=rows)
+        res = fa.get_trips_mileage_analytics(hours=24)
+    assert res["summary"]["total_trips"] is None, "every count unknown: the total is unknown, not 0"
+    print("[PASS] Group report path: Wialon trip counts summed (3/1/0 -> 4); one unknown count -> known counts "
+          "summed (1) with the unknown vehicle listed; all unknown -> None.")
 
 
 def test_unit_report_path_multiple_and_zero_trips():
@@ -307,13 +320,14 @@ def test_group_analytics_trips():
 
     one_unknown = [dict(known[0], trip_count=None), known[1], known[2]]
     g = _groups_with(one_unknown)
-    assert g["Logistics"]["trips_24h"] is None and g["Contracts"]["trips_24h"] == 0, g
+    assert g["Logistics"]["trips_24h"] == 1 and g["Logistics"]["trips_unknown_vehicles"] == 1, g
+    assert g["Contracts"]["trips_24h"] == 0 and g["Contracts"]["trips_unknown_vehicles"] == 0, g
     assert g["Logistics"]["distance_24h_km"] == 96.0, g
 
     missing = known[1:]  # UNIT-A absent from the trips data
     g = _groups_with(missing)
-    assert g["Logistics"]["trips_24h"] is None, g
-    print("[PASS] Group analytics: trips_24h sums known counts; None when any count is unknown or missing.")
+    assert g["Logistics"]["trips_24h"] == 1 and g["Logistics"]["trips_unknown_vehicles"] == 1, g
+    print("[PASS] Group analytics: trips_24h sums known counts and counts the unknown or missing members.")
 
 
 def test_api_responses_null():

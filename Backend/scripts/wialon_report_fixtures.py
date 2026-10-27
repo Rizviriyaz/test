@@ -78,6 +78,11 @@ def group_engine_subrow(j, start, idle_seconds):
                   f"{h}:{m:02d}:{s:02d}"], "t1": start, "t2": start + idle_seconds}
 
 
+def single_interval_subrow(row):
+    """The one sub-row of a group engine row with a single idle interval: the row's own cells and interval."""
+    return {"c": copy.deepcopy(row["c"]), "t1": row["t1"], "t2": row["t2"]}
+
+
 def default_tables():
     """Fixture tables kept below the current row caps so outputs can be characterized exactly."""
     unit_trips = [unit_trip_row(i, BASE_TS + i * 7200, 30 + i * 5, f"0:{25 + i * 5:02d}:00", 10.5 * i) for i in range(1, 4)]
@@ -94,10 +99,13 @@ def default_tables():
                    group_trip_row("UNIT-C", 0.0)]
     group_engine_rows = [
         group_engine_row("UNIT-A", "24:00:00", "6:00:00", "4:30:00", "1:30:00", 180.25, subrows=3),
-        group_engine_row("UNIT-B", "24:00:00", "9:15:30", "8:00:00", "1:15:30", 640.0, subrows=0),  # idle, no subrows
+        # One idle interval: Wialon sends it as one sub-row (on 2026-10-26 every row with idling had sub-rows); the
+        # sub-row mirrors the row's cells and interval. A row with idling but no sub-rows is tested separately.
+        group_engine_row("UNIT-B", "24:00:00", "9:15:30", "8:00:00", "1:15:30", 640.0, subrows=1),
         group_engine_row("UNIT-C", "24:00:00", "0:00:00", "0:00:00", "0:00:00", 0.0, subrows=0),
     ]
-    group_engine_subrows = {0: [group_engine_subrow(j, BASE_TS + 3600 * (j + 1), 1800) for j in range(3)]}
+    group_engine_subrows = {0: [group_engine_subrow(j, BASE_TS + 3600 * (j + 1), 1800) for j in range(3)],
+                            1: [single_interval_subrow(group_engine_rows[1])]}
     return {
         TEMPLATE_UNIT_TRIPS: {"header": UNIT_TRIPS_HEADER, "rows": unit_trips, "subrows": {}},
         TEMPLATE_UNIT_ENGINE: {"header": UNIT_ENGINE_HEADER, "rows": unit_engine_rows, "subrows": unit_engine_subrows},
@@ -211,3 +219,14 @@ def normalize_for_compare(obj):
             return sorted(items)
         return items
     return obj
+
+
+def age_report_caches(seconds):
+    """Make every entry of the result caches (app.main._cache, app.fleet_analytics._analytics_cache) `seconds` older,
+    so TTL behaviour is tested without sleeping. Entries still expire from the bounded cache as before."""
+    import app.fleet_analytics as fa
+    import app.main as main
+    for cache in (main._cache, fa._analytics_cache):
+        for _expires_at, value in list(cache._data.values()):
+            if isinstance(value, dict) and "time" in value:
+                value["time"] -= seconds

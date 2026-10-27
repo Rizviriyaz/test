@@ -13,7 +13,7 @@ import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
-import { LIVE_STATUSES, countByStatus, formatAge, isPositionStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
+import { LIVE_STATUSES, countByStatus, formatAge, isPositionStale, isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function formatLastUpdate(vehicle) {
     // A recent message with an old GPS fix: show the fix age, never "Just now"
@@ -267,7 +267,6 @@ function Tracking() {
         { key: "MOVING", label: "Moving", count: counts.MOVING, dot: "bg-status-moving" },
         { key: "IDLING", label: "Idling", count: counts.IDLING, dot: "bg-status-idling" },
         { key: "STOPPED", label: "Stopped", count: counts.STOPPED, dot: "bg-status-stopped" },
-        { key: "DELAYED", label: "Delayed", count: counts.DELAYED, dot: "bg-status-delayed" },
         { key: "OFFLINE", label: "Offline", count: counts.OFFLINE, dot: "bg-status-offline" },
     ]
 
@@ -491,9 +490,17 @@ function Tracking() {
                                             }`}
                                         >
                                             <div className="flex items-center justify-between gap-2">
-                                                <span className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-900">
-                                                    {vehicleNumber}
-                                                </span>
+                                                <div className="flex items-center gap-1.5 min-w-0">
+                                                    <span className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-900">
+                                                        {vehicleNumber}
+                                                    </span>
+                                                    {isTelemetryStale(vehicle) && (
+                                                        <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 shrink-0" title="Last known status: telemetry or GPS fix is older than 10 min">
+                                                            <span className="h-1.5 w-1.5 rounded-full bg-violet-500" aria-hidden="true" />
+                                                            Stale
+                                                        </span>
+                                                    )}
+                                                </div>
                                                 <span className="shrink-0 text-[11px] text-slate-400 tabular-nums">
                                                     {lastUpdatedText}
                                                 </span>

@@ -231,7 +231,8 @@ def tables_54836_like():
     durs = interval_durations()
     tables[TEMPLATE_GROUP_ENGINE]["rows"][0] = group_engine_row(
         "UNIT-A", "24:00:00", "6:00:00", "3:00:00", IDLE_STR, 50.0, subrows=INTERVALS)
-    tables[TEMPLATE_GROUP_ENGINE]["subrows"] = {0: [group_engine_subrow(j, BASE_TS + j * 240, d) for j, d in enumerate(durs)]}
+    tables[TEMPLATE_GROUP_ENGINE]["subrows"] = {0: [group_engine_subrow(j, BASE_TS + j * 240, d) for j, d in enumerate(durs)],
+                                                1: tables[TEMPLATE_GROUP_ENGINE]["subrows"][1]}  # UNIT-B's one interval
     tables[TEMPLATE_UNIT_ENGINE]["rows"] = [
         unit_engine_row(1, BASE_TS, "24:00:00", "6:00:00", "3:00:00", IDLE_STR, 50.0, subrows=INTERVALS)]
     tables[TEMPLATE_UNIT_ENGINE]["subrows"] = {0: [unit_engine_subrow(j, BASE_TS + j * 240, d) for j, d in enumerate(durs)]}
@@ -250,7 +251,8 @@ def test_reports():
     with patch("app.wialon_reports.wialon_request", engine):
         g = wr.execute_wialon_group_engine_idle_report("s", FROM_TS, TO_TS, group_id=1)
     a = next(v for v in g["vehicles"] if v["vehicle_name"] == "UNIT-A")
-    check(engine.count(SUBROWS) == 1, "group report, range ignored: one sub-row call for the 313-interval unit")
+    check([p["rowIndex"] for s, p in engine.calls if s == SUBROWS].count(0) == 1,
+          "group report, range ignored: one sub-row call for the 313-interval unit")
     check(a["total_idle_seconds"] == IDLE_TOTAL and a["idle_events"] == IDLE_EVENTS and not a["incomplete_fields"]
           and g["events_incomplete"] == [], "group report: 8,726 s idle, 54 events, complete")
     check_events(a["events"], "group report")

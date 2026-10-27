@@ -127,7 +127,8 @@ def test_idle_seed_failure_is_isolated_and_unknown():
     recs = _live(units, history)
     a, b = recs
     assert a["status"] == b["status"] == "IDLING"
-    assert a["idle_duration"] == 600 and a["idle_duration_status"] == "known", a
+    # Idling since NOW - 600, last message at NOW - 30: the timer is capped at the last message (570 s)
+    assert a["idle_duration"] == 570 and a["idle_duration_status"] == "known", a
     assert b["idle_duration"] == 0 and isinstance(b["idle_duration"], int), "integer contract kept"
     assert b["idle_duration_status"] == "unknown" and b["idle"]["duration_status"] == "unknown" and b["idle_start"] is None, b
     assert 2 not in vehicles.idle_start_times, "a failed seed is not stored: retried on the next request"
@@ -228,11 +229,13 @@ def test_group_safety_unknown_when_member_failed():
         stack.enter_context(patch.object(fa, "get_trips_mileage_analytics", return_value=trips))
         res = fa.get_fleet_groups_analytics()
     by = {g["group_name"]: g for g in res["groups"]}
-    assert by["North"]["safety_events_24h"] is None, "a member's events are unknown"
-    assert by["Solo"]["safety_events_24h"] == 3, "membership totals: A counts in each of its groups"
+    # Known members summed, the unreadable member counted as unknown (never as 0 events)
+    assert by["North"]["safety_events_24h"] == 3 and by["North"]["safety_unknown_vehicles"] == 1, by["North"]
+    assert by["Solo"]["safety_events_24h"] == 3 and by["Solo"]["safety_unknown_vehicles"] == 0,         "membership totals: A counts in each of its groups"
     assert res["totals_basis"] == "group_membership"
     assert fa.get_cached("fleet_groups_analytics", ttl_seconds=180) is None
-    print("[PASS] A6: group safety is a membership total; unknown (None) when a member could not be read.")
+    print("[PASS] A6: group safety is a membership total over the readable members, with the unreadable ones counted "
+          "(partial, not cached).")
 
 
 def test_utilization_fallback_is_labelled_and_isolated():

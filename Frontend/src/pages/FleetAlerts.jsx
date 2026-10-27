@@ -67,9 +67,6 @@ function AlertRow({ alert }) {
                 {alert.title && alert.message && alert.title !== alert.message && (
                     <p className="mt-0.5 text-xs leading-relaxed text-slate-600">{alert.message}</p>
                 )}
-                {alert.alert_type && (
-                    <p className="mt-1 text-[11px] text-slate-400">{alert.alert_type}</p>
-                )}
             </div>
 
             <div className="col-start-2 mt-1.5 min-w-0 text-xs md:col-start-auto md:mt-0">
@@ -185,10 +182,13 @@ export default function FleetAlerts() {
 
             <div className="space-y-4">
                 {data?.safety_partial && (
-                    <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                        Partial: harsh-driving alerts could not be checked for {data.safety_unavailable_vehicles?.length || "some"} vehicle(s)
-                        {data.safety_unavailable_vehicles?.length ? ` (${data.safety_unavailable_vehicles.slice(0, 5).join(", ")}${data.safety_unavailable_vehicles.length > 5 ? "…" : ""})` : ""}.
-                    </p>
+                    <div role="status" className="flex items-center gap-2 rounded-lg border border-amber-200/80 bg-amber-50/70 px-3 py-2 text-xs text-amber-900 shadow-2xs">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" aria-hidden="true" />
+                        <span>
+                            Partial: harsh-driving alerts could not be checked for {data.safety_unavailable_vehicles?.length || "some"} vehicle(s)
+                            {data.safety_unavailable_vehicles?.length ? ` (${data.safety_unavailable_vehicles.slice(0, 5).join(", ")}${data.safety_unavailable_vehicles.length > 5 ? "…" : ""})` : ""}.
+                        </span>
+                    </div>
                 )}
                 {/* Severity counts double as the severity filter */}
                 <KpiStrip label="Alert severity filter" className="grid-cols-2 md:grid-cols-4">
@@ -248,6 +248,12 @@ export default function FleetAlerts() {
                             <span className="font-medium text-slate-800">{filtered.length}</span>{" "}
                             {sevFilter === "ALL" ? "" : `${SEVERITY_CONFIG[sevFilter]?.label.toLowerCase() || sevFilter.toLowerCase()} `}
                             event{filtered.length !== 1 ? "s" : ""}
+                            {data?.alerts_capped && (
+                                <span title="Only the newest harsh-driving events are listed; the counts above include all of them">
+                                    {" "}· showing {data.displayed_alerts ?? allAlerts.length} of {data.total_alerts} alerts
+                                    {" "}(newest {data.harsh_driving_displayed} of {data.harsh_driving_total} harsh-driving events listed)
+                                </span>
+                            )}
                         </p>
                     </div>
 

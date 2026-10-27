@@ -1,19 +1,22 @@
 """
-Offline regression tests for audit finding H2: stale Moving/Idling telemetry is DELAYED, never live Moving/Idling.
+Offline regression tests for live status and connection health (audit H2, revised by F1: movement status is kept
+separate from connection health).
 
-  - age <= CONN_STABLE_SECONDS: status from the last message (MOVING / IDLING / STOPPED)
-  - CONN_STABLE_SECONDS < age <= CONN_DELAYED_SECONDS, last seen MOVING or IDLING: status DELAYED; last_known_status
-    keeps the last state, speed/ignition/last_message_timestamp keep the last reported values, no live idle timer,
-    no history reads
-  - same age, last seen STOPPED (a parked tracker reports less often): status stays STOPPED (connection DELAYED)
-  - older (or no message): OFFLINE
-  - every count endpoint partitions the fleet: moving + idling + stopped + delayed + offline == total
-  - idle analytics does not count a stale idler as currently idling
+  - age <= CONN_STABLE_SECONDS: status from the last message (MOVING / IDLING / STOPPED), telemetry_stale false
+  - CONN_STABLE_SECONDS < age <= CONN_DELAYED_SECONDS, last seen MOVING or IDLING: status keeps that last known state
+    with telemetry_stale true (connection DELAYED); speed/ignition/last_message_timestamp keep the last reported
+    values; the idle timer stops at the last message
+  - same age, last seen STOPPED (a parked tracker reports less often): STOPPED, telemetry_stale false (D3)
+  - older (or no message): OFFLINE (12 h threshold unchanged); a DELAYED vehicle is never counted as OFFLINE
+  - every count endpoint partitions the fleet: moving + idling + stopped + offline == total; `delayed` counts the
+    telemetry-stale vehicles among them
+  - idle analytics counts a stale idler under its last known status (currently idling)
   - live and health views use the same CONN_STABLE_SECONDS threshold
   - D3: Vehicle Health / Alerts do not treat a stale parked (last seen STOPPED) unit as delayed (no warning, alert or
     penalty); stale Moving/Idling units still are; past CONN_DELAYED_SECONDS every unit is OFFLINE
-  - R2: last seen MOVING with a GPS position (core/search_items pos.t) older than CONN_STABLE_SECONDS is DELAYED even
-    with recent messages; a missing position time is unknown; IDLING/STOPPED and the OFFLINE rule are unchanged
+  - R2: last seen MOVING with a GPS position (core/search_items pos.t) older than CONN_STABLE_SECONDS stays MOVING
+    with position_stale and telemetry_stale true even with recent messages; a missing position time is unknown;
+    IDLING/STOPPED and the OFFLINE rule are unchanged
   - Phase 3: the fix time/age (position_timestamp, seconds_since_position) and position_stale (exactly the R2 case)
     are exposed; Health marks such a unit's GPS STALE (-15, GPS warning, GPS_POSITION_STALE alert) only while its
     connection is STABLE (no double penalty); AI vehicle tools report message age, fix age and last-reported speed
@@ -42,7 +45,7 @@ NOW = 1_800_000_000
 IGNITION = {"1": {"n": "Ignition", "t": "engine operation"}}
 
 
-def _live(age, speed, ignition_on, vid=7, pos_age=None, sats=None):
+def _live(age, speed, ignition_on, vid=7, pos_age=None, sats=None, history_msgs=None):
     """
     One unit's live record whose last message is `age` seconds old (None: no message at all). `pos_age` sets the
     core/search_items GPS position time (`pos.t`); None leaves it absent, like calc_last's `pos`, which has no time.
@@ -56,7 +59,7 @@ def _live(age, speed, ignition_on, vid=7, pos_age=None, sats=None):
     if sats is not None:
         calc_pos["sc"] = sats
     calc = [{"i": vid, "pos": calc_pos, "sensors": {"1": {"value": 1 if ignition_on else 0}}}]
-    history = MagicMock(return_value=[])
+    history = MagicMock(return_value=list(history_msgs or []))
     vehicles.idle_start_times.pop(vid, None)
     with patch("app.vehicles.now_timestamp", return_value=NOW), patch("app.vehicles.get_vehicle_history", history):
         rec = vehicles.get_vehicle_live_data("sid", [vehicle], calc, groups=[])[0]
@@ -68,31 +71,45 @@ def test_live_and_stale_states():
     assert CONN_STABLE_SECONDS == 600 and CONN_DELAYED_SECONDS == 43200, (CONN_STABLE_SECONDS, CONN_DELAYED_SECONDS)
     rec, _ = _live(300, 60, True)
     assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("MOVING", "MOVING", "STABLE"), rec
+    assert rec["telemetry_stale"] is False, rec
     rec, _ = _live(11 * 3600, 60, True)  # silent for 11 h while last seen at 60 km/h
-    assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("DELAYED", "MOVING", "DELAYED"), rec
+    assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("MOVING", "MOVING", "DELAYED"), rec
+    assert rec["telemetry_stale"] is True, "the status is the last known one, flagged stale (never Offline)"
     assert rec["speed"] == 60 and rec["ignition"] is True and rec["is_offline"] is False, rec
     assert rec["last_message_timestamp"] == NOW - 11 * 3600 and rec["seconds_since_update"] == 11 * 3600, rec
     rec, _ = _live(13 * 3600, 60, True)
     assert (rec["status"], rec["last_known_status"], rec["is_offline"]) == ("OFFLINE", "MOVING", True), rec
+    assert rec["telemetry_stale"] is False, "OFFLINE is its own state, not a stale one"
     rec, _ = _live(None, 0, False)
     assert (rec["status"], rec["last_known_status"]) == ("OFFLINE", None), rec
     rec, _ = _live(600, 60, True)
-    assert rec["status"] == "MOVING", rec
+    assert (rec["status"], rec["telemetry_stale"]) == ("MOVING", False), rec
     rec, _ = _live(601, 60, True)
-    assert rec["status"] == "DELAYED", rec
-    print("[PASS] H2: <=600 s live status; 601 s..12 h DELAYED with last_known_status and last reported speed; "
-          "older or no message OFFLINE.")
+    assert (rec["status"], rec["telemetry_stale"]) == ("MOVING", True), rec
+    print("[PASS] F1: <=600 s live status; 601 s..12 h keeps the last known status (telemetry_stale, last reported "
+          "speed); older or no message OFFLINE.")
 
 
-def test_stale_idler_has_no_live_idle_timer():
+def _msg(ts, speed, ignition_on):
+    return {"tp": "ud", "t": ts, "pos": {"s": speed}, "sensors": {"1": {"value": 1 if ignition_on else 0}}}
+
+
+def test_stale_idler_keeps_idling_with_capped_timer():
     rec, history = _live(300, 0, True)
-    assert rec["status"] == "IDLING" and history.call_count >= 1, (rec["status"], history.call_count)
-    rec, history = _live(2 * 3600, 0, True)
-    assert (rec["status"], rec["last_known_status"]) == ("DELAYED", "IDLING"), rec
-    assert rec["idle_duration"] == 0 and rec["idle_start"] is None and rec["idle"]["is_idling"] is False, rec
-    assert history.call_count == 0, "a stale unit's idle timer is not seeded against wall-clock time"
-    assert 7 not in vehicles.idle_start_times
-    print("[PASS] H2: a unit last seen idling 2 h ago is DELAYED with no running idle timer and no history reads.")
+    assert rec["status"] == "IDLING" and rec["telemetry_stale"] is False and history.call_count >= 1, rec
+    # Moving until 3 h ago, then idling; the last message was 2 h ago
+    msgs = [_msg(NOW - 3 * 3600 - 60, 30, True), _msg(NOW - 3 * 3600, 0, True), _msg(NOW - 2 * 3600, 0, True)]
+    rec, history = _live(2 * 3600, 0, True, history_msgs=msgs)
+    assert (rec["status"], rec["last_known_status"], rec["telemetry_stale"]) == ("IDLING", "IDLING", True), rec
+    assert rec["idle_start"] == NOW - 3 * 3600 and rec["idle_duration_status"] == "known", rec
+    # Idling is only known up to the last message: 1 h, not the 3 h a wall-clock timer would show
+    assert rec["idle_duration"] == 3600 and rec["idle"]["duration"] == 3600, rec
+    # A live idler's timer is capped the same way (its last message is recent)
+    msgs = [_msg(NOW - 1800 - 60, 30, True), _msg(NOW - 1800, 0, True), _msg(NOW - 30, 0, True)]
+    rec, _ = _live(30, 0, True, history_msgs=msgs)
+    assert rec["idle_duration"] == 1800 - 30 and rec["telemetry_stale"] is False, rec
+    print("[PASS] F1: a unit last seen idling 2 h ago stays IDLING (telemetry_stale) and its idle timer stops at the "
+          "last message (1 h, not 3 h); a live idler's timer is capped at its last message too.")
 
 
 def test_stale_parked_unit_stays_stopped():
@@ -115,40 +132,47 @@ def test_moving_and_idling_boundaries():
         assert (rec["status"], rec["connection_status"]) == (live, "STABLE"), (live, rec)
         for age in (CONN_STABLE_SECONDS + 1, CONN_DELAYED_SECONDS):
             rec, _ = _live(age, speed, ignition_on)
-            assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("DELAYED", live, "DELAYED"), (age, rec)
+            assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == (live, live, "DELAYED"), (age, rec)
+            assert rec["telemetry_stale"] is True, (age, rec)
             assert rec["ignition"] is ignition_on and rec["speed"] == speed, (age, rec)
         rec, _ = _live(CONN_DELAYED_SECONDS + 1, speed, ignition_on)
         assert (rec["status"], rec["last_known_status"]) == ("OFFLINE", live), rec
-    # Moving with ignition off (e.g. towed) is still a last-seen MOVING state: hidden as DELAYED when stale
+    # Moving with ignition off (e.g. towed) is still a last-seen MOVING state: kept as MOVING, flagged stale
     rec, _ = _live(CONN_STABLE_SECONDS + 1, 40, False)
-    assert (rec["status"], rec["last_known_status"]) == ("DELAYED", "MOVING"), rec
+    assert (rec["status"], rec["last_known_status"], rec["telemetry_stale"]) == ("MOVING", "MOVING", True), rec
     statuses = set()
     for age in (None, 0, CONN_STABLE_SECONDS, CONN_STABLE_SECONDS + 1, CONN_DELAYED_SECONDS, CONN_DELAYED_SECONDS + 1):
         for speed, ignition_on in ((60, True), (40, False), (0, True), (0, False)):
             rec, _ = _live(age, speed, ignition_on)
             statuses.add(rec["status"])
             stale_active = rec["connection_status"] == "DELAYED" and rec["last_known_status"] in ("MOVING", "IDLING")
-            assert (rec["status"] == "DELAYED") == stale_active, rec
-    assert statuses == {"MOVING", "IDLING", "STOPPED", "DELAYED", "OFFLINE"}, statuses
-    print("[PASS] H2: Moving/Idling are live up to 600 s, DELAYED from 601 s to 12 h, then OFFLINE; every record has "
-          "exactly one of the five statuses, and DELAYED only for a stale Moving/Idling state.")
+            assert rec["telemetry_stale"] is stale_active, rec
+            if rec["status"] != "OFFLINE":
+                assert rec["status"] == rec["last_known_status"], rec
+    assert statuses == {"MOVING", "IDLING", "STOPPED", "OFFLINE"}, statuses
+    print("[PASS] F1: Moving/Idling are live up to 600 s, kept as last known (telemetry_stale) from 601 s to 12 h, then "
+          "OFFLINE; every record has exactly one of the four statuses; DELAYED is never a status.")
 
 
 def _fleet():
-    rows = [("MOVING", "STABLE"), ("IDLING", "STABLE"), ("STOPPED", "STABLE"), ("DELAYED", "DELAYED"),
-            ("DELAYED", "DELAYED"), ("OFFLINE", "OFFLINE"), ("STOPPED", "DELAYED")]
+    # (status, connection, telemetry_stale): two stale idlers keep IDLING, a stale parked unit stays STOPPED
+    rows = [("MOVING", "STABLE", False), ("IDLING", "STABLE", False), ("STOPPED", "STABLE", False),
+            ("IDLING", "DELAYED", True), ("IDLING", "DELAYED", True), ("OFFLINE", "OFFLINE", False),
+            ("STOPPED", "DELAYED", False)]
     return [{"vehicle_id": 100 + i, "vehicle_name": f"U{i}", "group": "Logistics", "groups": ["Logistics"],
-             "status": st, "last_known_status": "IDLING" if st == "DELAYED" else st, "connection_status": conn,
+             "status": st, "last_known_status": st if st != "OFFLINE" else "IDLING", "connection_status": conn,
+             "telemetry_stale": stale,
              "is_offline": conn == "OFFLINE", "speed": 0, "ignition": True, "latitude": 25.0, "longitude": 55.0,
              "idle_duration": 0, "idle_start": None, "sensors": {}, "driver": {}, "mileage": None, "engine_hours": None}
-            for i, (st, conn) in enumerate(rows)]
+            for i, (st, conn, stale) in enumerate(rows)]
 
 
 def _assert_partition(block, where):
-    parts = block["moving"] + block["idling"] + block["stopped"] + block["delayed"] + block["offline"]
+    parts = block["moving"] + block["idling"] + block["stopped"] + block["offline"]
     total = block.get("total_vehicles", block.get("total"))
-    # The stale parked unit (STOPPED, connection DELAYED) counts as stopped, never as delayed or offline
-    assert (block["moving"], block["idling"], block["stopped"], block["delayed"], block["offline"]) == (1, 1, 2, 2, 1), (where, block)
+    # The stale idlers count as idling (last known status) and in `delayed` (stale telemetry), never as offline; the
+    # stale parked unit (STOPPED, connection DELAYED) counts as stopped only
+    assert (block["moving"], block["idling"], block["stopped"], block["delayed"], block["offline"]) == (1, 3, 2, 2, 1), (where, block)
     assert parts == total == 7, (where, block)
 
 
@@ -176,18 +200,21 @@ def test_counts_partition_the_fleet():
         _assert_partition(main.get_groups()["groups"][0], "/api/groups")
         _assert_partition(fa.get_fleet_groups_analytics()["groups"][0], "/api/fleet/groups")
         _assert_partition(ai_tools.tool_get_fleet_summary(), "AI get_fleet_summary")
-        delayed = ai_tools.tool_get_vehicles_by_status("DELAYED")
-        assert delayed["count"] == 2 and all(v["last_known_status"] == "IDLING" for v in delayed["vehicles"]), delayed
-        assert ai_tools.tool_get_vehicles_by_status("IDLING")["count"] == 1
-    print("[PASS] H2: summary, fleet-health, groups, fleet groups and AI counts partition the fleet "
-          "(moving + idling + stopped + delayed + offline == total); AI can list DELAYED units.")
+        stale = ai_tools.tool_get_vehicles_by_status("STALE")
+        assert stale["count"] == 2 and all(v["status"] == "IDLING" and v["telemetry_stale"] for v in stale["vehicles"]), stale
+        assert all(v["speed_is_last_reported"] for v in stale["vehicles"]), stale
+        assert ai_tools.tool_get_vehicles_by_status("IDLING")["count"] == 3
+        assert ai_tools.tool_get_vehicles_by_status("OFFLINE")["count"] == 1, "stale vehicles are never OFFLINE"
+    print("[PASS] F1: summary, fleet-health, groups, fleet groups and AI counts partition the fleet "
+          "(moving + idling + stopped + offline == total, stale idlers as idling); `delayed` counts stale telemetry; "
+          "AI lists stale units with STALE.")
 
 
 def test_idle_analytics_excludes_stale_idler():
     from wialon_report_fixtures import CALCULATED, GROUPS, UNITS, FakeReportEngine
     fleet = [dict(v, vehicle_id=u["id"], vehicle_name=u["nm"]) for v, u in zip(_fleet(), UNITS)]
-    fleet[0]["status"] = "DELAYED"  # last known IDLING, stale
-    fleet[1]["status"] = "IDLING"
+    fleet[0].update(status="IDLING", telemetry_stale=True)  # last known IDLING, stale
+    fleet[1].update(status="IDLING", telemetry_stale=False)
     with ExitStack() as stack:
         main._cache.clear()
         stack.enter_context(patch("app.wialon_reports.wialon_request", FakeReportEngine()))
@@ -201,8 +228,8 @@ def test_idle_analytics_excludes_stale_idler():
         res = main.get_fleet_idle_analytics(hours=24, timeframe=None, from_date=None, to_date=None, from_time=None,
                                             to_time=None, group_id=None, vehicle_id=None, include_events=False,
                                             refresh=True, skip_cache=True)
-    assert res["kpis"]["currently_idling_vehicles"] == 1, res["kpis"]
-    print("[PASS] H2: idle analytics counts only a live idler as currently idling, not a DELAYED one.")
+    assert res["kpis"]["currently_idling_vehicles"] == 2, res["kpis"]
+    print("[PASS] F1: idle analytics counts a stale idler under its last known status (currently idling).")
 
 
 def test_health_and_live_share_threshold():
@@ -294,7 +321,8 @@ def test_stale_gps_position_moving_is_delayed():
     for pos_age in (CONN_STABLE_SECONDS + 1, 3600, 21738, 3 * 86400):
         for ignition_on in (False, True):
             rec, _ = _live(60, 14, ignition_on, pos_age=pos_age)
-            assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("DELAYED", "MOVING", "STABLE"), (pos_age, rec)
+            assert (rec["status"], rec["last_known_status"], rec["connection_status"]) == ("MOVING", "MOVING", "STABLE"), (pos_age, rec)
+            assert rec["telemetry_stale"] is True, (pos_age, rec)
             assert rec["speed"] == 14 and rec["ignition"] is ignition_on and rec["is_offline"] is False, rec
             assert rec["seconds_since_update"] == 60 and rec["last_message_timestamp"] == NOW - 60, rec
             assert (rec["latitude"], rec["longitude"]) == (25.2, 55.3), rec
@@ -302,20 +330,20 @@ def test_stale_gps_position_moving_is_delayed():
             # Phase 3 P1: the GPS fix age is exposed separately from the message age
             assert rec["position_timestamp"] == NOW - pos_age and rec["seconds_since_position"] == pos_age, rec
             assert rec["position_stale"] is True, rec
-    print("[PASS] R2: last seen MOVING with a GPS position older than 10 min (fresh messages) -> DELAYED; "
-          "last_known_status, speed, coordinates and message age kept; fix time/age exposed, position_stale true.")
+    print("[PASS] R2/F1: last seen MOVING with a GPS position older than 10 min (fresh messages) -> MOVING with "
+          "telemetry_stale; speed, coordinates and message age kept; fix time/age exposed, position_stale true.")
 
 
 def test_stale_gps_position_boundary_and_missing():
-    for pos_age, status, stale in ((CONN_STABLE_SECONDS, "MOVING", False), (CONN_STABLE_SECONDS + 1, "DELAYED", True),
-                                   (0, "MOVING", False)):
+    for pos_age, stale in ((CONN_STABLE_SECONDS, False), (CONN_STABLE_SECONDS + 1, True), (0, False)):
         rec = _live(60, 40, True, pos_age=pos_age)[0]
-        assert (rec["status"], rec["position_stale"], rec["seconds_since_position"]) == (status, stale, pos_age), rec
+        assert (rec["status"], rec["position_stale"], rec["seconds_since_position"]) == ("MOVING", stale, pos_age), rec
+        assert rec["telemetry_stale"] is stale, rec
     rec, _ = _live(60, 40, True)  # no position time at all: unknown, never stale
     assert (rec["status"], rec["connection_status"]) == ("MOVING", "STABLE"), rec
     assert (rec["position_timestamp"], rec["seconds_since_position"], rec["position_stale"]) == (None, None, False), rec
-    print("[PASS] R2: position age 600 s -> MOVING, 601 s -> DELAYED (position_stale exactly then); a missing "
-          "position time keeps MOVING with null fix time/age (unknown).")
+    print("[PASS] R2/F1: position age 600 s -> live MOVING, 601 s -> MOVING with position_stale/telemetry_stale; a "
+          "missing position time keeps MOVING with null fix time/age (unknown).")
 
 
 def test_stale_gps_position_does_not_change_idling_or_stopped():
@@ -332,10 +360,10 @@ def test_stale_gps_position_does_not_change_idling_or_stopped():
 
 def test_fresh_gps_position_recovers_moving():
     rec, _ = _live(30, 50, True, vid=9, pos_age=4000)
-    assert rec["status"] == "DELAYED", rec
+    assert (rec["status"], rec["telemetry_stale"]) == ("MOVING", True), rec
     rec, _ = _live(3, 56, True, vid=9, pos_age=3)  # the next message carries a fresh fix
-    assert (rec["status"], rec["last_known_status"], rec["speed"]) == ("MOVING", "MOVING", 56), rec
-    print("[PASS] R2: a fresh GPS fix returns the unit to MOVING.")
+    assert (rec["status"], rec["last_known_status"], rec["speed"], rec["telemetry_stale"]) == ("MOVING", "MOVING", 56, False), rec
+    print("[PASS] R2: a fresh GPS fix clears the stale flag.")
 
 
 def test_stale_gps_position_offline_rule_unchanged():
@@ -343,19 +371,19 @@ def test_stale_gps_position_offline_rule_unchanged():
         rec, _ = _live(CONN_DELAYED_SECONDS + 1, 40, True, pos_age=pos_age)
         assert (rec["status"], rec["is_offline"], rec["position_stale"]) == ("OFFLINE", True, False), rec
     rec, _ = _live(60, 40, True, pos_age=2 * 86400)  # recent messages, 2-day-old fix: not OFFLINE
-    assert (rec["status"], rec["connection_status"], rec["is_offline"]) == ("DELAYED", "STABLE", False), rec
+    assert (rec["status"], rec["connection_status"], rec["is_offline"], rec["telemetry_stale"]) == ("MOVING", "STABLE", False, True), rec
     rec, _ = _live(CONN_DELAYED_SECONDS, 40, True, pos_age=60)  # message-age rule unchanged up to 12 h
-    assert (rec["status"], rec["connection_status"], rec["position_stale"]) == ("DELAYED", "DELAYED", False), rec
+    assert (rec["status"], rec["connection_status"], rec["position_stale"], rec["telemetry_stale"]) == ("MOVING", "DELAYED", False, True), rec
     rec, _ = _live(CONN_STABLE_SECONDS + 1, 40, True, pos_age=3600)  # message-delayed too: not position_stale
-    assert (rec["status"], rec["connection_status"], rec["position_stale"]) == ("DELAYED", "DELAYED", False), rec
+    assert (rec["status"], rec["connection_status"], rec["position_stale"], rec["telemetry_stale"]) == ("MOVING", "DELAYED", False, True), rec
     print("[PASS] R2: OFFLINE is still decided by message age only (> 12 h); a stale fix with recent messages is "
-          "DELAYED, never OFFLINE.")
+          "MOVING with telemetry_stale, never OFFLINE.")
 
 
 def test_stale_gps_position_counts_health_alerts():
     """R2 records through fleet counts, Vehicle Health and Alerts."""
     cases = {  # vid: (message age, speed, ignition, position age) -> expected live status
-        1: ((30, 40, True, 30), "MOVING"), 2: ((60, 14, False, 21738), "DELAYED"),
+        1: ((30, 40, True, 30), "MOVING"), 2: ((60, 14, False, 21738), "MOVING"),  # stale fix: MOVING, telemetry_stale
         3: ((60, 0, True, 3 * 3600), "IDLING"), 4: ((2 * 3600, 0, False, 3 * 3600), "STOPPED"),
         5: ((CONN_DELAYED_SECONDS + 1, 0, False, None), "OFFLINE"),
     }
@@ -366,7 +394,8 @@ def test_stale_gps_position_counts_health_alerts():
         fleet.append(dict(rec, group="Logistics", groups=["Logistics"]))
         raws.append({"id": vid, "nm": f"T{vid}", "lmsg": {"t": NOW - age}})
     groups = [{"id": 7, "nm": "Logistics", "u": list(cases)}]
-    expected_counts = {"moving": 1, "idling": 1, "stopped": 1, "delayed": 1, "offline": 1}
+    expected_counts = {"moving": 2, "idling": 1, "stopped": 1, "delayed": 1, "offline": 1}
+    partition = ("moving", "idling", "stopped", "offline")
     with ExitStack() as stack:
         main._cache.clear()
         fa._analytics_cache.clear()
@@ -388,13 +417,13 @@ def test_stale_gps_position_counts_health_alerts():
     fa._analytics_cache.clear()
     for where, block in blocks.items():
         assert {k: block[k] for k in expected_counts} == expected_counts, (where, block)
-        assert sum(block[k] for k in expected_counts) == block.get("total_vehicles", block.get("total")) == 5, (where, block)
+        assert sum(block[k] for k in partition) == block.get("total_vehicles", block.get("total")) == 5, (where, block)
     by_id = {v["vehicle_id"]: v for v in health["vehicles"]}
     # Phase 3 P3: messages are recent, so connectivity stays STABLE, but the stale fix makes GPS quality STALE with -15
     assert by_id[2]["connectivity"]["status"] == "STABLE" and by_id[2]["gps"]["status"] == "STALE", by_id[2]
     assert by_id[2]["health_score"] == by_id[1]["health_score"] - 15, (by_id[1]["health_score"], by_id[2]["health_score"])
     assert by_id[2]["gps"]["seconds_since_position"] == 21738, by_id[2]["gps"]
-    assert by_id[2]["status"] == "DELAYED", "Health shows the unit's live status"
+    assert by_id[2]["status"] == "MOVING", "Health shows the unit's last known status"
     # D3: the idler and the parked unit with old fixes are not GPS-stale
     assert by_id[3]["gps"]["status"] != "STALE" and by_id[4]["gps"]["status"] != "STALE", (by_id[3], by_id[4])
     conn_alerts = {(a["vehicle_id"], a["alert_type"]) for a in alerts["alerts"]
@@ -407,7 +436,8 @@ def test_stale_gps_position_counts_health_alerts():
     warning = {v["vehicle_id"] for v in health["vehicles"] if v["connectivity"]["status"] == "DELAYED"}
     critical = {v["vehicle_id"] for v in health["vehicles"] if v["connectivity"]["status"] == "OFFLINE"}
     assert warning == set() and critical == {5}, (warning, critical)
-    print("[PASS] R2/P3: fleet-health, groups and AI counts partition the fleet with the stale-fix unit as delayed; "
+    print("[PASS] R2/P3: fleet-health, groups and AI counts partition the fleet with the stale-fix unit as moving "
+          "(and counted in delayed); "
           "Health marks its GPS STALE (-15, one GPS warning) with one GPS_POSITION_STALE alert at the fix time; "
           "connectivity unchanged; stale-fix idler/parked unit not flagged (D3).")
 
@@ -453,10 +483,10 @@ def test_position_timestamp_malformed_and_valid():
         ({"t": {"v": 1}}, None, "MOVING"),
         ({"t": NOW - 30}, NOW - 30, "MOVING"),
         ({"t": NOW - CONN_STABLE_SECONDS}, NOW - CONN_STABLE_SECONDS, "MOVING"),
-        ({"t": NOW - CONN_STABLE_SECONDS - 1}, NOW - CONN_STABLE_SECONDS - 1, "DELAYED"),
-        ({"t": float(NOW - 3600) + 0.7}, NOW - 3600, "DELAYED"),
-        ({"t": str(NOW - 3600)}, NOW - 3600, "DELAYED"),
-    ]
+        ({"t": NOW - CONN_STABLE_SECONDS - 1}, NOW - CONN_STABLE_SECONDS - 1, "STALE"),
+        ({"t": float(NOW - 3600) + 0.7}, NOW - 3600, "STALE"),
+        ({"t": str(NOW - 3600)}, NOW - 3600, "STALE"),
+    ]  # "STALE": MOVING with position_stale / telemetry_stale
     units, calc = [], []
     for vid, (pos, _, _) in enumerate(cases, start=100):
         unit = {"id": vid, "nm": f"T{vid}", "sens": IGNITION, "lmsg": {"t": NOW - 30}}
@@ -470,8 +500,10 @@ def test_position_timestamp_malformed_and_valid():
     assert len(fleet) == len(cases), "one malformed record never drops or fails the fleet"
     for rec, (pos, want_ts, want_status) in zip(fleet, cases):
         want_age = None if want_ts is None else NOW - want_ts
-        got = (rec["position_timestamp"], rec["seconds_since_position"], rec["status"], rec["position_stale"])
-        assert got == (want_ts, want_age, want_status, want_status == "DELAYED"), (pos, got)
+        got = (rec["position_timestamp"], rec["seconds_since_position"], rec["status"], rec["position_stale"],
+               rec["telemetry_stale"])
+        stale = want_status == "STALE"
+        assert got == (want_ts, want_age, "MOVING", stale, stale), (pos, got)
         assert rec["position_timestamp"] is None or type(rec["position_timestamp"]) is int, (pos, rec["position_timestamp"])
         assert (rec["seconds_since_update"], rec["connection_status"]) == (30, "STABLE"), (pos, rec)
     # D3 unchanged with a malformed or valid old time: stationary units are never position-stale
@@ -514,7 +546,7 @@ def test_last_message_timestamp_malformed_and_valid():
         ({"t": str(NOW - 30)}, None, NOW - 30, "STABLE", "MOVING"),
         ({"t": float(NOW - 30) + 0.9}, None, NOW - 30, "STABLE", "MOVING"),
         ({"t": NOW - CONN_STABLE_SECONDS}, None, NOW - CONN_STABLE_SECONDS, "STABLE", "MOVING"),
-        ({"t": NOW - CONN_STABLE_SECONDS - 1}, None, NOW - CONN_STABLE_SECONDS - 1, "DELAYED", "DELAYED"),
+        ({"t": NOW - CONN_STABLE_SECONDS - 1}, None, NOW - CONN_STABLE_SECONDS - 1, "DELAYED", "MOVING"),
         ({"t": NOW - CONN_DELAYED_SECONDS - 1}, None, NOW - CONN_DELAYED_SECONDS - 1, "OFFLINE", "OFFLINE"),
     ]
     units, calc = [], []
@@ -704,7 +736,7 @@ def test_ai_tools_report_message_and_fix_age():
 
 TESTS = [
     test_live_and_stale_states,
-    test_stale_idler_has_no_live_idle_timer,
+    test_stale_idler_keeps_idling_with_capped_timer,
     test_stale_parked_unit_stays_stopped,
     test_moving_and_idling_boundaries,
     test_counts_partition_the_fleet,

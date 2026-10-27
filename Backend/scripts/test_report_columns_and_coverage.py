@@ -19,7 +19,9 @@ Non-fuel consumers:
   - /api/idle/fleet-analytics and /api/fleet/utilization: a report row naming no fleet unit makes the fleet
     total partial and is not cached (response keys unchanged)
   - /api/idle/fleet-analytics: a dash-only engine cell ("-----", Wialon's no-value placeholder) stays unknown and in
-    incomplete_fields; only when it is the sole incompleteness and the window has closed may the result be cached
+    incomplete_fields; it is a permanent gap (cached for the normal TTL, still partial). Units outside the report
+    group, ambiguous names and unmatched rows are permanent gaps too; guessed columns, unreadable duration cells and
+    members missing from a group report are transient (re-read after TRANSIENT_PARTIAL_TTL_SECONDS)
   - 'today' / 'yesterday' caches (/api/dashboard/mileage, /api/fleet/trips) are never served after UAE
     midnight; rolling windows keep their cache
   - /api/fleet/trips cache key: explicit bounds > from_date > timeframe, as the resolver
@@ -38,7 +40,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from offline_guard import OfflineGuard  # noqa: E402
 from wialon_report_fixtures import (  # noqa: E402
     BASE_TS, CALCULATED, GROUPS, TEMPLATE_GROUP_ENGINE, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_ENGINE,
-    TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine, default_tables, group_engine_row, live_records,
+    TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine, age_report_caches, default_tables, group_engine_row, live_records,
 )
 
 import app.fleet_analytics as fa  # noqa: E402
@@ -129,6 +131,27 @@ def _main_patches(stack, engine, units=UNITS, groups=GROUPS):
         stack.enter_context(patch(f"{target}.get_vehicle_live_data", side_effect=lambda *a, **k: [dict(v) for v in FLEET]))
 
 
+def _assert_transient_cache(stack, engine_factory, call, what):
+    """A transient-partial result is served from cache only for TRANSIENT_PARTIAL_TTL_SECONDS, then re-read."""
+    engine = engine_factory()
+    stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+    call()
+    assert engine.count("report/exec_report") == 0, f"{what}: served from the short transient cache"
+    age_report_caches(main.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+    call()
+    assert engine.count("report/exec_report") == 1, f"{what}: re-read after TRANSIENT_PARTIAL_TTL_SECONDS"
+
+
+def _assert_permanent_cache(stack, engine_factory, call, what, still_partial):
+    """A permanently partial result is cached past the transient TTL and keeps its partial flags."""
+    engine = engine_factory()
+    stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
+    age_report_caches(main.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+    res = call()
+    assert engine.count("report/exec_report") == 0, f"{what}: permanent gap cached like a complete result"
+    assert still_partial(res), f"{what}: the cached result is still flagged partial"
+
+
 def test_dashboard_mileage_guessed_column_and_missing_member():
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(include_header=False))
@@ -137,11 +160,9 @@ def test_dashboard_mileage_guessed_column_and_missing_member():
         assert all(u["mileage"] is None for u in res["all_units"]) and res["total_km"] is None, res["all_units"]
         assert res["average_km"] is None, res  # no known mileage: unknown, not 0 km
         assert sorted(res["incomplete_units"]) == ["UNIT-A", "UNIT-B", "UNIT-C"], res
-        engine = FakeReportEngine(include_header=False)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
-                                   to_date=None, group_id=None)
-        assert engine.count("report/exec_report") == 1, "a guessed-column result must not be served from cache"
+        _assert_transient_cache(stack, lambda: FakeReportEngine(include_header=False), lambda: main.get_dashboard_mileage(
+            timeframe="today", from_time=None, to_time=None, from_date=None, to_date=None, group_id=None),
+            "a guessed-column result")
     # Group 7 (Logistics) = units 101 and 102; the report has no row for UNIT-B
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-B",))))
@@ -151,13 +172,12 @@ def test_dashboard_mileage_guessed_column_and_missing_member():
         assert units["UNIT-B"]["mileage"] is None and units["UNIT-B"]["source"] == "missing_from_report", units
         assert units["UNIT-A"]["mileage"] == 250.75, units
         assert "UNIT-B" in res["incomplete_units"] and res["total_km"] == 250.75 + 0.0, res
-        engine = FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-B",)))
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
-                                   to_date=None, group_id=7)
-        assert engine.count("report/exec_report") == 1, "a result with a missing member must not be served from cache"
-    print("[PASS] Dashboard mileage: guessed Mileage column -> unknown (not cached); group member missing "
-          "from the report -> unknown, listed in incomplete_units.")
+        _assert_transient_cache(stack, lambda: FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-B",))),
+                                lambda: main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None,
+                                                                   from_date=None, to_date=None, group_id=7),
+                                "a result with a missing member")
+    print("[PASS] Dashboard mileage: guessed Mileage column -> unknown; group member missing from the report -> "
+          "unknown, listed in incomplete_units; both re-read after the short transient TTL.")
 
 
 def test_dashboard_mileage_unit_outside_all_unit_group():
@@ -174,10 +194,8 @@ def test_dashboard_mileage_unit_outside_all_unit_group():
         assert units["UNIT-C"]["mileage"] is None and units["UNIT-C"]["source"] == "outside_report_group", units
         assert res["incomplete_units"] == ["UNIT-C"], res
         assert res["total_km"] == round(units["UNIT-A"]["mileage"] + units["UNIT-B"]["mileage"], 2), res
-        engine = FakeReportEngine(tables=tables)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        call(None)
-        assert engine.count("report/exec_report") == 1, "a fleet total missing a unit must not be served from cache"
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=tables), lambda: call(None),
+                                "a unit outside the report group", lambda r: r["incomplete_units"] == ["UNIT-C"])
     # An explicitly requested group keeps non-members out of scope (unchanged)
     with ExitStack() as stack:
         stack.enter_context(patch("app.wialon_reports.GROUP_ID_ALL_UNITS", 0))
@@ -186,7 +204,7 @@ def test_dashboard_mileage_unit_outside_all_unit_group():
         assert {u["vehicle_name"] for u in res["all_units"]} == {"UNIT-A", "UNIT-B"}, res["all_units"]
         assert res["incomplete_units"] == [], res
     print("[PASS] H1: fleet-wide mileage lists a unit outside the All Unit group as unknown (outside_report_group, "
-          "not cached); an explicit group still leaves non-members out.")
+          "cached as a permanent gap, still partial); an explicit group still leaves non-members out.")
 
 
 def test_dashboard_mileage_outside_unit_sharing_in_group_name():
@@ -208,12 +226,10 @@ def test_dashboard_mileage_outside_unit_sharing_in_group_name():
         assert by_id[103]["mileage"] is None and by_id[103]["source"] == "outside_report_group", by_id[103]
         assert res["incomplete_units"] == ["UNIT-A"] and res["ambiguous_vehicle_names"] == [], res
         assert res["total_km"] == 250.75 + 1234.5, res
-        engine = FakeReportEngine(tables=tables)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        call()
-        assert engine.count("report/exec_report") == 1, "a fleet total missing a unit must not be served from cache"
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=tables), call,
+                                "a non-member sharing a member's name", lambda r: r["incomplete_units"] == ["UNIT-A"])
     print("[PASS] H1: fleet-wide, a non-member sharing a member's name is listed as unknown (outside_report_group); "
-          "the member keeps its row's mileage; not cached.")
+          "the member keeps its row's mileage; cached as a permanent gap, still partial.")
 
 
 def test_dashboard_mileage_report_group_membership_unknown():
@@ -230,12 +246,10 @@ def test_dashboard_mileage_report_group_membership_unknown():
         assert units["UNIT-C"]["mileage"] is None and units["UNIT-C"]["source"] == "outside_report_group", units
         assert units["UNIT-A"]["mileage"] == 250.75 and units["UNIT-B"]["mileage"] == 1234.5, units
         assert res["incomplete_units"] == ["UNIT-C"] and res["total_km"] == 250.75 + 1234.5, res
-        engine = FakeReportEngine(tables=tables)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        call()
-        assert engine.count("report/exec_report") == 1, "a fleet total missing a unit must not be served from cache"
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=tables), call,
+                                "a fleet unit no row names", lambda r: r["incomplete_units"] == ["UNIT-C"])
     print("[PASS] H1: with unknown report-group membership, a fleet unit no row names is unknown "
-          "(outside_report_group), never silently left out; not cached.")
+          "(outside_report_group), never silently left out; cached as a permanent gap, still partial.")
 
 
 def test_fleet_trips_guessed_column_and_missing_row():
@@ -284,22 +298,32 @@ def test_idle_guessed_column_and_missing_row():
         res = main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False)
         assert all(v["total_idle_seconds"] is None for v in res["by_vehicle"]), res["by_vehicle"]
         assert res["kpis"]["total_idle_partial"] is True and res["kpis"]["idle_event_count"] is None, res["kpis"]
-        engine = FakeReportEngine(include_header=False)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False)
-        assert engine.count("report/exec_report") == 1, "a guessed-column result must not be served from cache"
+        _assert_transient_cache(stack, lambda: FakeReportEngine(include_header=False), lambda: main.get_fleet_idle_analytics(
+            from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False), "a guessed-column result")
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-C",))))
         res = main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False)
         v = {x["vehicle_id"]: x for x in res["by_vehicle"]}
         assert v[103]["total_idle_seconds"] is None and v[103]["idle_events"] is None, v[103]
         assert v[101]["total_idle_seconds"] == 5400 and res["kpis"]["total_idle_partial"] is True, res["kpis"]
-        engine = FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-C",)))
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False)
-        assert engine.count("report/exec_report") == 1, "a result with a missing unit must not be served from cache"
-    print("[PASS] Idle analytics: guessed columns -> unknown; unit with no report row -> unknown (not 0 s); "
-          "neither result is cached.")
+        # UNIT-C is a member of the report group (All Unit), so its missing row is a transient report gap
+        _assert_transient_cache(stack, lambda: FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-C",))),
+                                lambda: main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS,
+                                                                      include_events=True, skip_cache=False),
+                                "a report-group member with no report row")
+    # A unit outside the report group (H1) is a permanent gap: cached for the normal TTL, still partial
+    groups = [dict(g, u=[101, 102]) if g["nm"] == "All Unit" else g for g in GROUPS]
+    with ExitStack() as stack:
+        _main_patches(stack, FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-C",))), groups=groups)
+        idle = lambda: main.get_fleet_idle_analytics(from_time=FROM_TS, to_time=TO_TS, include_events=True,
+                                                     skip_cache=False)
+        res = idle()
+        assert {x["vehicle_id"]: x for x in res["by_vehicle"]}[103]["total_idle_seconds"] is None, res["by_vehicle"]
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=_tables(drop_group_rows=("UNIT-C",))), idle,
+                                "a unit outside the report group", lambda r: r["kpis"]["total_idle_partial"] is True)
+    print("[PASS] Idle analytics: guessed columns or a report-group member with no row -> unknown, re-read after the "
+          "short transient TTL; a unit outside the report group -> unknown (not 0 s), cached as a permanent gap, "
+          "still partial.")
 
 
 def _tables_with_ghost_engine_row():
@@ -324,17 +348,15 @@ def test_idle_unmatched_report_row_flagged_not_cached():
         assert res["kpis"]["total_idle_seconds"] == baseline["kpis"]["total_idle_seconds"], res["kpis"]
         assert "GHOST" not in {v["vehicle_name"] for v in res["by_vehicle"]}, res["by_vehicle"]
         assert set(res) == set(baseline) and set(res["kpis"]) == set(baseline["kpis"]), "response shape unchanged"
-        engine = FakeReportEngine(tables=_tables_with_ghost_engine_row())
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        idle()
-        assert engine.count("report/exec_report") == 1, "a result with an unmatched row must not be served from cache"
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=_tables_with_ghost_engine_row()), idle,
+                                "a result with an unmatched row", lambda r: r["kpis"]["total_idle_partial"] is True)
     # One vehicle's view is unaffected by another unit's unmatched row
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=_tables_with_ghost_engine_row()))
         res = idle(vehicle_id=101)
     assert res["kpis"]["total_idle_partial"] is False and res["kpis"]["total_idle_seconds"] == 5400, res["kpis"]
-    print("[PASS] D4: idle report row naming no fleet unit -> fleet total partial (value unchanged), not cached; "
-          "a single-vehicle view is unaffected; response keys unchanged.")
+    print("[PASS] D4: idle report row naming no fleet unit -> fleet total partial (value unchanged), cached as a "
+          "permanent gap and still partial; a single-vehicle view is unaffected; response keys unchanged.")
 
 
 def test_utilization_unmatched_report_row_flagged_not_cached():
@@ -391,10 +413,11 @@ def test_engine_placeholder_stays_unknown_and_visible():
         _main_patches(stack, FakeReportEngine(tables=tables))
         res = _idle_closed()
     v = {x["vehicle_name"]: x for x in res["by_vehicle"]}
-    assert v["UNIT-C"]["engine_mileage_km"] is None and v["UNIT-C"]["in_motion_seconds"] is None, v["UNIT-C"]
+    # Driving time is not tied to the mileage cell: the readable In motion value (0 s here) is kept as reported
+    assert v["UNIT-C"]["engine_mileage_km"] is None and v["UNIT-C"]["in_motion_seconds"] == 0, v["UNIT-C"]
     assert v["UNIT-A"]["engine_mileage_km"] is not None, "other units unaffected"
-    print("[PASS] 69597 case: a dash-only engine Mileage cell stays unknown (None), stays in incomplete_fields, and "
-          "keeps the unit's driving time unknown.")
+    print("[PASS] 69597 case: a dash-only engine Mileage cell stays unknown (None) and in incomplete_fields; the "
+          "unit's readable In motion value is still used.")
 
 
 def test_engine_placeholder_only_closed_window_is_cached():
@@ -410,35 +433,43 @@ def test_engine_placeholder_only_closed_window_is_cached():
     print("[PASS] 69597 case: a closed window whose only incompleteness is a dash-only placeholder is cached.")
 
 
-def test_engine_placeholder_open_window_not_cached():
+def test_engine_placeholder_open_window_cached_as_permanent_gap():
     tables = _engine_tables_with_cells(**{"UNIT-C": (MILEAGE_COL, "-----")})
     with ExitStack() as stack:
         _main_patches(stack, FakeReportEngine(tables=tables))
         stack.enter_context(patch("app.main.now_timestamp", return_value=TO_TS))  # the window ends now: still open
         _idle_closed()
-        engine = FakeReportEngine(tables=tables)
-        stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-        _idle_closed()
-        assert engine.count("report/exec_report") == 1, "a placeholder in a window still open is not cached"
-    print("[PASS] 69597 case: the same placeholder in a window that has not closed is not cached.")
+        _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=tables), _idle_closed,
+                                "a placeholder in a window still open",
+                                lambda r: {x["vehicle_name"]: x for x in r["by_vehicle"]}["UNIT-C"]["engine_mileage_km"] is None)
+    print("[PASS] 69597 case: the same placeholder in a window that has not closed is a permanent gap: cached for the "
+          "normal TTL, the value still unknown.")
 
 
-def test_engine_other_incomplete_cases_not_cached():
-    cases = {
+def test_engine_other_incomplete_cases_cache_policy():
+    # An unreadable duration cell is transient: re-read after the short TTL
+    transient = {
         "placeholder + unreadable Idling": {"UNIT-C": (MILEAGE_COL, "-----"), "UNIT-B": (IDLING_COL, "abc")},
-        "unreadable Mileage": {"UNIT-C": (MILEAGE_COL, "n/a")},
-        "single dash Mileage": {"UNIT-C": (MILEAGE_COL, "-")},
         "unreadable Idling only": {"UNIT-B": (IDLING_COL, "??")},
     }
-    for label, cells in cases.items():
+    for label, cells in transient.items():
+        tables = _engine_tables_with_cells(**cells)
+        with ExitStack() as stack:
+            _main_patches(stack, FakeReportEngine(tables=tables))
+            res = _idle_closed()
+            assert {x["vehicle_name"]: x for x in res["by_vehicle"]}["UNIT-B"]["total_idle_seconds"] is None, label
+            _assert_transient_cache(stack, lambda: FakeReportEngine(tables=tables), _idle_closed, label)
+    # F10: the Engine Hours mileage is not displayed, so an unreadable mileage cell never limits caching; the value
+    # itself stays unknown
+    for label, cells in {"unreadable Mileage": {"UNIT-C": (MILEAGE_COL, "n/a")},
+                         "single dash Mileage": {"UNIT-C": (MILEAGE_COL, "-")}}.items():
         tables = _engine_tables_with_cells(**cells)
         with ExitStack() as stack:
             _main_patches(stack, FakeReportEngine(tables=tables))
             _idle_closed()
-            engine = FakeReportEngine(tables=tables)
-            stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-            _idle_closed()
-            assert engine.count("report/exec_report") == 1, f"{label}: must not be served from cache"
+            _assert_permanent_cache(
+                stack, lambda: FakeReportEngine(tables=tables), _idle_closed, label,
+                lambda r: {x["vehicle_name"]: x for x in r["by_vehicle"]}["UNIT-C"]["engine_mileage_km"] is None)
     # Utilization (always a window ending now) is unchanged: a placeholder still prevents caching
     tables = _engine_tables_with_cells(**{"UNIT-C": (MILEAGE_COL, "-----")})
     with ExitStack() as stack:
@@ -448,8 +479,9 @@ def test_engine_other_incomplete_cases_not_cached():
         stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
         fa.get_fleet_utilization_analytics(hours=24)
         assert engine.count("report/exec_report") == 1, "utilization caching is unchanged"
-    print("[PASS] 69597 case: unreadable cells (with or without a placeholder), a single dash, and utilization with a "
-          "placeholder are still never cached.")
+    print("[PASS] 69597 case: unreadable duration cells (with or without a placeholder) are re-read after the short "
+          "transient TTL; an unreadable Engine Hours mileage cell no longer limits idle caching (value stays unknown); "
+          "utilization with a placeholder is still never cached.")
 
 
 def test_unit_routes_guessed_columns():
@@ -499,13 +531,13 @@ def test_dashboard_mileage_duplicate_names_unknown():
             assert res["ambiguous_vehicle_names"] == ["UNIT-A"], res
             assert res["total_km"] == 0.0, "neither 250.75 nor 1234.5 km may be counted for an unattributable row"
             assert by_id[103]["mileage"] == 0.0 and by_id[103]["source"] == "wialon_native_report", by_id[103]
-            engine = FakeReportEngine(tables=tables)
-            stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
-            main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None, from_date=None,
-                                       to_date=None, group_id=group_id)
-            assert engine.count("report/exec_report") == 1, "a result with ambiguous units must not be cached"
+            _assert_permanent_cache(stack, lambda: FakeReportEngine(tables=tables),
+                                    lambda: main.get_dashboard_mileage(timeframe="today", from_time=None, to_time=None,
+                                                                       from_date=None, to_date=None, group_id=group_id),
+                                    "a result with ambiguous units",
+                                    lambda r: r["incomplete_units"] == ["UNIT-A", "UNIT-A"])
     print("[PASS] Dashboard mileage: two units sharing a name -> each listed by id with mileage unknown, in "
-          "incomplete_units, not counted in total_km, not cached.")
+          "incomplete_units, not counted in total_km; cached as a permanent gap, still partial.")
 
 
 def test_dashboard_mileage_duplicate_name_outside_group():
@@ -672,8 +704,8 @@ def main_() -> int:
         test_utilization_unmatched_report_row_flagged_not_cached,
         test_engine_placeholder_stays_unknown_and_visible,
         test_engine_placeholder_only_closed_window_is_cached,
-        test_engine_placeholder_open_window_not_cached,
-        test_engine_other_incomplete_cases_not_cached,
+        test_engine_placeholder_open_window_cached_as_permanent_gap,
+        test_engine_other_incomplete_cases_cache_policy,
         test_unit_routes_guessed_columns,
         test_dashboard_mileage_duplicate_names_unknown,
         test_dashboard_mileage_duplicate_name_outside_group,

@@ -189,8 +189,10 @@ def test_paging_reads_past_old_caps():
     assert len(g["vehicles"]) == 1203 and g["rows_total"] == 1203
     windows = [(p["indexFrom"], p["indexTo"]) for s, p in engine.calls if s == "report/get_result_rows"]
     assert windows[:2] == [(0, 999), (1000, 1202)], windows
-    # U0: 450 sub-row events; the other 1,202 rows idle without sub-rows -> one single-interval event each
-    assert len(g["vehicles"][0]["events"]) == 450 and len(g["events"]) == 450 + 1202
+    # U0: 450 sub-row events; the other 1,202 rows idle without sub-rows: their idle totals are kept but no event is
+    # invented from a row total (their event counts are unknown)
+    assert len(g["vehicles"][0]["events"]) == 450 and len(g["events"]) == 450
+    assert len(g["events_without_subrows"]) == 1202 and all(v["total_idle_seconds"] == 1200 for v in g["vehicles"][1:])
     sub_windows = [(p["indexFrom"], p["indexTo"]) for s, p in engine.calls if s == "report/get_result_subrows"]
     # the batched first page (0-199) holds fewer than the row's 450 sub-rows, so the row is then paged in full
     assert sub_windows == [(0, 199), (0, 199), (200, 399), (400, 599)], sub_windows

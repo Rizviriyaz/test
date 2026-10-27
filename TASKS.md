@@ -111,7 +111,7 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 
 - [x] Health check endpoints.
 - [x] `PERF` trace logging (request, calculation, cache, data window, report-lock wait/hold).
-- [x] TTL caching to limit Wialon load; incomplete report results not cached.
+- [x] TTL caching to limit Wialon load. Complete and permanently partial report results use the normal TTL (idle analytics 180 s, mileage 60 s, fleet trips 180 s) and stay flagged partial; transiently partial ones 30 s. On a Wialon failure, idle analytics and mileage serve the last good result marked `stale` with `retrieved_at` and back off (15 s doubling to 120 s); identical concurrent requests run once.
 - [x] Offline or silent vehicles handled with null checks.
 
 ---
@@ -140,16 +140,18 @@ Status as of `main` @ `0040ae0` (2026-10-22). `[x]` = implemented in code, `[ ]`
 
 ## Verification Status
 
-Run on 2026-10-26 against the uncommitted accuracy follow-up (P1–P5) working tree on top of `3e3ebd2`, on Windows with Python 3.13 and Node 24. No live service was called by these checks: backend scripts ran under `OfflineGuard`, which blocks all outbound HTTP.
+Run on 2026-10-27 against the uncommitted data-accuracy fixes (audit F1–F17) on top of `9b5e272`, on Windows with Python 3.13 and Node 24. Automated checks called no live service: backend scripts ran under `OfflineGuard`, which blocks all outbound HTTP. One approved read-only live check is recorded below.
 
 | Check | Result |
 | --- | --- |
-| `npm run lint` | Fails: the same 8 errors as baseline `3e3ebd2` (unused variables / useless assignment in `FleetMap.jsx`, `FuelPerformance.jsx`, `Tracking.jsx`; setState in an effect in `FuelHeader.jsx`, `Tracking.jsx`). Only the two `Tracking.jsx` effect lines moved (+5); no new error |
-| `npm test` | 93/94 pass (3 new tests). `knownTotals.test.js:98` (regex over `IdleAnalytics.jsx` source for the trend subtitle) fails, as at baseline; `IdleAnalytics.jsx` is unchanged |
+| `npm run lint` | Pass (no issues) |
+| `npm test` | 107/107 pass |
 | `npm run build` with an absolute non-loopback URL | Pass (built to a temporary directory outside the repository; no tracked or ignored file changed) |
 | `npm run build` with `VITE_API_URL` unset or loopback | Not re-run (last verified failing as designed at `0040ae0`) |
-| Backend `scripts/test_*.py`, offline set (32 of 43 scripts) | 32 pass. 31 start `OfflineGuard` (zero network calls); `test_fuel_supabase_reads.py` imports `offline_guard` without starting it and mocks every read. `test_live_status_staleness.py`: 22/22 (7 new functions, incl. satellite deduction under STALE, GPS_POSITION_STALE replacing GPS_WEAK, 19 valid/malformed `pos.t` shapes in one fleet call, 22 `lmsg.t` shapes in one `/api/vehicles` call, and malformed/valid `lmsg.t` through fleet health, alerts and deep analytics; the R2 Health/Alerts assertion updated to the approved P3 rule) |
-| Backend `scripts/test_*.py` without `OfflineGuard` (11 scripts, incl. `test_fuel_efficiency.py`, `test_ai_fuel_assistant.py`) | Not run (may contact live services) |
+| Backend `scripts/test_*.py` with `offline_guard` (31 scripts, incl. the new `test_data_accuracy_fixes.py`) | 31 pass |
+| `test_vehicle_history_chunking.py`, `test_wialon_report_batching.py` (fully mocked, no `offline_guard`) | Pass |
+| Other backend scripts without `OfflineGuard` (12 fuel scripts, incl. `test_fuel_efficiency.py`, `test_ai_fuel_assistant.py`) | Not run (may contact live services; fuel code unchanged) |
+| Live, read-only: Wialon Engine Hours template 2 for 2026-10-26 (report executed and cleaned up; nothing modified) | 103 rows; 83 with idling, all 83 with event sub-rows; 0 rows with idling but no sub-rows; sampled sub-rows are engine-on periods whose Idling sums to the row total |
 
 **Not verified**:
 
@@ -161,9 +163,12 @@ Run on 2026-10-26 against the uncommitted accuracy follow-up (P1–P5) working t
 
 **Known limitations** (documented, not fixed):
 
-- Dashboard driving time: on 2026-10-26, 11 of 103 units were unknown because Engine (template 2) and Trips (template 5) mileage disagree beyond max(2 km, 5%); the 180 s cache gap between the two windows added 2 more at worst. Both show as unknown, never as a wrong value. The template definitions are not in the repository; reviewing them (P6, read-only live Wialon) is not approved, so the cause is unconfirmed.
+- Dashboard driving time is Engine Hours (template 2) "In motion" as reported, never checked against Trips (template 5) mileage, which Wialon measures differently; a unit is unknown only when its value is missing, unreadable or unattributable. The two reports' windows can differ by up to the 60–180 s cache times.
 - Fuel: 138 identifiers / 942 of 2,335 rows (40%) do not match the current Wialon fleet. They are excluded from KPIs and shown only in the excluded-record views, labelled "No Wialon unit" / "Several Wialon units", not as untracked vehicles. Business question for ATS, per identifier: (a) a vehicle without a tracker, (b) a tracked vehicle whose fuel-card identifier differs from Wialon (needs an alias), or (c) a vehicle sold or transferred before the period. 100 identifiers / 1,393 rows match, with no plate-code conflicts.
-- Stale GPS fix: only a unit last seen MOVING is judged by fix age (DELAYED, Health GPS STALE). A unit last seen IDLING or STOPPED with an old fix is not flagged (a stationary tracker may not send new fixes); its fix time is shown in the drawer. The drawer shows the fix time of day without a date.
+- Stale GPS fix: only a unit last seen MOVING is judged by fix age (`position_stale` / `telemetry_stale`, Health GPS STALE). A unit last seen IDLING or STOPPED with an old fix is not flagged (a stationary tracker may not send new fixes); its fix time is shown in the drawer. The drawer shows the fix time of day without a date.
 - Follow-up (not fixed): a future `pos.t` (clock skew) gives a negative `seconds_since_position` (never stale; the AI tools would report a negative `gps_fix_age_minutes`). A malformed `pos.t` or `lmsg.t` is handled in `/api/vehicles` and Vehicle Health.
 - A parked (last seen STOPPED) unit whose tracker has failed is not flagged in Health/Alerts until it is OFFLINE after 12 hours.
-- Dash-only engine cells (`-----`) stay unknown; only a closed-window idle-analytics result whose sole incompleteness is such a placeholder is cached (one live example).
+- Dash-only engine cells (`-----`) stay unknown. They count as a permanent report gap, like units outside the report group, ambiguous names and unmatched rows: such results are cached for the normal TTL and stay flagged partial. Unreadable cells, guessed columns and report-group members without a row are treated as transient and re-read after 30 s.
+- A group engine row with idling but no event sub-rows keeps its idle duration; its event count and details are unknown (no event is invented from the row total). Not seen live on 2026-10-26.
+- Live status: a vehicle keeps its last known MOVING / IDLING / STOPPED status until OFFLINE (12 h); `telemetry_stale` marks a status that is not live, and the live idle timer stops at the last message. The `delayed` counts in the summary/groups responses now count those stale vehicles (they overlap moving/idling).
+- Ignition: a missing or invalid reading is `null` (shown as Unknown). Live status does not use the `io_11` / `in1` / `io_239` fallbacks that history parsing uses; their meaning per device is unverified (in Teltonika's AVL ID list `io_239` is Ignition but `io_11` is ICCID, not an ignition input; not checked against this fleet's devices).

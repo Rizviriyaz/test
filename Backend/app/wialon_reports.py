@@ -977,6 +977,8 @@ def execute_wialon_group_engine_idle_report(
             column_warnings: List[str] = []
             unlocated: List[str] = []
             events_incomplete: List[str] = []
+            # Units whose idling has no event sub-rows: a stable gap of the report, not a read failure
+            events_without_subrows: List[str] = []
             total_rows = 0
 
             if tables:
@@ -1051,13 +1053,15 @@ def execute_wialon_group_engine_idle_report(
                                             unit_events.append(ev_item)
                                             all_idle_events.append(ev_item)
                             elif row_events and idling_sec > 0 and r.get("d", 0) == 0:
-                                # When a vehicle has idling recorded in a single non-nested interval
-                                ev_item = dict(_interval_event(cols, r, idling_sec, interval_cols), vehicle_name=vehicle_name)
-                                unit_events.append(ev_item)
-                                all_idle_events.append(ev_item)
+                                # Idling without sub-rows: the row's total may span several idle intervals, so no event
+                                # is invented from it. The idle duration stays valid; the unit's event count and details
+                                # are unknown. (Not seen live: on 2026-10-26 every row with idling had sub-rows.)
+                                row_incomplete.append("idle_events")
+                                events_incomplete.append(vehicle_name)
+                                events_without_subrows.append(vehicle_name)
 
                             # Only consider discrete individual qualifying events; never substitute cumulative total idle
-                            longest_idle = max((ev["duration"] for ev in unit_events), default=(idling_sec if len(unit_events) == 1 else 0))
+                            longest_idle = max((ev["duration"] for ev in unit_events), default=0)
 
                             unit_summaries.append({
                                 "vehicle_name": vehicle_name,
@@ -1087,6 +1091,7 @@ def execute_wialon_group_engine_idle_report(
                 "rows_total": total_rows,
                 "column_warnings": column_warnings,
                 "events_incomplete": events_incomplete,
+                "events_without_subrows": events_without_subrows,
                 # Row fields read from a guessed column position (see the module docstring)
                 "unlocated_fields": sorted(
                     {"Total time": "total_time_seconds", "Engine hours": "engine_hours_seconds",

@@ -579,6 +579,11 @@ export default function IdleAnalytics() {
 
                 {error && analytics && <ErrorBanner message={error} onRetry={refresh} />}
                 {!error && eventsError && analytics && <ErrorBanner message={eventsError} onRetry={refresh} />}
+                {analytics?.stale && (
+                    <p role="status" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                        Wialon is temporarily unavailable: showing the data read at {analytics.retrieved_at ? formatUAETime(analytics.retrieved_at) : "an earlier time"}. It refreshes automatically.
+                    </p>
+                )}
 
                 {loading && !analytics ? (
                     <LoadingState label="Analyzing fleet idle telemetry…" />
@@ -625,7 +630,7 @@ export default function IdleAnalytics() {
                                         {eventsPending ? "…" : (kpis.idle_event_count ?? "—")}
                                     </span>
                                     <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium" title={eventsNote || undefined}>
-                                        {eventsPending ? "Loading events…" : (eventsNote || "Recorded in period")}
+                                        {eventsPending ? "Loading events…" : (eventsNote || "Engine-on periods with idling")}
                                     </span>
                                 </dd>
                             </div>
@@ -637,8 +642,11 @@ export default function IdleAnalytics() {
                                     <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
                                         {formatDuration(kpis.total_idle_seconds)}
                                     </span>
-                                    <span className={`mt-0.5 block truncate text-[11px] font-medium ${kpis.total_idle_partial ? "text-amber-700" : "text-slate-400"}`}>
-                                        {kpis.total_idle_partial ? "Partial: unreadable units" : "Engine on & zero speed"}
+                                    <span
+                                        className={`mt-0.5 block truncate text-[11px] font-medium ${kpis.total_idle_partial ? "text-amber-700" : "text-slate-400"}`}
+                                        title={kpis.total_idle_partial ? "Left out of the total: vehicles whose idle time could not be read, that are outside the report group, or that share a name with another vehicle" : undefined}
+                                    >
+                                        {kpis.total_idle_partial ? "Partial: some vehicles unknown" : "Engine on & zero speed"}
                                     </span>
                                 </dd>
                             </div>
@@ -651,7 +659,7 @@ export default function IdleAnalytics() {
                                         {eventsPending ? "…" : kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
                                     </span>
                                     <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium">
-                                        Per idle occurrence
+                                        Per engine-on period with idling
                                     </span>
                                 </dd>
                             </div>
@@ -662,10 +670,12 @@ export default function IdleAnalytics() {
                                 className={`flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300 ${
                                     highestIdleEvent ? "cursor-pointer group" : ""
                                 }`}
-                                title={highestIdleEvent ? `Inspect longest idle event for: ${highestIdleEvent.vehicle_name}` : "Longest idle event"}
+                                // Wialon's Engine Hours report gives idle time per engine-on period (it may hold several idle
+                                // stops and driving), not continuous idle stops
+                                title={`Most idle time Wialon reports within one engine-on period; it may add up several idle stops${highestIdleEvent ? ` · Inspect: ${highestIdleEvent.vehicle_name}` : ""}`}
                             >
                                 <dt className="flex items-center justify-between text-xs font-medium text-slate-500">
-                                    <span>Longest Idle</span>
+                                    <span>Most Idle in One Period</span>
                                     {highestIdleEvent && (
                                         <ArrowUpRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-brand transition-colors" />
                                     )}
@@ -845,7 +855,7 @@ export default function IdleAnalytics() {
                             <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                 <AnalyticsChart
                                     title="Idle Duration Trend"
-                                    subtitle={eventsNote || "Accumulated idle minutes over time"}
+                                    subtitle={eventsNote || "Idle minutes by start time of each engine-on period"}
                                     data={trendChartData}
                                     dataKey="value"
                                     nameKey="label"
@@ -899,7 +909,7 @@ export default function IdleAnalytics() {
                                 <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                     <AnalyticsChart
                                         title="Idle Location Hotspots"
-                                        subtitle={eventsNote ? `Top 10 locations · ${eventsNote}` : "Top 10 accumulated idle locations"}
+                                        subtitle={eventsNote ? `Top 10 locations · ${eventsNote}` : "Top 10 start locations of engine-on periods with idling"}
                                         data={locationChartData}
                                         dataKey="value"
                                         nameKey="label"
@@ -930,10 +940,6 @@ export default function IdleAnalytics() {
                                 </div>
                             }
                         >
-                            <div className="border-b border-slate-100 bg-slate-50/50 px-4 py-2 text-[11px] text-slate-500">
-                                Each row reflects a Wialon engine-on period. Idle time represents zero-speed duration with ignition active.
-                            </div>
-
                             {activeSearchStats && (
                                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200/80 bg-brand-light/60 px-4 py-2 text-xs text-slate-700">
                                     <p className="min-w-0">
@@ -1091,7 +1097,7 @@ export default function IdleAnalytics() {
                         {byLocation.length > 0 && (
                             <SectionCard
                                 title="Location Hotspots"
-                                subtitle={eventsNote ? `Ranked idle locations · ${eventsNote}` : "Ranked geographic locations with recurring idle accumulation"}
+                                subtitle={eventsNote ? `Ranked idle locations · ${eventsNote}` : "Ranked by idle time of engine-on periods starting there"}
                                 flush
                                 actions={
                                     <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold tabular-nums text-slate-700">

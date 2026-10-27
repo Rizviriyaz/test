@@ -261,14 +261,77 @@ _CACHE_RETENTION_SECONDS = 600
 _cache = TTLCache(max_entries=128)
 
 def cached(key, ttl_seconds=300):
-    """Return cached data if still fresh, otherwise None."""
+    """Return cached data if still fresh, otherwise None. An entry stored with its own (shorter) ttl is fresh only
+    for that long, whatever the caller passes."""
     entry = _cache.get(key)
-    if entry and (time.time() - entry["time"]) < ttl_seconds:
+    if entry and (time.time() - entry["time"]) < min(ttl_seconds, entry.get("ttl") or ttl_seconds):
         return entry["data"]
     return None
 
-def set_cache(key, data):
-    _cache.set(key, {"data": data, "time": time.time()}, _CACHE_RETENTION_SECONDS)
+def set_cache(key, data, ttl_seconds=None):
+    _cache.set(key, {"data": data, "time": time.time(), "ttl": ttl_seconds}, _CACHE_RETENTION_SECONDS)
+
+
+# ─── Report-result cache policy ───
+# A complete report result, or one partial only through permanent data gaps (a unit outside the report group, a name
+# shared by several units, a report row naming no unit, a Wialon dash placeholder, idling without event sub-rows), is
+# cached for the endpoint's normal TTL and keeps its partial flags. One partial through a possibly transient read
+# problem (an unreadable cell, unread idle events, a guessed column position) is cached for
+# TRANSIENT_PARTIAL_TTL_SECONDS only, so the next 30 s Dashboard poll re-reads it instead of every request.
+TRANSIENT_PARTIAL_TTL_SECONDS = 30
+# After a Wialon failure the last good result (if still retained) is served marked stale with its retrieval time,
+# and Wialon is not asked again for that key until the backoff ends: 15 s, doubling per consecutive failure, 120 s max.
+_FAILURE_BACKOFF_BASE_SECONDS = 15
+_FAILURE_BACKOFF_MAX_SECONDS = 120
+_failure_backoff = TTLCache(max_entries=128)  # key -> (consecutive failures, retry-after epoch)
+_failure_guard = threading.Lock()
+
+
+def _last_good(key):
+    """The last cached result for key (any age within retention) marked stale, with when it was read; else None."""
+    entry = _cache.get(key)
+    if not entry or not isinstance(entry.get("data"), dict):
+        return None
+    return {**entry["data"], "stale": True, "retrieved_at": int(entry["time"])}
+
+
+def _in_failure_backoff(key):
+    state = _failure_backoff.get(key)
+    return state is not None and time.time() < state[1]
+
+
+def _record_failure(key):
+    with _failure_guard:
+        failures = (_failure_backoff.get(key) or (0, 0))[0] + 1
+        delay = min(_FAILURE_BACKOFF_MAX_SECONDS, _FAILURE_BACKOFF_BASE_SECONDS * 2 ** (failures - 1))
+        _failure_backoff.set(key, (failures, time.time() + delay), _CACHE_RETENTION_SECONDS)
+
+
+def _record_success(key):
+    with _failure_guard:
+        _failure_backoff.pop(key)
+
+
+def _is_upstream_failure(exc):
+    """A Wialon failure (transient): the 502 a report path raises, or WialonAPIError (mapped to 502)."""
+    return isinstance(exc, WialonAPIError) or (isinstance(exc, HTTPException) and exc.status_code == 502)
+
+
+def _compute_with_last_good(key, compute, endpoint):
+    """Run compute(); on a Wialon failure serve the last good result for key (marked stale) instead, else re-raise."""
+    try:
+        result = compute()
+    except Exception as exc:
+        if not _is_upstream_failure(exc):
+            raise
+        _record_failure(key)
+        stale = _last_good(key)
+        if stale is None:
+            raise
+        logging.warning("%s: Wialon failed (%s); serving the result read at %s", endpoint, exc, stale["retrieved_at"])
+        return stale
+    _record_success(key)
+    return result
 
 
 _flight_locks: Dict[str, list] = {}
@@ -423,7 +486,7 @@ def get_groups():
             moving = sum(1 for v in group_vehicles if v["status"] == "MOVING")
             idling = sum(1 for v in group_vehicles if v["status"] == "IDLING")
             stopped = sum(1 for v in group_vehicles if v["status"] == "STOPPED")
-            delayed = sum(1 for v in group_vehicles if v["status"] == "DELAYED")  # stale telemetry, not live
+            delayed = sum(1 for v in group_vehicles if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
             offline = sum(1 for v in group_vehicles if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
             group_summaries.append({
                 "id": g.get("id"),
@@ -862,7 +925,7 @@ def get_dashboard_summary(request: Request = None, hours: Annotated[int, Query(g
         moving = sum(1 for v in fleet if v.get("status") == "MOVING")
         idling = sum(1 for v in fleet if v.get("status") == "IDLING")
         stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
-        delayed = sum(1 for v in fleet if v.get("status") == "DELAYED")  # stale telemetry, not live
+        delayed = sum(1 for v in fleet if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
         offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
         # Authoritative analytics
@@ -888,6 +951,7 @@ def get_dashboard_summary(request: Request = None, hours: Annotated[int, Query(g
                 "total_idle_minutes": round(util_data["total_idle_hours"] * 60, 1) if util_data.get("total_idle_hours") is not None else None,
                 "total_idle_partial": bool(util_data.get("partial")),
                 "total_trips": trips_data.get("summary", {}).get("total_trips", 0),
+                "total_trips_partial": bool(trips_data.get("summary", {}).get("total_trips_partial")),
                 "total_safety_events": safety_data.get("summary", {}).get("total_events", 0) if safety_data else None,
                 "total_safety_partial": bool(safety_data.get("partial")) if safety_data else False,
                 "safety_window_supported": safety_supported,
@@ -919,7 +983,7 @@ def get_fleet_health():
     moving = sum(1 for v in fleet if v["status"] == "MOVING")
     idling = sum(1 for v in fleet if v["status"] == "IDLING")
     stopped = sum(1 for v in fleet if v["status"] == "STOPPED")
-    delayed = sum(1 for v in fleet if v["status"] == "DELAYED")  # stale telemetry, not live
+    delayed = sum(1 for v in fleet if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
     offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
     gps_available = sum(1 for v in fleet if v.get("latitude") is not None and v.get("longitude") is not None)
@@ -986,6 +1050,10 @@ def get_fleet_health():
     return result
 
 
+# Dashboard mileage freshness (unchanged): complete and permanently partial results
+MILEAGE_TTL_SECONDS = 60
+
+
 @app.get("/api/dashboard/mileage")
 @timed_calculation("/api/dashboard/mileage")
 def get_dashboard_mileage(
@@ -1038,12 +1106,16 @@ def get_dashboard_mileage(
         window_spec = f"tf-{timeframe_norm}-{eff_from}"
 
     cache_key = f"dashboard-mileage-v3-{window_spec}-{group_id}-uae"
-    hit = cached(cache_key, ttl_seconds=60)
+    hit = cached(cache_key, ttl_seconds=MILEAGE_TTL_SECONDS)
     log_cache_state("/api/dashboard/mileage", hit is not None)
     if hit:
         return hit
+    # Wialon failed for this key moments ago: serve the last good result (marked stale) until the backoff ends
+    stale = _last_good(cache_key) if _in_failure_backoff(cache_key) else None
+    if stale is not None:
+        return stale
 
-    try:
+    def _build():
         sid = login()
         raw_groups = get_vehicle_groups(sid)
         unit_groups_map = {}
@@ -1066,7 +1138,9 @@ def get_dashboard_mileage(
 
         mileage_units = []
         unmatched_rows = []
-        report_incomplete = False
+        # Partial through a possibly transient read problem (see the report-result cache policy); permanent gaps
+        # (unmatched rows, ambiguous names, units outside the report group) do not set it
+        transient_incomplete = False
 
         if timeframe_norm in ["all", "all_time", "odometer"]:
             for vehicle in vehicles:
@@ -1128,7 +1202,6 @@ def get_dashboard_mileage(
                 if not fleet_by_name.get(v_name):
                     # Same as /api/fleet/trips: a row naming no fleet unit is not added to the fleet total. It is
                     # listed with unknown mileage so the report shows as incomplete instead of silently shrinking.
-                    report_incomplete = True
                     if v_name not in unmatched_rows:
                         unmatched_rows.append(v_name)
                         mileage_units.append({
@@ -1142,7 +1215,6 @@ def get_dashboard_mileage(
                     continue
                 if v_name in ambiguous_names:
                     # The row cannot be attributed to one unit; each unit with that name is listed below as unknown
-                    report_incomplete = True
                     continue
                 v_obj = vehicles_by_name.get(v_name)
                 vid = v_obj.get("id") if v_obj else None
@@ -1154,10 +1226,8 @@ def get_dashboard_mileage(
                     (rep_item.get("incomplete_fields") or []) + (rep_item.get("unlocated_fields") or [])
                 )
                 raw_mileage = float(rep_item["mileage_km"])
-                if mileage_unreadable:
-                    report_incomplete = True
-                if rep_item.get("column_warnings"):
-                    report_incomplete = True
+                if mileage_unreadable or rep_item.get("column_warnings"):
+                    transient_incomplete = True
 
                 # Diagnostic logging for high mileage, NEVER capping or zeroing legitimate Wialon values
                 if raw_mileage > 1000.0:
@@ -1202,7 +1272,8 @@ def get_dashboard_mileage(
                     source = "outside_report_group"
                 else:
                     continue
-                report_incomplete = True
+                if source == "missing_from_report":
+                    transient_incomplete = True
                 v_groups = unit_groups_map.get(vid, ["General Fleet"])
                 mileage_units.append({
                     "vehicle_id": vid,
@@ -1233,12 +1304,25 @@ def get_dashboard_mileage(
             "ambiguous_vehicle_names": ambiguous_names,
             "incomplete_units": incomplete_units,
             "unmatched_report_rows": sorted(unmatched_rows),
+            # When this result was read from Wialon (UTC epoch seconds); `stale` is true only when a cached result
+            # is served because Wialon failed
+            "retrieved_at": now_timestamp(),
+            "stale": False,
         }
 
-        # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
-        if not report_incomplete:
-            set_cache(cache_key, result)
+        # Complete or permanently partial: the normal TTL; partial through unreadable cells, an unlocated column or
+        # a member missing from the report: re-read after TRANSIENT_PARTIAL_TTL_SECONDS
+        set_cache(cache_key, result,
+                  ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else MILEAGE_TTL_SECONDS)
         return result
+
+    try:
+        # Overlapping identical requests wait for the one already running and reuse its cached result
+        with _single_flight(cache_key):
+            hit = cached(cache_key, ttl_seconds=MILEAGE_TTL_SECONDS)
+            if hit:
+                return hit
+            return _compute_with_last_good(cache_key, _build, "/api/dashboard/mileage")
     except HTTPException:
         raise
     except Exception as e:
@@ -1502,6 +1586,10 @@ def _build_idle_trend(events, eff_from, eff_to):
     ]
 
 
+# Idle analytics result freshness: complete and permanently partial results (see the report-result cache policy)
+IDLE_ANALYTICS_TTL_SECONDS = 180
+
+
 @app.get("/api/idle/fleet-analytics")
 @timed_calculation("/api/idle/fleet-analytics")
 def get_fleet_idle_analytics(
@@ -1556,21 +1644,25 @@ def get_fleet_idle_analytics(
     events_tag = "full" if include_events else "summary"
     cache_key = f"fleet-idle-v10-{window_spec}-grp-{group_id}-veh-{vehicle_id}-{events_tag}-uae"
     if not refresh and not skip_cache:
-        hit = cached(cache_key, ttl_seconds=180)
+        hit = cached(cache_key, ttl_seconds=IDLE_ANALYTICS_TTL_SECONDS)
         log_cache_state("/api/idle/fleet-analytics", hit is not None)
         if hit:
             return hit
+        # Wialon failed for this key moments ago: serve the last good result (marked stale) until the backoff ends
+        stale = _last_good(cache_key) if _in_failure_backoff(cache_key) else None
+        if stale is not None:
+            return stale
 
     # Overlapping identical requests (two tabs, a remount) wait for the one already running and reuse its cached
     # result instead of each paging the same Wialon report; a refresh still recomputes after it.
     with _single_flight(cache_key):
         if not refresh and not skip_cache:
-            hit = cached(cache_key, ttl_seconds=180)
+            hit = cached(cache_key, ttl_seconds=IDLE_ANALYTICS_TTL_SECONDS)
             if hit:
                 return hit
-        return _compute_fleet_idle_analytics(
+        return _compute_with_last_good(cache_key, lambda: _compute_fleet_idle_analytics(
             eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key
-        )
+        ), "/api/idle/fleet-analytics")
 
 
 def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key):
@@ -1624,7 +1716,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     event_vehicle_names = None
     if target_vehicles is not live_vehicles:
         event_vehicle_names = {
-            v.get("vehicle_name") or v.get("nm") or f"Vehicle {v.get('vehicle_id') or v.get('id')}"
+            str(v.get("vehicle_name") or v.get("nm") or f"Vehicle {v.get('vehicle_id') or v.get('id')}").strip()
             for v in target_vehicles
         }
 
@@ -1632,11 +1724,14 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     # can hold a report lock for minutes, so it runs on a dedicated Wialon session with its own lock:
     # Dashboard summary/mileage reports on the shared session never wait behind it.
     report_sid = login(session=EVENTS_SESSION) if include_events else sid
+    report_group_id = resolve_all_units_group_id(sid, raw_groups)
+    # Members of the report group: one without a row is a (transient) report gap, a non-member a permanent one
+    report_group_members = set(next((g.get("u") or [] for g in raw_groups if g.get("id") == report_group_id), []))
     rep_res = execute_wialon_group_engine_idle_report(
         report_sid,
         eff_from,
         eff_to,
-        group_id=resolve_all_units_group_id(sid, raw_groups),
+        group_id=report_group_id,
         include_events=include_events,
         event_vehicle_names=event_vehicle_names,
     )
@@ -1650,7 +1745,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     wialon_vehicle_map = {}
     wialon_events_by_veh = defaultdict(list)
     # Report rows are keyed by unit name only; a name shared by several units (or rows) cannot be attributed
-    live_name_counts = Counter(v.get("vehicle_name") or v.get("nm") for v in live_vehicles)
+    # Names are compared trimmed on both sides (report row names are stripped when parsed)
+    live_name_counts = Counter(str(v.get("vehicle_name") or v.get("nm") or "").strip() for v in live_vehicles)
     report_name_counts = Counter(uv["vehicle_name"] for uv in (rep_res or {}).get("vehicles", []))
     ambiguous_names = sorted(
         str(n) for n in set(live_name_counts) | set(report_name_counts)
@@ -1672,6 +1768,13 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     total_idle_seconds = 0
     longest_idle_seconds = 0
 
+    # Live members of each group; ungrouped vehicles form "General Fleet" (group 0)
+    live_ids = set(live_map)
+    group_members = {g["id"]: set(next((rg.get("u") or [] for rg in raw_groups if rg.get("id") == g["id"]), [])) & live_ids
+                     for g in valid_groups}
+    group_members[0] = {vid for vid in live_ids if vid not in unit_groups_map}
+    target_ids = {v.get("vehicle_id") for v in target_vehicles}
+
     group_agg = {}
     for g in valid_groups:
         group_agg[g["id"]] = {
@@ -1687,7 +1790,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         group_agg[0] = {
             "group_id": 0,
             "group_name": "General Fleet",
-            "vehicle_count": 0,
+            "vehicle_count": len(group_members[0]),
             "total_idle_seconds": 0,
             "idle_events": 0,
             "currently_idling": 0
@@ -1695,7 +1798,7 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
 
     for v in target_vehicles:
         vid = v.get("vehicle_id") or v.get("id")
-        vname = v.get("vehicle_name") or v.get("nm") or f"Vehicle {vid}"
+        vname = str(v.get("vehicle_name") or v.get("nm") or f"Vehicle {vid}").strip()
         v_reg_plate = v.get("registration_plate") or v.get("plate") or None
         v_grps = unit_groups_map.get(vid, [{"id": 0, "name": "General Fleet"}])
         primary_grp = v_grps[0]
@@ -1720,17 +1823,14 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         v_engine_sec = None if v_unattributed or "engine_hours_seconds" in v_unreadable else w_veh.get("engine_hours_seconds", 0)
         v_total_sec = None if v_unattributed or "total_time_seconds" in v_unreadable else w_veh.get("total_time_seconds", 0)
         v_longest_sec = None if v_idle_sec is None else w_veh.get("longest_idle_seconds", 0)
-        # Driving time (engine on, moving) is the report's "In motion" value. Engine-report mileage is exposed so
-        # the Dashboard can check it against its own (Trips report) mileage before trusting the unit's value.
-        # Either is unknown (None) when unattributed or unreadable; "In motion" is also unknown when this report's
-        # mileage is unknown (no consistency check possible) or when the unit covered distance with 0 s in motion.
+        # Driving time (engine on, moving) is the report's "In motion" value, used as Wialon reports it (a readable 0 s
+        # is a real 0) and never checked against any mileage. Either value is unknown (None) when unattributed or
+        # unreadable; an unreadable mileage cell leaves only the mileage unknown.
         v_engine_km = (
             None if v_unattributed or "mileage_km" in v_unreadable or w_veh.get("mileage_km") is None
             else w_veh["mileage_km"]
         )
         v_motion_sec = None if v_unattributed or "in_motion_seconds" in v_unreadable else w_veh.get("in_motion_seconds")
-        if v_engine_km is None or (v_motion_sec == 0 and v_engine_km > 0):
-            v_motion_sec = None
 
         # Discrete events for this vehicle from Wialon
         raw_v_events = wialon_events_by_veh.get(vname, [])
@@ -1875,9 +1975,13 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         v_events = [e for e in all_events if e["vehicle_id"] == bv["vehicle_id"]]
         bv["longest_idle_seconds"] = max((e["duration"] for e in v_events), default=0)
 
-    # Format by_group list
+    # Format by_group list. A group total is shown only when every live member of the group was in this calculation:
+    # with a group or vehicle filter, a group the filter leaves (partly) out would show invented zeros or a partial
+    # sum as its total, so it is left out instead.
     by_group = []
     for gid, gdata in group_agg.items():
+        if not group_members.get(gid, set()) <= target_ids:
+            continue
         g_idle_sec = gdata["total_idle_seconds"]
         if gdata["vehicle_count"] > 0 or g_idle_sec is None or g_idle_sec > 0:
             if gdata["idle_events"] is None or g_idle_sec is None:
@@ -1981,22 +2085,29 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         "event_location_unverified": bool(rep_res.get("event_location_unverified")),
         "groups": valid_groups,
         "ambiguous_vehicle_names": ambiguous_names,
+        # Units whose idling has no event sub-rows in the report: their duration is valid, their events unknown
+        "events_without_subrows": sorted(set(rep_res.get("events_without_subrows") or [])),
+        # When this result was read from Wialon (UTC epoch seconds); `stale` is true only when a cached result is
+        # served because Wialon failed
+        "retrieved_at": current_ts,
+        "stale": False,
     }
 
-    # Do not cache a report with unreadable cells, unread events or unlocated columns; the next request re-reads it
-    report_incomplete = bool(
-        rep_res.get("column_warnings")
-        or rep_res.get("unlocated_fields")
-        or events_incomplete
-        # A dash-only placeholder (Wialon reported no value) is stable once the window has closed, so only then does it
-        # not block caching; the value stays unknown either way, and any other unreadable cell still blocks it
-        or any(engine_row_unstable_incomplete(uv) or (uv.get("incomplete_fields") and eff_to >= current_ts)
-               for uv in rep_res.get("vehicles", []))
-        or any(bv["vehicle_name"] not in report_name_counts for bv in by_vehicle)
-        or unmatched_rows
+    # Cache policy (see TRANSIENT_PARTIAL_TTL_SECONDS). Permanent gaps (a unit outside the report group, an ambiguous
+    # name, an unmatched report row, a dash placeholder, idling without event sub-rows) keep the normal TTL; the
+    # Engine Hours mileage is not displayed, so its cell never limits caching. Anything else that is unreadable,
+    # unread or guessed, or a report-group member without a row, is treated as transient and re-read after
+    # TRANSIENT_PARTIAL_TTL_SECONDS.
+    transient_incomplete = bool(
+        [f for f in rep_res.get("unlocated_fields") or [] if f != "mileage_km"]
+        or set(events_incomplete) - set(rep_res.get("events_without_subrows") or [])
+        or any(f not in ("mileage_km", "idle_events") for uv in rep_res.get("vehicles", [])
+               for f in engine_row_unstable_incomplete(uv))
+        or any(bv["vehicle_id"] in report_group_members and bv["vehicle_name"] not in report_name_counts
+               for bv in by_vehicle)
     )
-    if not report_incomplete:
-        set_cache(cache_key, response_payload)
+    set_cache(cache_key, response_payload,
+              ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete else IDLE_ANALYTICS_TTL_SECONDS)
     return response_payload
 
 

@@ -55,8 +55,8 @@ def _resolve_unit(units: list, ref):
 
 
 def _data_age_fields(v: dict) -> dict:
-    """Message age and GPS fix age (minutes, None when unknown) of a live record. A DELAYED or OFFLINE unit's speed and
-    position are the last reported values, and a stale GPS fix means its position is not current."""
+    """Message age and GPS fix age (minutes, None when unknown) of a live record. A telemetry-stale or OFFLINE unit's
+    status, speed and position are the last reported values, and a stale GPS fix means its position is not current."""
     def _mins(sec):
         return None if sec is None else round(sec / 60, 1)
     return {
@@ -64,7 +64,8 @@ def _data_age_fields(v: dict) -> dict:
         "message_age_minutes": _mins(v.get("seconds_since_update")),
         "gps_fix_age_minutes": _mins(v.get("seconds_since_position")),
         "gps_position_stale": bool(v.get("position_stale")),
-        "speed_is_last_reported": v.get("status") in ("DELAYED", "OFFLINE"),
+        "telemetry_stale": bool(v.get("telemetry_stale")),
+        "speed_is_last_reported": bool(v.get("telemetry_stale")) or v.get("status") == "OFFLINE",
     }
 
 
@@ -91,7 +92,7 @@ def tool_get_fleet_summary() -> dict:
     moving = sum(1 for v in fleet if v.get("status") == "MOVING")
     idling = sum(1 for v in fleet if v.get("status") == "IDLING")
     stopped = sum(1 for v in fleet if v.get("status") == "STOPPED")
-    delayed = sum(1 for v in fleet if v.get("status") == "DELAYED")  # stale telemetry, not live
+    delayed = sum(1 for v in fleet if v.get("telemetry_stale"))  # last known status shown, telemetry not live (overlaps the counts above)
     offline = sum(1 for v in fleet if v.get("status") == "OFFLINE")
     extended_idling = sum(1 for v in fleet if v.get("status") == "IDLING" and v.get("idle_duration_status") != "unknown"
                           and (v.get("idle_duration") or 0) >= 900)
@@ -111,7 +112,8 @@ def tool_get_fleet_summary() -> dict:
 
 
 def tool_get_vehicles_by_status(status: str) -> dict:
-    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/DELAYED/OFFLINE/ALL)."""
+    """Return vehicles matching the given status (MOVING/IDLING/STOPPED/OFFLINE/ALL), or STALE: vehicles whose
+    last known status is shown with telemetry that is not live."""
     status = status.upper().strip()
     sid = login()
     vehicles = get_all_vehicles(sid)
@@ -120,6 +122,8 @@ def tool_get_vehicles_by_status(status: str) -> dict:
 
     if status == "ALL":
         target = fleet
+    elif status == "STALE":
+        target = [v for v in fleet if v.get("telemetry_stale")]
     else:
         target = [v for v in fleet if v.get("status") == status]
 
@@ -370,13 +374,13 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "get_vehicles_by_status",
-            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, DELAYED (last seen MOVING or IDLING with telemetry older than 10 minutes, or last seen MOVING with a GPS position older than 10 minutes although messages are recent; last_known_status is the last reported state, not live; a vehicle last seen STOPPED stays STOPPED until OFFLINE after 12 hours), OFFLINE, or ALL. message_age_minutes is the age of the last message and gps_fix_age_minutes the age of the last GPS position; when speed_is_last_reported or gps_position_stale is true, say the speed and location are the last reported values with their age, never that the vehicle is currently at that speed or place.",
+            "description": "Get vehicles with a specific status or all vehicles. Use status=MOVING, IDLING, STOPPED, OFFLINE (no message for 12 hours), STALE, or ALL. A vehicle keeps its last known MOVING, IDLING or STOPPED status until OFFLINE; telemetry_stale is true when that status is not live (last seen MOVING or IDLING with telemetry older than 10 minutes, or last seen MOVING with a GPS position older than 10 minutes although messages are recent). STALE returns those vehicles. message_age_minutes is the age of the last message and gps_fix_age_minutes the age of the last GPS position; when speed_is_last_reported or gps_position_stale is true, say the speed and location are the last reported values with their age, never that the vehicle is currently at that speed or place.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "status": {
                         "type": "string",
-                        "enum": ["MOVING", "IDLING", "STOPPED", "DELAYED", "OFFLINE", "ALL"],
+                        "enum": ["MOVING", "IDLING", "STOPPED", "OFFLINE", "STALE", "ALL"],
                         "description": "Vehicle operational status to filter by, or ALL for entire fleet.",
                     }
                 },

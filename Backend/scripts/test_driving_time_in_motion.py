@@ -2,13 +2,11 @@
 Regression test for H5: Dashboard driving time from Wialon Engine Hours "In motion" (MOCKED / offline).
 
 /api/idle/fleet-analytics by_vehicle rows carry two additive fields:
-  - in_motion_seconds  the Engine Hours report's "In motion" for the unit, or None when the row cannot be attributed,
-                       the cell is unreadable / unlocated, the report's mileage is unknown, or the unit covered
-                       distance with 0 s in motion. A unit with no distance and no motion keeps a real 0.
-  - engine_mileage_km  the same report's mileage (None when unknown), passed through unchanged so the Dashboard can
-                       apply its max(2 km, 5%) consistency check against its own mileage (Frontend knownTotals.js,
-                       drivingSecondsByVehicle; covered by src/utils/knownTotals.test.js).
-Unknown values are never cached as 0, and existing idle fields, totals and group filtering are unchanged.
+  - in_motion_seconds  the Engine Hours report's "In motion" for the unit, or None when the row cannot be attributed
+                       or the cell is unreadable / unlocated. It is never checked against any mileage, and a readable
+                       0 s is a real 0 (with or without mileage).
+  - engine_mileage_km  the same report's mileage (None when unknown), passed through unchanged (informational).
+Unknown values are never cached as 0 (an unreadable cell is re-read after the short transient TTL), and existing idle fields, totals and group filtering are unchanged.
 Wialon is replaced by FakeReportEngine and every outbound HTTP call is blocked by OfflineGuard.
 
   python scripts/test_driving_time_in_motion.py
@@ -94,8 +92,8 @@ def test_attributed_and_zero():
 
 
 def test_inspected_discrepancies_pass_through():
-    # Trips km (Dashboard) vs Engine Hours km for the six units flagged by the 25 Oct 2026 inspection. The backend
-    # passes the engine-report values through unchanged; the Dashboard's max(2 km, 5%) check marks them unknown.
+    # Engine Hours km for the six units whose Trips km differed in the 25 Oct 2026 inspection. Their In motion values
+    # are passed through unchanged and accepted: the two reports' mileage may legitimately differ.
     cases = [("54836", 1.7, "0:04:54"), ("72031", 214.0, "3:59:00"), ("99238", 125.0, "2:26:00"),
              ("40630", 46.3, "1:06:00"), ("42897", 5.3, "0:07:00"), ("94181", 536.5, "10:22:00")]
     units = [{"id": 500 + i, "nm": name, "sens": {}} for i, (name, _, _) in enumerate(cases)]
@@ -103,9 +101,10 @@ def test_inspected_discrepancies_pass_through():
     rows = [group_engine_row(name, "24:00:00", "12:00:00", motion, "0:10:00", km) for name, km, motion in cases]
     r = rows_by_name(fleet_idle(engine_tables(rows), units=units, groups=groups))
     check(all(r[name]["engine_mileage_km"] == km for name, km, _ in cases),
-          "six inspected discrepancy units: engine mileage passed through exactly for the Dashboard check")
-    check(r["54836"]["in_motion_seconds"] == 294 and r["94181"]["in_motion_seconds"] == 37320,
-          "six inspected discrepancy units: In motion exposed, trusted only after the Dashboard mileage check")
+          "six inspected discrepancy units: engine mileage passed through exactly")
+    expected = {name: sum(int(p) * m for p, m in zip(motion.split(":"), (3600, 60, 1))) for name, _, motion in cases}
+    check(all(r[name]["in_motion_seconds"] == secs for name, secs in expected.items()),
+          "six inspected discrepancy units: In motion accepted as reported despite the mileage differences")
 
 
 def test_unknown_cases():
@@ -115,8 +114,8 @@ def test_unknown_cases():
     r = rows_by_name(fleet_idle(tables))
     check(r["UNIT-A"]["in_motion_seconds"] is None and r["UNIT-A"]["engine_mileage_km"] == 180.25,
           "unreadable In motion cell: driving time unknown (None), not 0")
-    check(r["UNIT-B"]["in_motion_seconds"] is None and r["UNIT-B"]["engine_mileage_km"] is None,
-          "missing Engine Hours mileage: mileage and driving time unknown (no consistency check possible)")
+    check(r["UNIT-B"]["in_motion_seconds"] == 8 * 3600 and r["UNIT-B"]["engine_mileage_km"] is None,
+          "unreadable Engine Hours mileage: mileage unknown, readable In motion (8 h) still accepted")
     check(r["UNIT-C"]["in_motion_seconds"] == 0, "other units unaffected")
 
     r = rows_by_name(fleet_idle(include_header=False))
@@ -136,26 +135,44 @@ def test_unknown_cases():
             group_engine_row("UNIT-B", "24:00:00", "0:00:00", "0:00:00", "0:00:00", 0.0),
             group_engine_row("UNIT-C", "24:00:00", "0:00:00", "0:00:00", "0:00:00", 0.0)]
     r = rows_by_name(fleet_idle(engine_tables(rows)))
-    check(r["UNIT-A"]["in_motion_seconds"] is None and r["UNIT-A"]["engine_mileage_km"] == 12.5,
-          "In motion 0 with 12.5 km mileage: driving time unknown, not 0")
+    check(r["UNIT-A"]["in_motion_seconds"] == 0 and r["UNIT-A"]["engine_mileage_km"] == 12.5,
+          "In motion 0 with 12.5 km mileage: driving time 0 as reported, not unknown")
     check(r["UNIT-B"]["in_motion_seconds"] == 0, "In motion 0 with 0 km: legitimate 0")
+
+    tables = default_tables()
+    tables[TEMPLATE_GROUP_ENGINE]["rows"][0]["c"][7] = "n/a"  # UNIT-A In motion non-numeric
+    tables[TEMPLATE_GROUP_ENGINE]["rows"][1]["c"][7] = None  # UNIT-B In motion null cell
+    r = rows_by_name(fleet_idle(tables))
+    check(r["UNIT-A"]["in_motion_seconds"] is None and r["UNIT-B"]["in_motion_seconds"] is None,
+          "non-numeric or null In motion cell: driving time unknown (None), never 0")
+    check(r["UNIT-C"]["in_motion_seconds"] == 0, "other units unaffected")
+
+    rows = [group_engine_row("UNIT-A", "24:00:00", "1:00:00", "0:00:00", "1:00:00", 0.0),
+            group_engine_row("UNIT-B", "24:00:00", "9:15:30", "8:00:00", "1:15:30", 640.0),
+            group_engine_row("UNIT-C", "24:00:00", "0:00:00", "0:00:00", "0:00:00", 0.0)]
+    rows[0]["c"][9] = "-----"  # Wialon dash placeholder: no mileage value for UNIT-A
+    r = rows_by_name(fleet_idle(engine_tables(rows)))
+    check(r["UNIT-A"]["in_motion_seconds"] == 0 and r["UNIT-A"]["engine_mileage_km"] is None,
+          "dash-placeholder mileage with In motion 0: driving time 0 as reported, mileage unknown")
 
 
 def test_cache():
     tables = default_tables()
     tables[TEMPLATE_GROUP_ENGINE]["rows"][0]["c"][7] = ""
     fleet_idle(tables, use_cache=True)
-    check(main.cached(CACHE_KEY, ttl_seconds=180) is None,
-          "unreadable In motion cell: result not cached, so the unknown is re-read rather than kept")
+    entry = main._cache.get(CACHE_KEY)
+    check(entry is not None and entry["ttl"] == main.TRANSIENT_PARTIAL_TTL_SECONDS
+          and rows_by_name(entry["data"])["UNIT-A"]["in_motion_seconds"] is None,
+          "unreadable In motion cell: cached as unknown (None) for the short transient TTL only, then re-read")
 
     rows = [group_engine_row("UNIT-A", "24:00:00", "1:00:00", "0:00:00", "1:00:00", 12.5),
             group_engine_row("UNIT-B", "24:00:00", "9:15:30", "8:00:00", "1:15:30", 640.0),
             group_engine_row("UNIT-C", "24:00:00", "0:00:00", "0:00:00", "0:00:00", 0.0)]
     fleet_idle(engine_tables(rows), use_cache=True)
     hit = main.cached(CACHE_KEY, ttl_seconds=180)
-    check(hit is not None and rows_by_name(hit)["UNIT-A"]["in_motion_seconds"] is None
+    check(hit is not None and rows_by_name(hit)["UNIT-A"]["in_motion_seconds"] == 0
           and rows_by_name(hit)["UNIT-B"]["in_motion_seconds"] == 8 * 3600,
-          "complete report cached with the unreliable unit as None (never 0) under the current idle cache key")
+          "complete report cached with In motion 0 (mileage 12.5 km) kept as 0 under the current idle cache key")
     main._cache.clear()
 
 

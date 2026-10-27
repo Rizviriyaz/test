@@ -17,12 +17,32 @@ export function LoadingState({ label = "Loading…", className = "" }) {
     )
 }
 
+function cleanErrorMessage(msg) {
+    if (!msg || typeof msg !== "string") return "Data temporarily unavailable."
+    const trimmed = msg.trim()
+    const lower = trimmed.toLowerCase()
+    if (
+        lower.includes("failed to fetch") ||
+        lower.includes("networkerror") ||
+        lower.includes("internal server error") ||
+        lower.includes("traceback") ||
+        lower.includes("status code 5") ||
+        lower.includes("status code 4") ||
+        lower.includes("econnrefused") ||
+        lower.includes("typeerror") ||
+        lower.includes("syntaxerror")
+    ) {
+        return "Data temporarily unavailable. Please try again."
+    }
+    return trimmed
+}
+
 export function ErrorState({ title = "Unable to load data", message, onRetry, className = "" }) {
     return (
         <div role="alert" className={`${frameFor(className)} py-12 ${className}`}>
             <AlertCircle className="h-5 w-5 text-rose-600" />
             <p className="mt-2.5 text-[13px] font-semibold text-slate-900">{title}</p>
-            {message && <p className="mt-1 max-w-md text-xs text-slate-500">{message}</p>}
+            {message && <p className="mt-1 max-w-md text-xs text-slate-500">{cleanErrorMessage(message)}</p>}
             {onRetry && (
                 <button
                     type="button"
@@ -42,7 +62,7 @@ export function ErrorBanner({ message, onRetry, className = "" }) {
     return (
         <div role="alert" className={`flex items-center gap-2.5 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 ${className}`}>
             <AlertCircle className="h-4 w-4 shrink-0 text-rose-600" />
-            <span className="flex-1">{message}</span>
+            <span className="flex-1">{cleanErrorMessage(message)}</span>
             {onRetry && (
                 <button
                     type="button"

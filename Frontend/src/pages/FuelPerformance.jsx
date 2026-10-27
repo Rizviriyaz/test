@@ -456,7 +456,7 @@ export default function FuelPerformance() {
                         <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-900 shadow-xs" role="status">
                             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
                             <div className="space-y-0.5">
-                                <span className="font-semibold block">Wialon Telematics Coverage Notice</span>
+                                <span className="font-semibold block">Telematics Coverage Notice</span>
                                 {efficiency.data_warnings.slice(0, 3).map((w, idx) => (
                                     <span key={idx} className="block text-[11px] text-amber-800">{w}</span>
                                 ))}

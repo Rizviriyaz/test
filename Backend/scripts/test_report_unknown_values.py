@@ -3,11 +3,11 @@ Offline tests: unreadable Wialon report cells, unattributable rows and unread id
 never 0, in the non-fuel fleet analytics.
 
   - /api/fleet/trips (group report path): an unreadable mileage cell or a shared unit name gives
-    gps_mileage_km None; the fleet total covers known vehicles and lists the unknown ones; group distance None;
-    the incomplete result is not cached
-  - /api/fleet/utilization (group engine report path): an unreadable duration cell gives that vehicle None
-    utilization; fleet totals cover known vehicles only and are flagged partial; not cached
-  - group analytics: an unknown vehicle distance makes distance_24h_km None
+    gps_mileage_km None; the fleet and group totals cover known vehicles and count the unknown ones; the
+    incomplete result is re-read after the short transient TTL
+  - /api/fleet/utilization (group engine report path): an unreadable duration cell makes only the values that
+    depend on it None (per field); fleet totals cover known values only and are flagged partial; not cached
+  - group analytics: known vehicle distances are summed and the unknown ones counted; all unknown -> None
   - /api/idle/fleet-analytics: an unreadable idle/engine/total cell is None; without (complete) discrete events
     the event count, average and longest idle (fleet and per vehicle) are None; incomplete results are not cached
 
@@ -23,7 +23,7 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from offline_guard import OfflineGuard  # noqa: E402
-from wialon_report_fixtures import BASE_TS, CALCULATED, GROUPS, UNITS, live_records  # noqa: E402
+from wialon_report_fixtures import BASE_TS, CALCULATED, GROUPS, UNITS, age_report_caches, live_records  # noqa: E402
 
 import app.fleet_analytics as fa  # noqa: E402
 import app.main as main  # noqa: E402
@@ -56,16 +56,20 @@ def test_trips_unreadable_mileage_is_unknown_and_not_cached():
                                                   side_effect=lambda **k: [dict(r) for r in rows]))
         res = fa.get_trips_mileage_analytics(hours=24)
         fa.get_trips_mileage_analytics(hours=24)
-        assert report.call_count == 2, "a result with an unreadable cell must not be served from cache"
+        assert report.call_count == 1, "served from the short transient cache"
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        fa.get_trips_mileage_analytics(hours=24)
+        assert report.call_count == 2, "a result with an unreadable cell is re-read after the short transient TTL"
     by_id = {v["vehicle_id"]: v for v in res["vehicles"]}
     assert by_id[101]["gps_mileage_km"] is None, by_id[101]
     s = res["summary"]
     assert s["total_distance_km"] == 150.5 and s["total_distance_partial"] is True, s
     assert s["distance_unknown_vehicles"] == ["UNIT-A"], s
-    groups = {g["group"]: g["distance_km"] for g in res["by_group"]}
-    assert groups == {"Logistics": None, "Contracts": 30.0}, groups
+    groups = {g["group"]: (g["distance_km"], g["distance_unknown_vehicles"], g["distance_partial"]) for g in res["by_group"]}
+    assert groups == {"Logistics": (120.5, 1, True), "Contracts": (30.0, 0, False)}, groups
     assert res["vehicles"][-1]["vehicle_id"] == 101, "unknown distance sorts last"
-    print("[PASS] Trips: unreadable mileage -> None (not 0 km); total 150.5 over known vehicles, flagged partial; not cached.")
+    print("[PASS] Trips: unreadable mileage -> None (not 0 km); fleet total 150.5 and group total 120.5 over known "
+          "vehicles, flagged partial with the unknown count; re-read after the short transient TTL.")
 
 
 def test_trips_complete_report_is_cached_and_unchanged():
@@ -114,13 +118,17 @@ def test_utilization_unreadable_cell_is_unknown():
         assert report.call_count == 2, "a result with an unreadable cell must not be served from cache"
     by_id = {v["vehicle_id"]: v for v in res["vehicles"]}
     a = by_id[101]
-    assert (a["driving_seconds"], a["idle_seconds"], a["utilization_percentage"]) == (None, None, None), a
+    # Per field: only the idle cell is unreadable, so idle and the values needing it are None; driving (a readable
+    # 0 s), engine hours and utilization are kept
+    assert (a["driving_seconds"], a["idle_seconds"], a["utilization_percentage"]) == (0, None, 0.0), a
+    assert (a["stopped_seconds"], a["driving_to_idle_ratio"], a["engine_on_seconds"]) == (None, None, 0), a
     assert res["partial"] is True and res["unknown_vehicles"] == ["UNIT-A"], res
+    assert res["idle_unknown_vehicles"] == ["UNIT-A"] and res["driving_unknown_vehicles"] == [], res
     assert res["total_idle_hours"] == 0.5 and res["total_driving_hours"] == 1.0, res
-    # 3600 s driving over two known vehicles x 24 h
-    assert res["fleet_utilization_pct"] == round(3600 / (2 * 24 * 3600) * 100, 1), res
-    assert res["vehicles"][-1]["vehicle_id"] == 101, "unknown utilization sorts last"
-    print("[PASS] Utilization: unreadable idle cell -> vehicle None; totals over 2 known vehicles, flagged partial; not cached.")
+    # 3600 s driving over three vehicles with known driving time x 24 h
+    assert res["fleet_utilization_pct"] == round(3600 / (3 * 24 * 3600) * 100, 1), res
+    print("[PASS] Utilization: unreadable idle cell -> that vehicle's idle-dependent values None, its driving time "
+          "and utilization kept; totals per field over known values, flagged partial; not cached.")
 
 
 def test_group_analytics_unknown_distance():
@@ -132,8 +140,13 @@ def test_group_analytics_unknown_distance():
         stack.enter_context(patch.object(fa, "get_trips_mileage_analytics", return_value=trips))
         stack.enter_context(patch.object(fa, "get_safety_analytics", return_value={"by_group": []}))
         groups = {g["group_name"]: g for g in fa.get_fleet_groups_analytics()["groups"]}
-    assert groups["Logistics"]["distance_24h_km"] is None and groups["Contracts"]["distance_24h_km"] == 12.0, groups
-    print("[PASS] Group analytics: one unknown vehicle distance -> group distance None, not a partial sum.")
+    lg = groups["Logistics"]
+    assert lg["distance_24h_km"] == 40.0 and lg["distance_unknown_vehicles"] == 1, lg
+    assert groups["Contracts"]["distance_24h_km"] == 12.0 and groups["Contracts"]["distance_unknown_vehicles"] == 0, groups
+    # Every member's trip count unknown: the group total is unknown, never 0
+    assert lg["trips_24h"] is None and lg["trips_unknown_vehicles"] == 2, lg
+    print("[PASS] Group analytics: known distances summed (40 km) with the unknown member counted; all trip counts "
+          "unknown -> None.")
 
 
 def _engine_row(name, idle, events=None, unreadable=()):
@@ -189,9 +202,10 @@ def test_utilization_all_unknown_and_summary_flags():
         _fleet_patches(stack)
         stack.enter_context(patch.object(fa, "execute_wialon_group_engine_idle_report", return_value=engine))
         res = fa.get_fleet_utilization_analytics(hours=24)
-    for key in ("fleet_utilization_pct", "total_driving_hours", "total_idle_hours", "total_engine_on_hours",
-                "driving_to_idle_ratio"):
+    # Only In motion is unreadable: the driving-based values are unknown, the readable idle and engine totals kept
+    for key in ("fleet_utilization_pct", "total_driving_hours", "driving_to_idle_ratio"):
         assert res[key] is None, (key, res[key])
+    assert res["total_idle_hours"] == 0.0 and res["total_engine_on_hours"] == 0.0, res
 
     from fastapi.testclient import TestClient
     rows = [_trip_row("UNIT-A", 0.0, unreadable=True), _trip_row("UNIT-B", 20.0), _trip_row("UNIT-C", 5.0)]
@@ -209,9 +223,9 @@ def test_utilization_all_unknown_and_summary_flags():
         body = client.get("/api/dashboard/summary?hours=24", headers={"Authorization": "Bearer t"}).json()["summary"]
         assert main.cached("summary-24", ttl_seconds=60) is None, "a partial summary must not be cached"
     assert body["total_distance_km"] == 25.0 and body["total_distance_partial"] is True, body
-    assert body["total_idle_minutes"] is None and body["total_idle_partial"] is True, body
-    print("[PASS] Utilization with every vehicle unknown -> fleet totals None (not 0%); dashboard summary flags "
-          "partial distance/idle and is not cached.")
+    assert body["total_idle_minutes"] == 0.0 and body["total_idle_partial"] is True, body
+    print("[PASS] Utilization with every vehicle's In motion unknown -> driving totals None (not 0%), readable idle "
+          "kept; dashboard summary flags partial distance/idle and is not cached.")
 
 
 def test_idle_event_kpis_unknown_without_events():
@@ -236,8 +250,12 @@ def test_idle_incomplete_events_unknown_and_not_cached():
     res, report = _idle(rep, include_events=True, skip_cache=False)
     assert res["kpis"]["idle_event_count"] is None and res["kpis"]["longest_idle_seconds"] is None, res["kpis"]
     _, report2 = _idle(rep, include_events=True, skip_cache=False)
-    assert report2.call_count == 1, "an incomplete idle result must not be served from cache"
-    print("[PASS] Idle: partially read events -> event KPIs None (not a lower bound); result not cached.")
+    assert report2.call_count == 0, "served from the short transient cache"
+    age_report_caches(main.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+    _, report3 = _idle(rep, include_events=True, skip_cache=False)
+    assert report3.call_count == 1, "an incomplete idle result is re-read after the short transient TTL"
+    print("[PASS] Idle: partially read events -> event KPIs None (not a lower bound); re-read after the short "
+          "transient TTL.")
 
 
 def test_idle_complete_report_is_cached():

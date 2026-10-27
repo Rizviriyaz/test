@@ -525,6 +525,11 @@ def test_incomplete_reports_not_cached():
             trips = main.get_vehicle_trips(1, from_time=1000, to_time=5000)
             idle = main.get_vehicle_idle(1, from_time=1000, to_time=5000)
             mileage = main.get_dashboard_mileage(timeframe="custom", from_time=1000, to_time=5000)
+        # Dashboard mileage (report-result cache policy): an unreadable cell is transient, so the partial result
+        # is served for TRANSIENT_PARTIAL_TTL_SECONDS only, then re-read
+        mileage_key = next(k for k in main._cache._data if str(k).startswith("dashboard-mileage-"))
+        main._cache.get(mileage_key)["time"] -= main.TRANSIENT_PARTIAL_TTL_SECONDS + 1
+        mileage = main.get_dashboard_mileage(timeframe="custom", from_time=1000, to_time=5000)
     main._cache.clear()
     assert calls == {"trips": 2, "engine": 2, "group": 2}, f"incomplete results were cached: {calls}"
     assert trips["incomplete_fields"] == ["distance_km"], trips
@@ -533,7 +538,8 @@ def test_incomplete_reports_not_cached():
     by_name = {u["vehicle_name"]: u["mileage"] for u in mileage["all_units"]}
     assert by_name == {"SOLO": None, "OTHER": 12.5} and mileage["total_km"] == 12.5, mileage
     assert mileage["incomplete_units"] == ["SOLO"], mileage
-    print("[PASS] Unit trips/idle and dashboard mileage pass incomplete report cells on as unknown and do not cache them.")
+    print("[PASS] Unit trips/idle and dashboard mileage pass incomplete report cells on as unknown; unit routes do not "
+          "cache them, dashboard mileage only for the short transient TTL.")
 
 
 def test_fuel_summary_sums_like_excluded_scope():

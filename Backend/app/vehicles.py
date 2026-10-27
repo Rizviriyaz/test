@@ -201,7 +201,8 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
     for vehicle in vehicles:
         vehicle_id = vehicle.get("id")
-        vehicle_name = vehicle.get("nm", "Unknown")
+        # Trimmed like report row names (wialon_reports strips them), so every name match compares the same text
+        vehicle_name = str(vehicle.get("nm", "Unknown")).strip()
         reg_plate = extract_registration_plate(vehicle)
 
         calculated = calculated_by_vehicle.get(vehicle_id) or {}
@@ -280,13 +281,17 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
         ignition_sensor = calculated_sensors.get(str(ign_sid)) if ign_sid else None
         battery_sensor = calculated_sensors.get(str(bat_sid)) if bat_sid else None
 
+        # Missing or invalid ignition reading: unknown (None), never "Off". Live status still needs ignition on to
+        # be IDLING, so an unknown ignition at speed 0 stays STOPPED as before (io_* inputs are not used live).
         ignition_value = (
             ignition_sensor.get("value")
             if ignition_sensor and is_valid_sensor_value(ignition_sensor.get("value"))
-            else 0
+            else None
         )
 
-        ignition_on = (ignition_value == 1) or str(ignition_value).strip().lower() in ["1", "true", "on"]
+        ignition_on = None if ignition_value is None else (
+            (ignition_value == 1) or str(ignition_value).strip().lower() in ["1", "true", "on"]
+        )
 
         battery_voltage = (
             battery_sensor.get("value")
@@ -334,25 +339,23 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             connection_status = "STABLE"
         is_offline = (connection_status == "OFFLINE")
 
-        # The state the last message describes. Stale telemetry last seen Moving/Idling is DELAYED, never shown as
-        # live; a stale unit last seen Stopped (a parked tracker reports less often) stays STOPPED. Both become
-        # OFFLINE past CONN_DELAYED_SECONDS.
-        last_known_status = calculate_status(speed, ignition_on) if last_message_ts else None
-        # R2: True only when the GPS-position rule below makes the unit DELAYED (messages are recent)
-        position_stale = False
-        if is_offline:
-            status = "OFFLINE"
-        elif connection_status == "DELAYED" and last_known_status in ("MOVING", "IDLING"):
-            status = "DELAYED"
-        elif last_known_status == "MOVING" and seconds_since_position is not None \
-                and seconds_since_position > CONN_STABLE_SECONDS:
-            # Messages without a new GPS fix keep the last position's speed: MOVING from a position older than
-            # CONN_STABLE_SECONDS is not live (DELAYED; last_known_status MOVING, speed kept). IDLING/STOPPED are
-            # not judged by position age: a stationary tracker may not send new positions.
-            status = "DELAYED"
-            position_stale = True
-        else:
-            status = last_known_status
+        # The state the last message describes. Movement status is kept separate from connection health: the unit
+        # keeps its last known MOVING / IDLING / STOPPED status until OFFLINE past CONN_DELAYED_SECONDS, and
+        # telemetry_stale flags that the status is not live. ignition_on is None (unknown ignition) is not "on".
+        last_known_status = calculate_status(speed, ignition_on is True) if last_message_ts else None
+        status = "OFFLINE" if is_offline else last_known_status
+        # R2: last seen MOVING with messages recent but a GPS fix older than CONN_STABLE_SECONDS: the speed is from
+        # that old position. IDLING/STOPPED are not judged by position age: a stationary tracker may not send new
+        # positions.
+        position_stale = (
+            connection_status == "STABLE" and last_known_status == "MOVING"
+            and seconds_since_position is not None and seconds_since_position > CONN_STABLE_SECONDS
+        )
+        # Stale telemetry: a unit last seen Moving/Idling whose last message is older than CONN_STABLE_SECONDS, or a
+        # position-stale unit. A stale unit last seen Stopped is not flagged (a parked tracker reports less often).
+        telemetry_stale = not is_offline and (
+            (connection_status == "DELAYED" and last_known_status in ("MOVING", "IDLING")) or position_stale
+        )
 
         # ---------------------------------------------------------
         # IDLE DURATION
@@ -424,8 +427,9 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             )
 
             if idle_start is not None:
+                # Capped at the last message: idling is only known up to then (a stale unit's timer stops)
                 idle_duration = (
-                    current_time - idle_start
+                    min(current_time, last_message_ts) - idle_start
                 )
 
                 if idle_duration < 0:
@@ -517,6 +521,8 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
             "position_timestamp": position_ts,
             "seconds_since_position": seconds_since_position,
             "position_stale": position_stale,
+            # Status is the last known state, not live (last seen Moving/Idling with old telemetry, or a stale fix)
+            "telemetry_stale": telemetry_stale,
             "idle_duration": idle_duration,
             # "known" | "lower_bound" (at least idle_duration) | "unknown" (idle_duration is 0 and not a measurement)
             "idle_duration_status": idle_duration_status,

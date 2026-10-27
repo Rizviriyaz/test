@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 import {
-    fuelVehicleListParams, groupIdsOf, groupNamesOf, idleDurationLabel, idleDurationStatus, inGroup, isHealthyVehicle,
+    fuelVehicleListParams, groupIdsOf, groupNamesOf, idleDurationLabel, idleDurationStatus, idleElapsedSeconds, inGroup,
+    isHealthyVehicle,
 } from "./fleetRules.js"
 
 const fmt = (s) => `${Math.round(s / 60)}m`
@@ -72,4 +73,16 @@ test("alias routes redirect instead of rendering another page under a misleading
     for (const [from, to] of [["/trips", "/tracking"], ["/reports", "/idle-analytics"], ["/drivers", "/dashboard"], ["/settings", "/dashboard"]]) {
         assert.match(app, new RegExp(`path="${from}"\\s+element=\\{<Navigate to="${to}" replace />\\}`), from)
     }
+})
+
+test("idleElapsedSeconds stops the live idle timer at the last message", () => {
+    const start = 1_800_000_000
+    const nowMs = (start + 3 * 3600) * 1000
+    assert.equal(idleElapsedSeconds(start, 0, nowMs), 3 * 3600, "no cap given: runs to now")
+    assert.equal(idleElapsedSeconds(start, 0, nowMs, start + 3600), 3600, "stale unit: capped at its last message")
+    assert.equal(idleElapsedSeconds(start, 0, nowMs, start + 5 * 3600), 3 * 3600, "a later end never runs past now")
+    assert.equal(idleElapsedSeconds(start, 0, nowMs, start - 60), 0, "never negative")
+    assert.equal(idleElapsedSeconds(start, 0, nowMs, null), 3 * 3600, "unknown end: as before")
+    assert.equal(idleElapsedSeconds(null, 420, nowMs, start), 420, "no start: the backend duration")
+    assert.equal(idleElapsedSeconds(start * 1000, 0, nowMs, (start + 60) * 1000), 60, "millisecond inputs")
 })

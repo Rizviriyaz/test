@@ -3,13 +3,14 @@ Offline tests: trip mileage comes only from Wialon's Trips Report, and anything 
 unknown, never a substitute or a double count.
 
   - /api/fleet/trips: group and unit Trips Reports both failing -> mileage and trip count unknown, no
-    raw-message fallback, not cached
+    raw-message fallback, re-read after the short transient TTL
   - unit Trips Report: a malformed (dropped) trip row marks distance_km incomplete as well as row_shape, and
     /api/vehicles/{id}/trips and /api/fleet/trips report the distance as unknown / partial
   - /api/dashboard/mileage: a unit on several group-report rows is unknown, not summed twice; distinct trips
     with equal distances in a unit report are all counted
-  - /api/dashboard/mileage: a row naming no fleet unit is left out of the total, listed, and not cached
-  - /api/fleet/trips (group report): a missing member or ambiguous name -> unknown, known values kept, not cached
+  - /api/dashboard/mileage: a row naming no fleet unit is left out of the total, listed, cached as a permanent gap
+  - /api/fleet/trips (group report): a missing member (transient, re-read after 30 s) or ambiguous name (permanent,
+    cached) -> unknown, known values kept
   - /api/dashboard/mileage: no known mileage -> total_km / average_km null; partial and complete unchanged
   - parse_mileage_km: ambiguous separators ('1,234') are unknown; parse_float_safe is unchanged
   - AI deep analytics: raw-message distance is relabelled and the Trips Report distance is added
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from offline_guard import OfflineGuard  # noqa: E402
 from wialon_report_fixtures import (  # noqa: E402
-    BASE_TS, CALCULATED, GROUPS, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine,
+    age_report_caches, BASE_TS, CALCULATED, GROUPS, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine,
     default_tables, group_trip_row, live_records, unit_trip_row,
 )
 
@@ -79,9 +80,12 @@ def test_both_trips_reports_fail_unknown_not_cached():
         assert by_id[101]["cumulative_odometer_km"] == 120345.6, by_id[101]
         before = engine.count("report/exec_report")
         fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") > before, "a failed report must not be served from cache"
+        assert engine.count("report/exec_report") == before, "served from the short transient cache"
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert engine.count("report/exec_report") > before, "a failed report is re-read after the short transient TTL"
     print("[PASS] Fleet trips: group and unit Trips Reports both failing -> mileage and trip count unknown, "
-          "no raw-history fallback, not cached.")
+          "no raw-history fallback, re-read after the short transient TTL.")
 
 
 def test_unit_report_failure_only_affects_mileage_source():
@@ -138,9 +142,12 @@ def test_dashboard_duplicate_rows_not_double_counted():
         assert units[0]["source"] == "duplicate_report_rows" and units[0]["vehicle_id"] == 101, units
         assert res["total_km"] == 1234.5, res["total_km"]  # UNIT-B 1234.5 + UNIT-C 0.0; UNIT-A unknown, not 501.5
         assert "UNIT-A" in res["incomplete_units"] and "UNIT-A" in res["ambiguous_vehicle_names"], res
-        _dashboard()
-        assert engine.count("report/exec_report") == 2, "an ambiguous result must not be served from cache"
-    print("[PASS] Dashboard mileage: a unit on two group-report rows -> unknown, not summed twice; not cached.")
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        cached = _dashboard()
+        assert engine.count("report/exec_report") == 1, "an ambiguous name is a permanent gap: cached"
+        assert "UNIT-A" in cached["incomplete_units"], "the cached result is still partial"
+    print("[PASS] Dashboard mileage: a unit on two group-report rows -> unknown, not summed twice; cached as a "
+          "permanent gap, still partial.")
 
 
 def test_distinct_equal_distance_trips_are_all_counted():
@@ -172,14 +179,16 @@ def test_dashboard_unmatched_row_excluded_and_flagged():
         ghost = [u for u in res["all_units"] if u["vehicle_name"] == "GHOST"]
         assert len(ghost) == 1 and ghost[0]["mileage"] is None and ghost[0]["vehicle_id"] is None, ghost
         assert ghost[0]["source"] == "unmatched_report_row" and "GHOST" in res["incomplete_units"], ghost
-        _dashboard()
-        assert engine.count("report/exec_report") == 2, "a result with an unmatched row must not be served from cache"
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        cached = _dashboard()
+        assert engine.count("report/exec_report") == 1, "an unmatched row is a permanent gap: cached"
+        assert "GHOST" in cached["incomplete_units"], "the cached result is still partial"
         # Same report through /api/fleet/trips: the unmatched row is not in the fleet total either
         fa._analytics_cache.clear()
         trips = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
     assert trips["summary"]["total_distance_km"] == res["total_km"], (trips["summary"], res["total_km"])
     print("[PASS] Dashboard mileage: a row naming no fleet unit -> left out of the total (as /api/fleet/trips), "
-          "listed as unmatched/incomplete, not cached.")
+          "listed as unmatched/incomplete, cached as a permanent gap.")
 
 
 def test_fleet_trips_unmatched_row_flagged_not_cached():
@@ -196,10 +205,12 @@ def test_fleet_trips_unmatched_row_flagged_not_cached():
         assert summary["distance_unknown_vehicles"] == [], summary
         assert "GHOST" not in {v["vehicle_name"] for v in res["vehicles"]}, res["vehicles"]
         before = engine.count("report/exec_report")
-        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") > before, "a result with an unmatched row must not be cached"
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        cached = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert engine.count("report/exec_report") == before, "an unmatched row is a permanent gap: cached"
+        assert cached["summary"]["total_distance_partial"] is True, "the cached result is still partial"
     print("[PASS] Fleet trips: a group-report row naming no fleet unit -> listed in unmatched_report_rows, left "
-          "out of the total, total_distance_partial=True, not cached.")
+          "out of the total, total_distance_partial=True, cached as a permanent gap.")
 
 
 def test_fleet_trips_matched_rows_complete_and_cached():
@@ -231,8 +242,12 @@ def test_fleet_trips_missing_member_not_cached():
         assert summary["distance_unknown_vehicles"] == ["UNIT-B"], summary
         before = engine.count("report/exec_report")
         fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") > before, "a result with a missing member must not be cached"
-    print("[PASS] Fleet trips (group report): a member with no report row -> unknown, known values kept, not cached.")
+        assert engine.count("report/exec_report") == before, "served from the short transient cache"
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert engine.count("report/exec_report") > before, "a missing member is re-read after the short transient TTL"
+    print("[PASS] Fleet trips (group report): a member with no report row -> unknown, known values kept, re-read "
+          "after the short transient TTL.")
 
 
 def test_fleet_trips_ambiguous_name_not_cached():
@@ -248,9 +263,12 @@ def test_fleet_trips_ambiguous_name_not_cached():
         summary = res["summary"]
         assert summary["total_distance_km"] == 1234.5 and summary["total_distance_partial"] is True, summary
         before = engine.count("report/exec_report")
-        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") > before, "a result with an ambiguous name must not be cached"
-    print("[PASS] Fleet trips (group report): a name on two report rows -> unknown, known values kept, not cached.")
+        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
+        cached = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert engine.count("report/exec_report") == before, "an ambiguous name is a permanent gap: cached"
+        assert cached["summary"]["total_distance_partial"] is True, "the cached result is still partial"
+    print("[PASS] Fleet trips (group report): a name on two report rows -> unknown, known values kept, cached as a "
+          "permanent gap.")
 
 
 def test_dashboard_mileage_totals_unknown_partial_complete():

@@ -86,12 +86,12 @@ def test_summary_skips_subrows():
 def test_scoped_requests_match_previous_behaviour():
     cases = [
         ("vehicle_id=101 (sub-row unit)", {"vehicle_id": 101}, [0]),
-        ("vehicle_id=102 (single-interval unit)", {"vehicle_id": 102}, []),
+        ("vehicle_id=102 (single-interval unit, one sub-row)", {"vehicle_id": 102}, [1]),
         ("vehicle_id=103 (no idle)", {"vehicle_id": 103}, []),
-        ("group_id=7", {"group_id": 7}, [0]),
+        ("group_id=7", {"group_id": 7}, [0, 1]),
         ("group_id=8", {"group_id": 8}, []),
-        ("unknown group_id falls back to the fleet", {"group_id": 999}, [0]),
-        ("fleet-wide", {}, [0]),
+        ("unknown group_id falls back to the fleet", {"group_id": 999}, [0, 1]),
+        ("fleet-wide", {}, [0, 1]),
     ]
     for label, params, expected_rows in cases:
         scoped_engine, old_engine = FakeReportEngine(), FakeReportEngine()
@@ -111,7 +111,7 @@ def test_report_scoping_keeps_totals():
     with patch("app.wialon_reports.wialon_request", engine):
         scoped = wr.execute_wialon_group_engine_idle_report(
             "sid", FROM_TS, TO_TS, group_id=1, event_vehicle_names={"UNIT-B"})
-    check(engine.count(SUBROWS) == 0, "report: no sub-rows paged for units outside event_vehicle_names")
+    check(subrow_rows(engine) == [1], "report: sub-rows paged only for the targeted unit (UNIT-B, row 1)")
     for a, b in zip(full["vehicles"], scoped["vehicles"]):
         for key in ("total_idle_seconds", "engine_hours_seconds", "in_motion_seconds", "total_time_seconds", "mileage_km"):
             if a[key] != b[key]:

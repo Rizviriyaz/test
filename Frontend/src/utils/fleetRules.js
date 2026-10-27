@@ -22,6 +22,32 @@ export function idleDurationLabel(vehicle, formatSeconds) {
     return status === "lower_bound" ? `${text}+` : text
 }
 
+function toEpochSeconds(value) {
+    if (value === null || value === undefined || value === "") return NaN
+    return typeof value === "number"
+        ? (value > 1e11 ? Math.floor(value / 1000) : value)
+        : Math.floor(new Date(value).getTime() / 1000)
+}
+
+// Seconds of the current idle run shown by the live idle timer: from its start to now, capped at `endTime` (the
+// last message time) because idling is only known up to then. Falls back to baseDuration without a usable start.
+export function idleElapsedSeconds(startTime, baseDuration, nowMs, endTime = null) {
+    if (!startTime) {
+        return Number(baseDuration || 0)
+    }
+    const startSec = toEpochSeconds(startTime)
+
+    if (isNaN(startSec) || startSec <= 0) {
+        return Number(baseDuration || 0)
+    }
+
+    // Idling is only known up to the last message: the timer never runs past it
+    const endSec = toEpochSeconds(endTime)
+    const nowSec = Math.floor(nowMs / 1000)
+    const untilSec = Number.isFinite(endSec) && endSec > 0 ? Math.min(nowSec, endSec) : nowSec
+    return Math.max(0, untilSec - startSec)
+}
+
 // ─── Group membership ───────────────────────────────────────────────────────
 // Every group name a row belongs to: live vehicles carry `group` + `groups`, idle-analytics rows `group_name` +
 // `group_names`. A vehicle in several groups belongs to each of them.

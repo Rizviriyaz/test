@@ -40,45 +40,32 @@ export function inMotionSecondsOf(row) {
     return isKnownNumber(row.in_motion_seconds) ? Number(row.in_motion_seconds) : null
 }
 
-export const DRIVING_MILEAGE_TOLERANCE_KM = 2
-export const DRIVING_MILEAGE_TOLERANCE_RATIO = 0.05
-
-// True when a unit's Engine Hours report mileage agrees with its Dashboard (Trips report) mileage within
-// max(2 km, 5% of the Dashboard mileage). False when either is unknown: the check cannot be performed.
-export function engineMileageAgrees(engineKm, dashboardKm) {
-    if (!isKnownNumber(engineKm) || !isKnownNumber(dashboardKm)) return false
-    const tolerance = Math.max(DRIVING_MILEAGE_TOLERANCE_KM, DRIVING_MILEAGE_TOLERANCE_RATIO * Number(dashboardKm))
-    // Report mileage has two decimals; the epsilon keeps a difference exactly at the tolerance inside it
-    return Math.abs(Number(engineKm) - Number(dashboardKm)) <= tolerance + 1e-9
+// True when a Dashboard report payload (mileage, fleet trips or idle analytics) is partial or was served stale after
+// a Wialon failure, so a closed period's data is worth re-reading. A missing payload counts as partial.
+export function isPartialReport(payload) {
+    if (!payload || typeof payload !== "object") return true
+    if (payload.stale === true) return true
+    if (Array.isArray(payload.incomplete_units) && payload.incomplete_units.length > 0) return true
+    const summary = payload.summary
+    if (summary && (summary.total_distance_partial || summary.total_trips_partial)) return true
+    if (payload.kpis?.total_idle_partial) return true
+    if (Array.isArray(payload.by_vehicle)
+        && payload.by_vehicle.some(row => idleSecondsOf(row) === null || inMotionSecondsOf(row) === null)) return true
+    return false
 }
 
 // Driving seconds per unit for one period, as Map(vehicle_id string -> seconds | null), over the idle-analytics
-// rows accepted by includeVehicle(id). A unit's "In motion" value is used only when its Engine Hours mileage
-// agrees with its Dashboard mileage for the same period start; otherwise, or when the unit covered distance
-// with 0 s in motion, or when it is missing / duplicated in the mileage list, its driving time is unknown (null).
-export function drivingSecondsByVehicle(idleData, mileageData, includeVehicle = () => true) {
+// rows accepted by includeVehicle(id). Each unit's Engine Hours "In motion" value is used as reported; it is not
+// checked against Trips report mileage, which Wialon measures differently. The backend sends null when the value
+// is missing, unreadable or unattributable, and that unit's driving time stays unknown (null), never 0.
+export function drivingSecondsByVehicle(idleData, includeVehicle = () => true) {
     const result = new Map()
     const rows = idleData?.by_vehicle
     if (!Array.isArray(rows)) return result
-    const samePeriod = isKnownNumber(idleData?.timeframe?.from_time)
-        && idleData.timeframe.from_time === mileageData?.effective_from
-    const mileageById = new Map()
-    const duplicateIds = new Set()
-    for (const unit of (samePeriod && mileageData.all_units) || []) {
-        if (unit?.vehicle_id === null || unit?.vehicle_id === undefined) continue
-        const id = String(unit.vehicle_id)
-        if (mileageById.has(id)) duplicateIds.add(id)
-        mileageById.set(id, unit.mileage)
-    }
     for (const row of rows) {
         const id = String(row.vehicle_id)
         if (!includeVehicle(id)) continue
-        const motion = inMotionSecondsOf(row)
-        const dashboardKm = duplicateIds.has(id) ? null : mileageById.get(id)
-        const reliable = motion !== null
-            && engineMileageAgrees(row.engine_mileage_km, dashboardKm)
-            && !(motion === 0 && Number(dashboardKm) > 0)
-        result.set(id, reliable ? motion : null)
+        result.set(id, inMotionSecondsOf(row))
     }
     return result
 }
