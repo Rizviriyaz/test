@@ -111,10 +111,7 @@ export default function FuelTrendChart() {
         <section className="mb-4 rounded-xl border border-slate-200/70 bg-white p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                 <div className="min-w-0">
-                    <h2 className="type-section-title text-slate-900">Fuel purchased & Wialon distance</h2>
-                    <p className="mt-0.5 text-xs text-slate-500">
-                        Fuel and distance are recorded; L/100 km is derived (purchased ÷ distance), not measured
-                    </p>
+                    <h2 className="type-section-title text-slate-900">Fuel & Distance Trend</h2>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -155,7 +152,7 @@ export default function FuelTrendChart() {
                 </div>
             )}
 
-            <div className="mt-4 h-[320px] w-full">
+            <div className="mt-4 h-[270px] w-full">
                 {loading ? (
                     <div role="status" className="flex h-full flex-col items-center justify-center text-slate-500">
                         <Loader2 className="mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />

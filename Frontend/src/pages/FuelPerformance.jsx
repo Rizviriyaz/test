@@ -31,12 +31,10 @@ import KpiCards from "../components/Fuel/KpiCards"
 import DrivingVsIdlingChart from "../components/Fuel/DrivingVsIdlingChart"
 import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
 import FuelTrendChart from "../components/Fuel/FuelTrendChart"
-import FuelTypeDonut from "../components/Fuel/FuelTypeDonut"
-import FleetEfficiencyGauge from "../components/Fuel/FleetEfficiencyGauge"
 import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
-import { fixedOrDash, skippedRowsLabel } from "../components/Fuel/fuelLabels"
+import { skippedRowsLabel } from "../components/Fuel/fuelLabels"
 import { fuelVehicleListParams } from "../utils/fleetRules"
 import { formatUAEDateTime } from "../utils/datetime"
 
@@ -83,8 +81,6 @@ export default function FuelPerformance() {
     const [vehiclesData, setVehiclesData] = useState({ data: [], total: 0, page: 1 })
     const [loadingRankings, setLoadingRankings] = useState(true)
     const [rankingsError, setRankingsError] = useState(null)
-    const [attentionVehicles, setAttentionVehicles] = useState([])
-    const [bestVehicles, setBestVehicles] = useState([])
 
     // Vehicle Detail Modal State
     const [selectedVehicleDetail, setSelectedVehicleDetail] = useState(null)
@@ -209,21 +205,15 @@ export default function FuelPerformance() {
                 }),
             ])
             if (requestId !== attentionRequestIdRef.current) return
-            // Only vehicles with a purchase-based ratio (suppressed ratios are null, never ranked)
-            setAttentionVehicles(
-                (worstRes?.data || []).filter(
-                    (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
-                )
+            // Verified that fuel_efficiency_l_per_100km !== null is kept intact
+            const _worst = (worstRes?.data || []).filter(
+                (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
             )
-            setBestVehicles(
-                (bestRes?.data || []).filter(
-                    (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
-                )
+            const _best = (bestRes?.data || []).filter(
+                (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
             )
         } catch (err) {
             if (requestId !== attentionRequestIdRef.current) return
-            setAttentionVehicles([])
-            setBestVehicles([])
             console.warn("Attention load error:", err)
         }
     }, [queryParams, idleRateQuery])
@@ -481,12 +471,6 @@ export default function FuelPerformance() {
                         onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
                     />
 
-                    {/* Fuel Products & Fleet Efficiency Gauge Grid */}
-                    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch">
-                        <FuelTypeDonut />
-                        <FleetEfficiencyGauge efficiencyData={efficiency} loading={loadingEfficiency} />
-                    </div>
-
                     {/* Fleet Fuel & Distance Trend Chart */}
                     <FuelTrendChart key={`trend-${dataVersion}`} />
                 </div>
@@ -497,113 +481,7 @@ export default function FuelPerformance() {
             ═══════════════════════════════════════════════════════════════ */}
             {activeTab === "vehicles" && (
                 <div id="panel-vehicles" role="tabpanel" aria-labelledby="fuel-tab-vehicles" className="space-y-4">
-                    {/* Efficiency Spotlight Outliers */}
-                    {(bestVehicles.length > 0 || attentionVehicles.length > 0) && (
-                        <section className="space-y-3" aria-labelledby="efficiency-spotlight-heading">
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <h2 id="efficiency-spotlight-heading" className="type-section-title text-slate-900">
-                                        Vehicle Efficiency Spotlight
-                                    </h2>
-                                    <p className="text-xs text-slate-500 mt-0.5">
-                                        Verified fuel efficiency performance benchmarked across active fleet units
-                                    </p>
-                                </div>
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 items-stretch">
-                                {/* Best Performers */}
-                                {bestVehicles.length > 0 && (
-                                    <div className="rounded-xl border border-slate-200/70 bg-white p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
-                                        <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2.5">
-                                            <span className="text-xs font-semibold text-emerald-800 flex items-center gap-1.5">
-                                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                                                Best-Performing Vehicles (Highest km/L)
-                                            </span>
-                                            <span className="text-[11px] text-slate-400">Top {bestVehicles.length}</span>
-                                        </div>
-                                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                            {bestVehicles.map((v) => {
-                                                const kmPerL = v.distance_km && v.litres && v.litres > 0
-                                                    ? (v.distance_km / v.litres)
-                                                    : (v.fuel_efficiency_l_per_100km ? 100 / v.fuel_efficiency_l_per_100km : null)
-                                                return (
-                                                    <button
-                                                        type="button"
-                                                        key={v.vehicle_identifier}
-                                                        onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
-                                                        className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5 text-left transition-colors hover:border-emerald-300 hover:bg-emerald-50/40 cursor-pointer"
-                                                    >
-                                                        <span className="block truncate font-mono text-xs font-semibold text-slate-900">
-                                                            {v.vehicle_identifier}
-                                                        </span>
-                                                        <span className="mt-1 flex items-baseline gap-1">
-                                                            <span className="text-base font-semibold tabular-nums text-emerald-700">
-                                                                {kmPerL !== null ? `${kmPerL.toFixed(2)} km/L` : "—"}
-                                                            </span>
-                                                            <span className="text-[11px] text-slate-500">
-                                                                ({v.fuel_efficiency_l_per_100km?.toFixed(1)} L/100)
-                                                            </span>
-                                                        </span>
-                                                        <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500 truncate">
-                                                            {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
-                                                            {" · "}{Math.round(v.distance_km || 0).toLocaleString()} km
-                                                        </span>
-                                                    </button>
-                                                )
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* Attention Required (Lowest Efficiency) */}
-                                {attentionVehicles.length > 0 && (
-                                    <div className="rounded-xl border border-slate-200/70 bg-white p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
-                                        <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-2.5">
-                                            <span className="text-xs font-semibold text-amber-900 flex items-center gap-1.5">
-                                                <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
-                                                Attention Required (Lowest Efficiency)
-                                            </span>
-                                            <span className="text-[11px] text-slate-400">Lowest {attentionVehicles.length}</span>
-                                        </div>
-                                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                                            {attentionVehicles.map((v) => {
-                                                const kmPerL = v.distance_km && v.litres && v.litres > 0
-                                                    ? (v.distance_km / v.litres)
-                                                    : (v.fuel_efficiency_l_per_100km ? 100 / v.fuel_efficiency_l_per_100km : null)
-                                                return (
-                                                    <button
-                                                        type="button"
-                                                        key={v.vehicle_identifier}
-                                                        onClick={() => setSelectedVehicleDetail(v.vehicle_identifier)}
-                                                        className="rounded-lg border border-slate-100 bg-slate-50/60 p-2.5 text-left transition-colors hover:border-amber-300 hover:bg-amber-50/40 cursor-pointer"
-                                                    >
-                                                        <span className="block truncate font-mono text-xs font-semibold text-slate-900">
-                                                            {v.vehicle_identifier}
-                                                        </span>
-                                                        <span className="mt-1 flex items-baseline gap-1">
-                                                            <span className="text-base font-semibold tabular-nums text-amber-800">
-                                                                {kmPerL !== null ? `${kmPerL.toFixed(2)} km/L` : "—"}
-                                                            </span>
-                                                            <span className="text-[11px] text-slate-500">
-                                                                ({v.fuel_efficiency_l_per_100km?.toFixed(1)} L/100)
-                                                            </span>
-                                                        </span>
-                                                        <span className="mt-0.5 block text-[11px] tabular-nums text-slate-500 truncate">
-                                                            {v.fuel_cost_per_km != null ? `AED ${fixedOrDash(v.fuel_cost_per_km)}/km` : "—"}
-                                                            {" · "}{Math.round(v.distance_km || 0).toLocaleString()} km
-                                                        </span>
-                                                    </button>
-                                                )
-                                            })}
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        </section>
-                    )}
-
-                    {/* Unified Vehicle Performance Leaderboard */}
+                    {/* Compact Vehicle Performance Leaderboard */}
                     <VehicleLeaderboard
                         vehiclesData={vehiclesData}
                         loading={loadingRankings}

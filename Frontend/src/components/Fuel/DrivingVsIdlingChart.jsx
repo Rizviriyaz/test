@@ -78,9 +78,6 @@ export default function DrivingVsIdlingChart({
                             </span>
                         )}
                     </div>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                        Operational engine duration and estimated stationary fuel consumption modeling across fleet units
-                    </p>
                 </div>
             </div>
 
@@ -169,11 +166,6 @@ export default function DrivingVsIdlingChart({
                             </span>
                         </div>
                     </div>
-
-                    {/* Subtle footnote */}
-                    <p className="pl-0.5 text-[11px] leading-normal text-slate-400">
-                        Driving & idling durations are directly recorded by Wialon telematics. Idle fuel volume and financial cost are estimated using the active {safeIdleRate.toFixed(1)} L/h rate parameter.
-                    </p>
                 </div>
 
                 {/* ── Right Column: Top 5 Highest Idle Fuel Wasters ── */}

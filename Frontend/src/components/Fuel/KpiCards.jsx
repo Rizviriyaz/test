@@ -288,7 +288,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
         },
         {
             key: "efficiency",
-            label: "Fleet fuel efficiency (purchase-derived)",
+            label: "Fleet fuel efficiency",
             value: has(kmPerLitre) ? formatNumber(kmPerLitre, 2) : (has(efficiency) ? formatNumber(efficiency, 1) : "—"),
             unit: has(kmPerLitre) ? "km/L" : (has(efficiency) ? "L/100km" : ""),
             note: has(kmPerLitre) && has(efficiency)
