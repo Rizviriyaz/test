@@ -173,7 +173,6 @@ export default function FleetAlerts() {
         <AppShell>
             <PageHeader
                 title="Fleet Alerts"
-                subtitle="Battery, connectivity and sensor threshold events"
                 onRefresh={refresh}
                 loading={loading}
                 lastUpdated={data?.generated_at ? formatUAETime(data.generated_at) : (lastUpdated ? formatUAETime(lastUpdated) : null)}
@@ -195,7 +194,6 @@ export default function FleetAlerts() {
                     <KpiCard
                         label="All alerts"
                         value={counts.total}
-                        sub="Active events"
                         selected={sevFilter === "ALL"}
                         onClick={() => handleFilterChange("ALL")}
                         loading={loading && !data}
@@ -206,7 +204,6 @@ export default function FleetAlerts() {
                         dot="bg-status-offline"
                         value={counts.critical}
                         valueColor={counts.critical > 0 ? "text-rose-700" : "text-slate-900"}
-                        sub="Immediate risk"
                         selected={sevFilter === "CRITICAL"}
                         onClick={() => handleFilterChange("CRITICAL")}
                         loading={loading && !data}
@@ -217,7 +214,6 @@ export default function FleetAlerts() {
                         dot="bg-status-idling"
                         value={counts.warning}
                         valueColor={counts.warning > 0 ? "text-amber-800" : "text-slate-900"}
-                        sub="Threshold crossed"
                         selected={sevFilter === "WARNING"}
                         onClick={() => handleFilterChange("WARNING")}
                         loading={loading && !data}
@@ -227,7 +223,6 @@ export default function FleetAlerts() {
                         label="Info"
                         dot="bg-slate-400"
                         value={counts.info}
-                        sub="Operational notices"
                         selected={sevFilter === "INFO"}
                         onClick={() => handleFilterChange("INFO")}
                         loading={loading && !data}

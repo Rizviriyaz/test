@@ -142,7 +142,6 @@ export default function VehicleHealth() {
         <AppShell>
             <PageHeader
                 title="Vehicle Health"
-                subtitle="Battery, GPS and telemetry connectivity"
                 onRefresh={refresh}
                 loading={loading}
                 lastUpdated={data?.generated_at ? formatUAETime(data.generated_at) : null}

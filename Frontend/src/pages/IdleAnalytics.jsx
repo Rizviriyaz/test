@@ -428,7 +428,6 @@ export default function IdleAnalytics() {
         >
             <PageHeader
                 title="Idle Analytics"
-                subtitle="Idling analysis by vehicle, customer group, and location"
                 onRefresh={refresh}
                 loading={loading || eventsLoading}
                 lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
@@ -888,7 +887,6 @@ export default function IdleAnalytics() {
                             <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                 <AnalyticsChart
                                     title="Top Idle Vehicles"
-                                    subtitle="Select a bar to filter events by vehicle"
                                     data={vehicleChartData}
                                     dataKey="value"
                                     nameKey="label"
