@@ -144,6 +144,121 @@ def test_unit_trips_fetched_once_per_unit_and_range():
     print("[PASS] Unit trips: one report per unit and range (cached across day/week/month); unreadable -> partial; failure -> failed.")
 
 
+def test_month_rows_use_only_units_refuelled_that_month():
+    # V-2 refuels only in August but drives in August and September: September's km must not include it
+    txs = [fuel("V-1", "2026-08-05T10:00:00", 100.0), fuel("V-1", "2026-09-05T10:00:00", 80.0),
+           fuel("V-2", "2026-08-06T10:00:00", 50.0)]
+    trips = {1: ok(trip(ts(2026, 8, 5, 12), 500.0), trip(ts(2026, 9, 5, 12), 400.0)),
+             2: ok(trip(ts(2026, 8, 6, 12), 250.0), trip(ts(2026, 9, 6, 12), 600.0))}
+    res = calculate_efficiency_trend(txs, {}, UNITS, "month", unit_trips=trips)
+    aug, sep = res.data
+    assert aug.distance_km == 750.0 and aug.tracked_litres == 150.0 and aug.units_with_distance == 2
+    assert sep.distance_km == 400.0 and sep.tracked_litres == 80.0 and sep.units_with_distance == 1, sep
+    assert sep.fuel_efficiency_l_per_100km == 20.0  # not 80 L / 1000 km = 8.0
+    print("[PASS] Month rows: a unit's km counts only in months it refuelled (Sep 400 km / 20.0, not 1000 km / 8.0).")
+
+
+def test_single_month_trend_equals_monthly_kpi():
+    from app.fuel.efficiency import calculate_fleet_efficiency
+    units = UNITS + [{"id": 3, "nm": "V-3"}, {"id": 4, "nm": "V-4"}]
+    txs = [fuel("V-1", "2026-08-05T10:00:00", 120.37), fuel("V-1", "2026-08-20T10:00:00", 33.11),
+           fuel("V-2", "2026-08-06T10:00:00", 40.0), fuel("V-2", "2026-08-07T10:00:00", -55.0),  # net -15 L
+           fuel("V-3", "2026-08-08T10:00:00", 25.0),                                              # 0 km
+           fuel("V-4", "2026-08-09T10:00:00", 70.0)]
+    trips = {1: ok(trip(ts(2026, 8, 5, 12), 812.4), trip(ts(2026, 8, 21, 12), 101.05)), 2: ok(trip(ts(2026, 8, 6, 12), 300.0)),
+             3: ok(), 4: ok(trip(ts(2026, 8, 9, 12), 410.0))}
+    tele = {f"V-{u}": {"mileage_km": float(sum(t["distance_km"] for t in trips[u]["trips"]))} for u in trips}
+    kpi = calculate_fleet_efficiency(txs, tele, units)
+    row = calculate_efficiency_trend(txs, tele, units, "month", unit_trips=trips).data[0]
+    assert row.distance_km == kpi.total_distance_km and row.tracked_litres == kpi.tracked_litres, (row, kpi)
+    assert row.fuel_efficiency_l_per_100km == kpi.fuel_efficiency_l_per_100km
+    assert row.fuel_cost_per_km == kpi.fuel_cost_per_km and row.units_with_distance == kpi.vehicles_with_distance == 2
+    assert row.litres == kpi.total_litres
+    print(f"[PASS] Single-month trend row equals the monthly KPI ({row.distance_km} km, {row.fuel_efficiency_l_per_100km} L/100 km).")
+
+
+def test_refunds_exclude_unit_from_month_and_window():
+    txs = [fuel("V-1", "2026-08-05T10:00:00", 100.0), fuel("V-2", "2026-08-06T10:00:00", 20.0),
+           fuel("V-2", "2026-08-07T10:00:00", -20.0)]  # V-2 net 0 L
+    trips = {1: ok(trip(ts(2026, 8, 5, 12), 500.0)), 2: ok(trip(ts(2026, 8, 6, 12), 900.0))}
+    month = calculate_efficiency_trend(txs, {}, UNITS, "month", unit_trips=trips)
+    assert month.data[0].distance_km == 500.0 and month.data[0].fuel_efficiency_l_per_100km == 20.0
+    assert any("zero or negative net fuel" in w for w in month.data_warnings)
+    day = calculate_efficiency_trend(txs, {}, UNITS, "day", unit_trips=trips)
+    by = {d.period: d for d in day.data}
+    assert by["2026-08-06"].distance_km == 0.0 and by["2026-08-06"].tracked_litres == 0.0, by["2026-08-06"]
+    assert by["2026-08-05"].distance_km == 500.0
+    assert any("zero or negative net fuel" in w for w in day.data_warnings)
+    only_refund = calculate_efficiency_trend(txs[1:], {}, UNITS, "month", unit_trips=trips).data[0]
+    assert only_refund.distance_km is None and only_refund.efficiency_status == "unavailable"  # unknown, never 0 km
+    print("[PASS] Zero/negative-net units are left out of month and day distance; a month with none eligible is unknown.")
+
+
+def test_mixed_fuel_status_is_month_specific():
+    txs = [fuel("V-1", "2026-08-05T10:00:00", 100.0), fuel("V-1", "2026-09-05T10:00:00", 100.0)]
+    trips = {1: ok(trip(ts(2026, 8, 5, 12), 500.0), trip(ts(2026, 9, 5, 12), 500.0))}
+    res = calculate_efficiency_trend(txs, {}, UNITS[:1], "month", unit_trips=trips,
+                                     mixed_fuel_unit_ids={1}, mixed_fuel_unit_months={1: {"2026-08"}})
+    aug, sep = res.data
+    assert aug.distance_km is None and aug.fuel_efficiency_l_per_100km is None  # mixed in August only
+    assert sep.distance_km == 500.0 and sep.fuel_efficiency_l_per_100km == 20.0
+    window = calculate_efficiency_trend(txs, {}, UNITS[:1], "month", unit_trips=trips, mixed_fuel_unit_ids={1})
+    assert all(r.distance_km is None for r in window.data)  # no per-month map: the window-level rule applies
+    print("[PASS] Mixed-fuel exclusion follows the month (August excluded, September 500 km / 20.0).")
+
+
+def test_known_zero_and_unknown_distance_match_the_kpi():
+    from app.fuel.efficiency import calculate_fleet_efficiency
+    txs = [fuel("V-1", "2026-08-05T10:00:00", 40.0)]
+    still = {1: ok()}  # complete report, no trips: a recorded 0 km
+    row = calculate_efficiency_trend(txs, {"V-1": {"mileage_km": 0.0}}, UNITS[:1], "month", unit_trips=still).data[0]
+    kpi = calculate_fleet_efficiency(txs, {"V-1": {"mileage_km": 0.0}}, UNITS[:1])
+    assert row.distance_km == kpi.total_distance_km == 0.0 and row.efficiency_status == "no_distance", (row, kpi.total_distance_km)
+    assert row.fuel_efficiency_l_per_100km is None and kpi.fuel_efficiency_l_per_100km is None
+    unknown_row = calculate_efficiency_trend(txs, {}, UNITS[:1], "month",
+                                             unit_trips={1: {"status": "failed", "trips": [], "error": "x"}}).data[0]
+    unknown_kpi = calculate_fleet_efficiency(txs, {}, UNITS[:1])
+    assert unknown_row.distance_km is None and unknown_kpi.total_distance_km is None
+    refund_only = [fuel("V-1", "2026-08-05T10:00:00", -10.0)]
+    assert calculate_fleet_efficiency(refund_only, {"V-1": {"mileage_km": 300.0}}, UNITS[:1]).total_distance_km is None
+    assert calculate_efficiency_trend(refund_only, {}, UNITS[:1], "month",
+                                      unit_trips={1: ok(trip(ts(2026, 8, 5, 12), 300.0))}).data[0].distance_km is None
+    print("[PASS] Month row and KPI agree: recorded 0 km -> 0.0; unknown or no eligible unit -> null.")
+
+
+def test_month_boundary_trip_is_not_split():
+    txs = [fuel("V-1", "2026-08-20T10:00:00", 60.0)]
+    trips = {1: ok(trip(ts(2026, 8, 31, 23, 30), 120.0, minutes=90), trip(ts(2026, 8, 10, 9), 180.0))}  # ends 1 Sep
+    row = calculate_efficiency_trend(txs, {"V-1": {"mileage_km": 300.0}}, UNITS[:1], "month", unit_trips=trips).data[0]
+    assert row.distance_km == 300.0 and row.boundary_trip_km == 120.0  # whole trip in its start month, disclosed
+    assert row.fuel_efficiency_l_per_100km == 20.0
+    print("[PASS] A trip ending in the next month stays whole in its start month; its 120 km is reported as boundary km.")
+
+
+def test_summary_litres_count_toward_day_week_eligibility():
+    # Positive August summary + a dated September refund: net +495 L over the window, as the KPI counts it
+    # Dated rows alone net -5 L; only the summary makes the unit's net fuel positive
+    txs = [dict(fuel("V-1", "2026-08-31", 500.0), date_basis="reporting_month_end"),
+           fuel("V-1", "2026-09-04T10:00:00", -5.0)]
+    trips = {1: ok(trip(ts(2026, 8, 12, 12), 900.0), trip(ts(2026, 9, 5, 12), 200.0))}
+    day = calculate_efficiency_trend(txs, {}, UNITS[:1], "day", unit_trips=trips)
+    by = {d.period: d for d in day.data}
+    assert by["2026-09-05"].distance_km == 200.0, by.get("2026-09-05")  # kept: was dropped when summaries were ignored
+    assert "2026-08-12" not in by  # August km left out with the August summary (not a daily refuel)
+    assert not any("zero or negative net fuel" in w for w in day.data_warnings)
+    print("[PASS] Day/week eligibility uses net fuel incl. monthly summaries: a summary + dated refund unit is kept.")
+
+
+def test_scope_reports_mixed_fuel_months():
+    from app.fuel.scope import mixed_fuel_unit_months
+    rows = [{"_unit_id": 1, "transaction_date": "2026-08-01T08:00:00", "fuel_type": "DIESEL"},
+            {"_unit_id": 1, "transaction_date": "2026-08-20T08:00:00", "fuel_type": "SUPER"},
+            {"_unit_id": 1, "transaction_date": "2026-09-02T08:00:00", "fuel_type": "DIESEL"},
+            {"_unit_id": 2, "transaction_date": "2026-08-03T08:00:00", "fuel_type": "DIESEL"}]
+    assert mixed_fuel_unit_months(rows) == {1: {"2026-08"}}
+    print("[PASS] Scope reports mixed-fuel months per unit (unit 1: 2026-08 only).")
+
+
 TESTS = [
     test_actual_daily_distance_not_apportioned,
     test_distance_only_day_and_boundaries,
@@ -152,6 +267,14 @@ TESTS = [
     test_two_identifiers_one_unit_counted_once,
     test_no_tracked_units_all_none,
     test_unit_trips_fetched_once_per_unit_and_range,
+    test_month_rows_use_only_units_refuelled_that_month,
+    test_single_month_trend_equals_monthly_kpi,
+    test_refunds_exclude_unit_from_month_and_window,
+    test_mixed_fuel_status_is_month_specific,
+    test_scope_reports_mixed_fuel_months,
+    test_known_zero_and_unknown_distance_match_the_kpi,
+    test_month_boundary_trip_is_not_split,
+    test_summary_litres_count_toward_day_week_eligibility,
 ]
 
 if __name__ == "__main__":

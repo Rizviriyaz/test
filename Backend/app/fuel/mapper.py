@@ -245,3 +245,70 @@ def map_headers(detected_headers: List[str]) -> Tuple[Dict[str, Optional[str]], 
     ]
 
     return suggested_mapping, mapping_details, unmapped_columns, missing_required_fields
+
+
+# Headers that name a price without saying whether it is per litre or the transaction total ('Rate' is per litre
+# and 'Amount' the total on fuel statements, so they are not listed)
+GENERIC_PRICE_HEADERS: Dict[str, Set[str]] = {
+    "unit_price": {"price"},
+    "total_cost": {"cost", "value", "total"},
+}
+PRICE_FIELDS = ("unit_price", "total_cost")
+
+
+def date_header_candidates(detected_headers: List[str]) -> List[str]:
+    """Headers that could hold the transaction date: a transaction_date alias, or any header with the word 'date'."""
+    aliases = {normalize_header(a) for a in CANONICAL_FIELDS["transaction_date"]["aliases"]}
+    out = []
+    for h in detected_headers:
+        norm = normalize_header(h)
+        if norm and (norm in aliases or re.search(r"\bdate\b", norm)):
+            out.append(h)
+    return out
+
+
+def ambiguous_mapping_fields(
+    detected_headers: List[str],
+    mapping: Dict[str, Optional[str]],
+    mapping_details: List[HeaderMappingItem],
+) -> List[str]:
+    """
+    Fields whose mapping must be confirmed explicitly before an import:
+      transaction_date  mapped by the fuzzy pass, several headers could be the date, or no date is mapped although a
+                        header looks like one (the user must confirm the statement has no date column)
+      unit_price,       mapped by the fuzzy pass, or mapped to a generic header ('Price', 'Amount', ...) that could be
+      total_cost        either the per-litre price or the total (the importer clears this when both are mapped and
+                        every row agrees: total = litres x unit price)
+    """
+    fuzzy = {d.canonical_field: d.excel_header for d in mapping_details if d.confidence == "fuzzy" and d.excel_header}
+    need: List[str] = []
+    date_hdr = mapping.get("transaction_date")
+    candidates = date_header_candidates(detected_headers)
+    if date_hdr:
+        if fuzzy.get("transaction_date") == date_hdr or len(candidates) > 1:
+            need.append("transaction_date")
+    elif candidates:
+        need.append("transaction_date")
+    for field in PRICE_FIELDS:
+        hdr = mapping.get(field)
+        if hdr and (fuzzy.get(field) == hdr or normalize_header(hdr) in GENERIC_PRICE_HEADERS[field]):
+            need.append(field)
+    return need
+
+
+# Fields an import cannot do without: a wrong column among repeated ones would misstate fuel, cost or vehicle
+REPEATED_GROUP_FIELDS = ("transaction_date", "vehicle_identifier", "litres", "unit_price", "total_cost")
+
+
+def repeated_header_fields(detected_headers: List[str], mapping: Dict[str, Optional[str]]) -> List[str]:
+    """
+    Fields mapped to a column whose title is shared with another column once units and column labels are ignored
+    ('Amount (col F)' / 'Amount (col J)', 'Litres' / 'Litres (L)'): the statement repeats a column group, so the
+    user must confirm which column is meant instead of the first one being taken silently.
+    """
+    counts: Dict[str, int] = {}
+    for h in detected_headers:
+        norm = normalize_header(h)
+        if norm:
+            counts[norm] = counts.get(norm, 0) + 1
+    return [f for f in REPEATED_GROUP_FIELDS if mapping.get(f) and counts.get(normalize_header(mapping[f]), 0) > 1]

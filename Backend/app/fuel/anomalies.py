@@ -5,6 +5,7 @@ with complete mathematical transparency and explicit rule explanations.
 """
 from collections import defaultdict
 from datetime import datetime, timedelta
+from decimal import Decimal, ROUND_HALF_UP
 import logging
 import os
 from statistics import median
@@ -12,7 +13,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.fuel.db import build_fingerprint
 from app.fuel.schemas import FuelAnomalyItem, FuelWasteResponse, VehicleEfficiencyItem
-from app.fuel.scope import REASON_DUPLICATE, unit_key
+from app.fuel.reporting_period import is_monthly_summary
+from app.fuel.scope import (
+    OVERLAP_UNCONFIRMED,
+    REASON_DUPLICATE,
+    REASON_OVERLAP,
+    REASON_PARTIAL_SUMMARY,
+    REASON_SUMMARY_SUPERSEDED,
+    unit_key,
+)
 from app.utils.datetime_helpers import parse_tx_wallclock
 
 logger = logging.getLogger(__name__)
@@ -78,12 +87,15 @@ def detect_fuel_waste_and_anomalies(
     excluded_groups: Optional[List[Dict[str, Any]]] = None,
     idle_threshold_mode: str = "per_day",
     period_days: Optional[int] = None,
+    overlap_conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> FuelWasteResponse:
     """
     Rules (evaluated per Wialon unit; refund adjustments are never refuel events):
     1. Excessive idling: Wialon idle hours >= effective threshold. per_day mode scales the threshold by the
        period length in days (period_days, default 1); total mode applies it to the whole period.
-       Unknown idle hours are never treated as 0. [estimated]
+       Unknown idle hours are never treated as 0. Idle litres and cost are the vehicle records' own estimates
+       (efficiency.estimate_unit_idle), so fleet_estimated_idle_fuel_litres equals the efficiency KPI and the
+       rankings; a vehicle without an estimate (e.g. mixed-fuel under a fuel-type filter) has no idle litres. [estimated]
     2. Rapid refuel: two purchases < 24 h apart, only when both carry a time of day. Date-only rows on the
        same day give one 'same_day_multiple_refuels' info item instead. [recorded]
     3. Volume spike: purchase > SPIKE_RATIO x median of the vehicle's OTHER purchases (needs >= 3 others and a
@@ -92,6 +104,9 @@ def detect_fuel_waste_and_anomalies(
     5. Duplicates: same-import identical rows (full fingerprint) here; cross-import suspected duplicates come
        from the scope partition (already excluded from KPIs). [recorded]
     6. Unmatched / ambiguous identifiers: one info item each, from the scope partition. [recorded]
+    7. Monthly-summary / dated overlaps (excluded_scope.overlap_conflicts): one 'summary_dated_overlap' info item per
+       unresolved unit-month. Those vehicles ARE matched to a Wialon unit, so they are never reported as unmatched;
+       a summary superseded by confirmed full-month dated rows is resolved and reported nowhere here. [recorded]
     refuel_anomalies_count counts distinct transactions; data_quality_issues_count equals the number of
     data-quality items emitted.
     """
@@ -104,7 +119,7 @@ def detect_fuel_waste_and_anomalies(
     excessive_idle_count = 0
     total_idle_waste_litres = 0.0
     total_idle_waste_cost = 0.0
-    fleet_idle_litres = 0.0
+    fleet_idle_litres = Decimal(0)
     fleet_idle_known = 0
     top_idle_candidates: List[VehicleEfficiencyItem] = []
 
@@ -113,15 +128,18 @@ def detect_fuel_waste_and_anomalies(
             continue
         idle_hrs = float(v.idle_duration_hours)
         eng_hrs = v.engine_hours
-        idle_waste_l = v.estimated_idle_fuel_litres if v.estimated_idle_fuel_litres is not None else idle_hrs * idle_rate_lph
+        idle_waste_l = v.estimated_idle_fuel_litres
         idle_cost = v.estimated_idle_cost
-        fleet_idle_litres += idle_hrs * idle_rate_lph
-        fleet_idle_known += 1
+        if idle_waste_l is not None:
+            fleet_idle_litres += Decimal(str(idle_waste_l))
+            fleet_idle_known += 1
 
         if idle_hrs >= effective_threshold and idle_hrs > 0:
             excessive_idle_count += 1
-            total_idle_waste_litres += idle_waste_l
-            total_idle_waste_cost += idle_cost or 0.0
+            if idle_waste_l is not None:
+                total_idle_waste_litres += idle_waste_l
+            if idle_cost is not None:
+                total_idle_waste_cost += idle_cost  # an unknown cost is left out, not added as 0
             top_idle_candidates.append(v)
 
             ratio_pct = (idle_hrs / eng_hrs * 100.0) if eng_hrs else None
@@ -143,11 +161,14 @@ def detect_fuel_waste_and_anomalies(
                     title=f"Excessive Engine Idling ({idle_hrs:.1f} hrs)",
                     description=(
                         f"Wialon recorded {idle_hrs:.1f} idle hours ({ratio_txt}), exceeding the threshold of {basis}. "
-                        f"Estimated idle fuel: {idle_waste_l:.1f} L ({cost_txt}) at the configured {idle_rate_lph:.1f} L/h rate."
+                        + (f"Estimated idle fuel: {idle_waste_l:.1f} L ({cost_txt}) at the configured {idle_rate_lph:.1f} L/h rate."
+                           if idle_waste_l is not None else
+                           "Idle fuel not estimated: " + next((w for w in v.quality_warnings if "idle" in w.lower()),
+                                                              "no idle estimate for this vehicle."))
                     ),
                     recorded_value=f"{idle_hrs:.1f} hrs idle" + (f" / {eng_hrs:.1f} hrs engine" if eng_hrs is not None else ""),
                     threshold_or_baseline=f"Threshold: {basis}",
-                    wasted_litres=round(idle_waste_l, 2),
+                    wasted_litres=round(idle_waste_l, 2) if idle_waste_l is not None else None,
                     wasted_cost=round(idle_cost, 2) if idle_cost is not None else None,
                     details={
                         "idle_hours": idle_hrs,
@@ -168,8 +189,8 @@ def detect_fuel_waste_and_anomalies(
     groups: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
     for tx in transactions:
         vid = str(tx.get("vehicle_identifier", "") or "").strip()
-        if not vid:
-            continue
+        if not vid or is_monthly_summary(tx):
+            continue  # a monthly summary is a month's total, not a refuel: no refuel-pattern checks apply
         groups[unit_key(tx)].append(tx)
 
     refuel_flagged_tx = set()
@@ -401,6 +422,10 @@ def detect_fuel_waste_and_anomalies(
     # ── 4. Excluded identifiers and cross-import duplicates (from the scope partition) ──
     for g in excluded_groups or []:
         rsn = g.get("reason")
+        if rsn == REASON_PARTIAL_SUMMARY:
+            continue  # excluded only because the selected range splits its month; not a data-quality finding
+        if rsn in (REASON_OVERLAP, REASON_SUMMARY_SUPERSEDED):
+            continue  # matched vehicles: unresolved overlaps are reported per unit-month below, superseded ones are resolved
         is_dup = rsn == REASON_DUPLICATE
         if is_dup:
             data_quality_issues_count += 1
@@ -427,6 +452,35 @@ def detect_fuel_waste_and_anomalies(
             )
         )
 
+    # ── 5. Monthly-summary / dated overlaps of matched units (excluded from KPIs, never "unmatched") ──
+    for c in overlap_conflicts or []:
+        if c.get("resolution") != OVERLAP_UNCONFIRMED:
+            continue
+        summ, dated = c.get("excluded_summary") or {}, c.get("excluded_dated") or {}
+        unit = c.get("wialon_unit_name") or c.get("wialon_unit_id")
+        anomalies.append(
+            FuelAnomalyItem(
+                id=f"overlap-{c.get('wialon_unit_id')}-{c.get('month')}",
+                anomaly_type="summary_dated_overlap",
+                severity="info",
+                finding_type="measured",
+                classification="recorded",
+                vehicle_identifier=(c.get("identifiers") or [str(unit)])[0],
+                title=f"Monthly Summary and Dated Transactions Overlap ({unit}, {c.get('month')})",
+                description=(
+                    f"Wialon unit {unit} has both a monthly-summary total and dated transactions for {c.get('month')}, "
+                    "and no import confirms that the dated statement covers the whole month. Both are excluded from "
+                    "KPIs to avoid double counting; nothing was deleted. Re-import a complete statement to resolve it."
+                ),
+                recorded_value=(f"summary {summ.get('transaction_count', 0)} row(s) / {summ.get('litres', 0.0):.1f} L; "
+                                f"dated {dated.get('transaction_count', 0)} row(s) / {dated.get('litres', 0.0):.1f} L"),
+                threshold_or_baseline="One source per unit-month: dated rows only with confirmed full-month coverage",
+                details={"wialon_unit_id": c.get("wialon_unit_id"), "wialon_unit_name": c.get("wialon_unit_name"),
+                         "month": c.get("month"), "identifiers": c.get("identifiers"),
+                         "excluded_summary": summ, "excluded_dated": dated, "resolution": c.get("resolution")},
+            )
+        )
+
     severity_order = {"critical": 0, "warning": 1, "info": 2}
     anomalies.sort(key=lambda x: (severity_order.get(x.severity, 3), x.anomaly_type))
 
@@ -441,7 +495,8 @@ def detect_fuel_waste_and_anomalies(
         idle_rate_lph=idle_rate_lph,
         anomalies=anomalies,
         top_idle_wasters=top_idle_candidates[:5],
-        fleet_estimated_idle_fuel_litres=round(fleet_idle_litres, 1) if fleet_idle_known else None,
+        fleet_estimated_idle_fuel_litres=(float(fleet_idle_litres.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+                                          if fleet_idle_known else None),
         idle_waste_basis="vehicles_at_or_above_threshold",
         idle_threshold_mode=mode,
         effective_idle_threshold_hours=round(effective_threshold, 2),

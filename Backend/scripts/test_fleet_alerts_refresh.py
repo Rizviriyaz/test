@@ -325,6 +325,69 @@ def test_startup_prewarms_alerts_in_background():
     print(f"[PASS] Startup: alerts warm in the background (startup {elapsed * 1000:.0f} ms), first visitor shares that build; skipped when login fails")
 
 
+def test_background_refresh_backs_off_after_wialon_limit():
+    import app.wialon as wialon
+    _reset()
+    parts = _Parts()
+    p1, p2 = parts.patches()
+    saved = wialon._limit_hit_at
+    try:
+        with p1, p2:
+            # 1004 seen 10 s ago by any caller: an entry in the refresh window is served, no background rescan starts
+            wialon._limit_hit_at = time.monotonic() - 10
+            _seed(OLD, 150)
+            assert fa.get_fleet_alerts_analytics() == OLD
+            assert fa.prewarm_fleet_alerts() is False
+            assert parts.builds() == 0 and not fa._alerts_build_lock.locked(), parts.calls
+            # A cold (foreground) load still builds: the back-off only holds background work
+            fa._analytics_cache.clear()
+            assert _alert_keys(fa.get_fleet_alerts_analytics()) == EXPECTED
+            assert parts.builds() == 1, parts.calls
+            # Once the back-off has passed, background refreshes resume
+            wialon._limit_hit_at = time.monotonic() - fa._ALERTS_LIMIT_BACKOFF_SECONDS - 1
+            _seed(OLD, 150)
+            assert fa.get_fleet_alerts_analytics() == OLD
+            _wait_for_refresh()
+            assert parts.builds() == 2, parts.calls
+    finally:
+        wialon._limit_hit_at = saved
+    print("[PASS] Background alerts refresh waits 300 s after a Wialon 1004; cold loads still build; resumes after")
+
+
+def _scan_with_history(history):
+    fleet = [{"vehicle_id": i, "vehicle_name": f"U{i}", "group": "G"} for i in range(1, 10)]
+    with patch.object(fa, "login", return_value="sid"),          patch.object(fa, "_fleet_discovery", return_value=([], [{"id": v["vehicle_id"], "sens": {}} for v in fleet], {})),          patch.object(fa, "get_vehicle_live_data", return_value=fleet),          patch.object(fa, "get_vehicle_history", side_effect=history):
+        return fa.get_safety_analytics(24, use_cache=False)
+
+
+def test_safety_scan_stops_loading_after_wialon_limit():
+    _reset()
+    calls, lock = [], threading.Lock()
+
+    def limited(sid, vid, hours=None):
+        with lock:
+            calls.append(vid)
+        time.sleep(0.05)
+        raise WialonAPIError(f"Wialon history request failed for vehicle {vid}: LIMIT msgs_activity", code=1004)
+
+    res = _scan_with_history(limited)
+    assert len(calls) <= 3, f"only the first wave (3 workers) may load before the 1004 is seen: {calls}"
+    assert sorted(res["failed_vehicles"]) == [f"U{i}" for i in range(1, 10)], res["failed_vehicles"]
+
+    calls.clear()
+
+    def other_error(sid, vid, hours=None):
+        with lock:
+            calls.append(vid)
+        raise WialonAPIError("Wialon history request failed: 5", code=5)
+
+    res = _scan_with_history(other_error)
+    assert sorted(calls) == list(range(1, 10)), "a non-limit failure keeps loading every other unit"
+    assert len(res["failed_vehicles"]) == 9
+    fa._analytics_cache.clear()
+    print(f"[PASS] Safety scan: after a 1004 the remaining units are unknown (not loaded); other errors scan every unit")
+
+
 def main() -> int:
     guard = OfflineGuard().start()
     tests = [
@@ -339,6 +402,8 @@ def main() -> int:
         test_queued_cold_callers_share_failure,
         test_use_cache_false_bypasses_component_caches,
         test_startup_prewarms_alerts_in_background,
+        test_background_refresh_backs_off_after_wialon_limit,
+        test_safety_scan_stops_loading_after_wialon_limit,
     ]
     passed = 0
     try:

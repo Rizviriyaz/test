@@ -2,7 +2,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote } from "./fuelLabels.js"
+import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote, EXCLUDED_REASON_LABELS } from "./fuelLabels.js"
 import { compactTick, formatTrendPoint } from "./telemetryFormat.js"
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
@@ -56,8 +56,9 @@ test("hardcoded verification badges and measured-consumption wording are gone", 
     assert.doesNotMatch(kpi, /vehicle_count \|\| 0/)
 })
 
-test("vehicle trend and attention cards keep unknown values unknown", () => {
-    assert.match(read("../../pages/FuelPerformance.jsx"), /fuel_efficiency_l_per_100km !== null/)
+test("vehicle trend and idle-waster ranking keep unknown values unknown", () => {
+    // The fleet-wide idle ranking drops vehicles whose estimate is unknown instead of ranking them as zero
+    assert.match(read("../../pages/FuelPerformance.jsx"), /estimated_idle_fuel_litres !== null/)
     const waste = read("./FuelWasteIntelligence.jsx")
     assert.match(waste, /!isExcludedIdentifierItem\(item\)/)
     const perf = read("../../pages/FuelPerformance.jsx")
@@ -105,14 +106,13 @@ test("axis ticks below 1000 are not collapsed to 0k", () => {
 
 test("failed or stale requests never leave the previous data on screen", () => {
     const perf = read("../../pages/FuelPerformance.jsx")
-    for (const ref of ["efficiencyRequestIdRef", "rankingsRequestIdRef", "attentionRequestIdRef", "wasteRequestIdRef"]) {
+    for (const ref of ["efficiencyRequestIdRef", "rankingsRequestIdRef", "idleWastersRequestIdRef"]) {
         assert.match(perf, new RegExp(`requestId !== ${ref}\\.current`), ref)
     }
     assert.match(perf, /setEfficiency\(null\)/)
     assert.match(perf, /setRankingsError\(/)
     assert.match(perf, /if \(pageFilters !== queryParams\) \{\s*setPageFilters\(queryParams\)\s*setPage\(1\)/, "page resets on new filters")
     assert.match(read("./VehicleFuelDetailModal.jsx"), /return \(\) => \{ active = false \}/)
-    assert.match(perf, /setHistoryError\(/, 'history outage is not "no imports"')
     assert.match(read("../../api/fleetApi.js"), /executeFuelImport[\s\S]*?clearClientCache\("\/api\/fuel\/"\)/)
 })
 
@@ -144,7 +144,10 @@ test("H4: idle/driving percentages are labelled as fuel shares, never as engine 
     for (const wrong of ["of engine time", "Share of Hours", "Hours ÷ Total Engine Hours", "Idle Litres ÷ Total Litres"]) {
         assert.ok(!kpi.includes(wrong), `KpiCards.jsx still says "${wrong}"`)
     }
-    assert.match(kpi, /litres of vehicles with telemetry/)
+    // The shares are against idle_basis_litres (vehicles with known idle hours, 0 h included), the backend split basis
+    assert.match(kpi, /litres of vehicles with known idle hours/)
+    assert.ok(!kpi.includes("vehicles with an idle estimate"), "zero-idle vehicles are in the basis: not \"with an idle estimate\"")
+    assert.match(kpi, /idle_basis_litres/)
 })
 
 test("H4: hour bars never fall back to the fuel percentages", () => {
@@ -171,4 +174,33 @@ test("matched-fleet views never present unmatched/ambiguous identifiers as fleet
     assert.doesNotMatch(board, /"Untracked"/)
     // The ranking requests only the matched KPI scope: no option lists excluded identifiers among fleet vehicles
     assert.doesNotMatch(board, /<option value="(not_tracked|ambiguous)"/)
+})
+
+test("monthly page: \"View Daily Transactions\" needs dated rows; idle ranking keeps unknown-distance vehicles", () => {
+    const page = read("../../pages/FuelPerformance.jsx")
+    assert.match(page, /getFuelDaily\(queryParams\)/)
+    assert.match(page, /datedDailyAvailability\(res\)\.available/)
+    assert.match(page, /const dailyEligible = checkDaily && dailyCheck\.key === dailyKey && dailyCheck\.available/)
+    assert.match(page, /View Daily Transactions/)
+    assert.match(page, /to=\{`\/fuel\/daily\?\$\{dailySearch\(selectedMonth, vehicle\)\}`\}/, "button opens the daily page for the month")
+    const idle = page.slice(page.indexOf("const loadIdleWasters"), page.indexOf("useEffect(", page.indexOf("const loadIdleWasters")))
+    assert.match(idle, /sort_by: "estimated_idle_fuel"/)
+    assert.ok(!/status: "matched"/.test(idle), "no_distance_data vehicles carry idle estimates and must stay ranked")
+    const daily = read("../../pages/FuelDailyDashboard.jsx")
+    assert.match(daily, /datedDailyAvailability\(res\)/)
+    assert.match(daily, /coverage_note/)
+})
+
+test("excluded panel: Overlaps tab lists unresolved and superseded rows, labelled apart", () => {
+    const panel = read("./ExcludedFuelPanel.jsx")
+    assert.match(panel, /overlaps: \["summary_dated_overlap", "summary_superseded_by_dated"\]/)
+    assert.notEqual(EXCLUDED_REASON_LABELS.summary_dated_overlap, EXCLUDED_REASON_LABELS.summary_superseded_by_dated)
+    assert.match(panel, /summary_superseded_by_dated"\s*\?\s*"bg-emerald-50/)
+})
+
+test("leaderboard: unknown distance is never labelled as zero distance", () => {
+    const board = read("./VehicleLeaderboard.jsx")
+    assert.match(board, /const isZeroDistance = v\.distance_km === 0\r?\n/)
+    assert.match(board, /isDistanceUnknown\s*\?\s*"Distance unknown"/)
+    assert.ok(!board.includes(">Zero Distance</option>"), "no_distance_data includes unknown distance")
 })

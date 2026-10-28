@@ -336,7 +336,7 @@ class TestFuelEfficiency(unittest.TestCase):
             self._assert_number(data[key], allow_none=True, non_negative=True, msg=key)
         self._assert_number(data["fuel_efficiency_l_per_100km"], allow_none=True, non_negative=True)
         self._assert_number(data["fuel_cost_per_km"], allow_none=True, non_negative=True)
-        self.assertIn(data["telematics_status"], ("complete", "partial"))
+        self.assertIn(data["telematics_status"], ("complete", "partial", "unavailable"))
         self.assertIn(data["efficiency_suppressed_reason"], (None, "insufficient_distance", "non_positive_net_fuel"))
         self.assertEqual(data["efficiency_basis"], "purchase_based")
         self.assertIsInstance(data["data_warnings"], list)
@@ -400,7 +400,7 @@ class TestFuelEfficiency(unittest.TestCase):
         self.assertEqual(page1["page_size"], 10)
         self._assert_count(page1["total"], "total")
         self.assertEqual(len(page1["data"]), min(10, page1["total"]))
-        self.assertIn(page1["telematics_status"], ("complete", "partial"))
+        self.assertIn(page1["telematics_status"], ("complete", "partial", "unavailable"))
         self._assert_excluded_scope_reconciles(page1["excluded_scope"])
         kpi = page1["excluded_scope"]["kpi"]
 

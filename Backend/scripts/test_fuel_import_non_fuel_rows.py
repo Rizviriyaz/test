@@ -24,6 +24,9 @@ from unittest.mock import MagicMock, patch
 import openpyxl
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# These tests cover the import with FUEL_IMPORT_REPLACE off (the replacement path has its own suites); a local
+# .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
+os.environ["FUEL_IMPORT_REPLACE"] = ""
 
 from offline_guard import OfflineGuard  # noqa: E402
 
@@ -242,12 +245,12 @@ def test_preview_and_import_classify_identically():
     r, sent, _ = run_import(rows, mapping={k: v for k, v in p.suggested_mapping.items() if v})
     assert r.rows_found == p.rows_found and r.rows_ignored == p.rows_ignored and r.rows_non_fuel == p.rows_non_fuel
     assert r.rows_failed == p.rows_invalid
-    # Valid fuel rows are imported or, for the in-file repeat, skipped as duplicates
-    assert r.rows_imported + r.rows_duplicate == p.rows_fuel and (r.rows_imported, r.rows_duplicate) == (4, 1)
+    # Valid fuel rows are all imported: the identical in-file repeat is a repeated refuel, not a duplicate
+    assert r.rows_imported + r.rows_duplicate == p.rows_fuel and (r.rows_imported, r.rows_duplicate) == (5, 0)
     assert r.ignored_row_details == p.non_fuel_row_details
     failed = sorted(r.failed_row_details, key=lambda d: d["source_row"])
     assert failed == p.invalid_row_details, (failed, p.invalid_row_details)
-    assert len(sent) == 4
+    assert len(sent) == 5
     assert_accounted(r)
 
 

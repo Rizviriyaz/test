@@ -261,10 +261,8 @@ def test_fleet_failure_falls_back_never_zero():
     tables, per_unit = fleet_tables()
     engine = Engine(per_unit, tables=tables, fail_exec={TEMPLATE_GROUP_TRIPS})
     res = trips_for(engine)
-    assert engine.execs(TEMPLATE_GROUP_TRIPS) == 2, "one re-login retry, then fall back"
-    assert res == legacy_trips(per_unit) and all(r["status"] == "complete" for r in res.values())
-    engine = Engine(per_unit, tables=tables, fail_exec={TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_TRIPS})
-    res = trips_for(engine)
+    assert engine.execs(TEMPLATE_GROUP_TRIPS) == 2, "a non-limit error keeps its one re-login retry"
+    assert engine.execs(TEMPLATE_UNIT_TRIPS) == 0, "a failed fleet report starts no per-unit reports"
     assert all(r["status"] == "failed" and r["trips"] == [] for r in res.values()), "failures stay failed, never 0 km"
     tr = calculate_efficiency_trend([{"vehicle_identifier": "UNIT-A", "transaction_date": "2026-08-03T10:00:00",
                                       "litres": 30.0, "total_cost": 90.0}], {}, UNITS, "day", unit_trips=res)
@@ -273,7 +271,33 @@ def test_fleet_failure_falls_back_never_zero():
     tables[TEMPLATE_GROUP_TRIPS] = {"header": GROUP_TRIPS_HEADER, "rows": [], "subrows": {}}  # no tables at all
     engine = Engine(per_unit, tables=tables)
     assert trips_for(engine) == legacy_trips(per_unit) and engine.execs(TEMPLATE_UNIT_TRIPS) == 3
-    print("[PASS] Fleet report failing (after a retry) or empty -> per-unit reports; both failing -> 'failed', never 0 km.")
+    print("[PASS] Fleet report failing (after a retry) -> 'failed', no per-unit reports, never 0 km; empty -> per-unit reports.")
+
+
+def test_limit_error_1004_is_not_retried():
+    tables, per_unit = fleet_tables()
+
+    class Limited(Engine):
+        def __call__(self, svc, params, sid=None, **kw):
+            if svc == "report/exec_report" and params["reportTemplateId"] == TEMPLATE_GROUP_TRIPS:
+                self.calls.append((svc, params))
+                return {"error": 1004, "reason": "LIMIT msgs_activity"}
+            return super().__call__(svc, params, sid=sid, **kw)
+
+    engine = Limited(per_unit, tables=tables)
+    forced = []
+    with Env(engine), patch("app.fuel.wialon_distance.login",
+                            side_effect=lambda force=False, session=None: forced.append(force) or f"sid-{session or 'shared'}"):
+        res = wd.get_units_trips_for_range([u["id"] for u in UNITS], *CLOSED, "sid-shared", UNITS)
+        try:
+            wd._run_report_with_retry(wr.execute_wialon_group_trips_report, "sid-fuel", 0, 1)
+            raise AssertionError("1004 must propagate")
+        except WialonAPIError as exc:
+            assert wd._wialon_error_code(exc) == 1004
+    assert engine.execs(TEMPLATE_GROUP_TRIPS) == 2, "one exec per call: no re-login rerun after 1004"
+    assert True not in forced, "no forced re-login after 1004"
+    assert engine.execs(TEMPLATE_UNIT_TRIPS) == 0 and all(r["status"] == "failed" for r in res.values())
+    print("[PASS] Wialon 1004 (LIMIT msgs_activity): no forced re-login, no rerun, no per-unit reports.")
 
 
 def test_cached_once_and_failures_not_cached():
@@ -391,6 +415,7 @@ TESTS = [
     test_uncertain_units_fall_back_to_their_own_report,
     test_duplicate_report_rows_fall_back,
     test_fleet_failure_falls_back_never_zero,
+    test_limit_error_1004_is_not_retried,
     test_cached_once_and_failures_not_cached,
     test_fleet_report_runs_on_its_own_session,
     test_bundle_reports_run_concurrently_on_fuel_sessions,

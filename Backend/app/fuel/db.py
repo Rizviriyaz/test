@@ -7,7 +7,7 @@ import re
 import time
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.exceptions import NewConnectionError
@@ -142,6 +142,37 @@ def schema_v2_enabled() -> bool:
     return os.getenv("FUEL_SCHEMA_V2", "").strip() == "1"
 
 
+def replace_enabled() -> bool:
+    """
+    FUEL_IMPORT_REPLACE=1 enables latest-import-wins and monthly-summary imports, using the columns and the
+    fuel_commit_import function from Backend/sql/fuel_import_replacement.sql (fuel_transactions.date_basis /
+    superseded_by_import_id / superseded_at / staged, fuel_imports.import_mode / reporting_month / replace_scope /
+    rows_replaced / rows_unchanged). Set it only after that SQL is applied; with it unset no request names those
+    columns (PostgREST rejects unknown columns) and every read and import behaves as before.
+    """
+    return os.getenv("FUEL_IMPORT_REPLACE", "").strip() == "1"
+
+
+def dated_replace_enabled() -> bool:
+    """
+    With FUEL_IMPORT_REPLACE, dated statements are latest-import-wins too: a new statement replaces the stored rows of
+    its vehicles on the days it contains. FUEL_IMPORT_REPLACE_DATED=0 turns that off (dated imports then keep the
+    legacy path: duplicates skipped, nothing superseded) while monthly summaries still replace their month.
+    """
+    return replace_enabled() and os.getenv("FUEL_IMPORT_REPLACE_DATED", "").strip() != "0"
+
+
+def apply_visible_filter(params: Dict[str, str]) -> Dict[str, str]:
+    """
+    Restrict a fuel_transactions read to the visible dataset: not superseded by a newer import and not staged
+    (rows of an import that was never committed). A no-op without FUEL_IMPORT_REPLACE.
+    """
+    if replace_enabled():
+        params["superseded_by_import_id"] = "is.null"
+        params["staged"] = "not.is.true"
+    return params
+
+
 def ignored_counts_enabled() -> bool:
     """
     FUEL_IMPORT_IGNORED_COUNTS=1 writes fuel_imports.rows_ignored and rows_non_fuel, the columns added by
@@ -186,11 +217,13 @@ def create_fuel_import_record(
     deadline: Optional[float] = None,
     rows_ignored: Optional[int] = None,
     rows_non_fuel: Optional[int] = None,
+    replace_fields: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
     Create a new record in fuel_imports with status 'processing'.
     Returns the newly created import ID. rows_ignored / rows_non_fuel are final when the record is created (the
-    rows are classified first) and are written only with FUEL_IMPORT_IGNORED_COUNTS=1.
+    rows are classified first) and are written only with FUEL_IMPORT_IGNORED_COUNTS=1. replace_fields
+    (import_mode, reporting_month, replace_scope) are written only with FUEL_IMPORT_REPLACE=1.
     """
     url = get_supabase_rest_url("fuel_imports")
     clean_imported_by = None
@@ -218,6 +251,8 @@ def create_fuel_import_record(
             payload["rows_ignored"] = rows_ignored
         if rows_non_fuel is not None:
             payload["rows_non_fuel"] = rows_non_fuel
+    if replace_fields and replace_enabled():
+        payload.update(replace_fields)
 
     headers = get_headers(bearer_token)
     if _remaining(deadline) < _MIN_CALL_SECONDS:
@@ -256,7 +291,10 @@ def update_fuel_import_record(
     attempt failed, it was rejected, or no attempt fitted before the deadline.
     """
     url = get_supabase_rest_url("fuel_imports")
-    headers = get_headers(bearer_token)
+    # fuel_imports has no UPDATE policy for 'authenticated': with the user's token the PATCH matches no row and the
+    # record stays 'processing'. The service-role key (when configured) updates the import's own status and counts;
+    # the caller's import role was checked by the route, and the commit RPC still runs with the user's token.
+    headers = get_headers(None) if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else get_headers(bearer_token)
     params = {"id": f"eq.{import_id}"}
     attempts = max(1, get_env_int("FUEL_SUPABASE_WRITE_ATTEMPTS", 3))
 
@@ -274,6 +312,14 @@ def update_fuel_import_record(
             return False
         else:
             if response.ok:
+                try:
+                    updated = response.json()
+                except ValueError:
+                    updated = None
+                if isinstance(updated, list) and not updated:
+                    # 200 with no row: row-level security (or a missing id) filtered the update out
+                    logger.error("Updating import #%s matched no row (not permitted or not found)", import_id)
+                    return False
                 return True
             if response.status_code not in _RETRYABLE_STATUS:
                 logger.error("Supabase update error on fuel_imports: %s - %s", response.status_code, response.text)
@@ -315,6 +361,7 @@ def fetch_existing_transaction_fingerprints(
         params["transaction_date"] = f"gte.{df}"
     elif dt:
         params["transaction_date"] = f"lte.{dt}"
+    apply_visible_filter(params)
 
     rows = _fetch_all_pages(url, params, headers, "existing transactions for duplicate detection", deadline)
     fingerprints: Set[str] = set()
@@ -479,11 +526,12 @@ def fetch_import_rows(
 ) -> List[Dict[str, Any]]:
     """
     Rows stored under one import (optionally only the given source rows): id, source_row_number,
-    transaction_date. (import_id, source_row_number) identifies a statement row of an import, so this is the
+    transaction_date (and staged with FUEL_IMPORT_REPLACE: staged rows are stored but not visible).
+    (import_id, source_row_number) identifies a statement row of an import, so this is the
     read-back used to settle uncertain writes. Read-only; raises FuelDataFetchError if not read completely.
     """
     params: Dict[str, str] = {
-        "select": "id,source_row_number,transaction_date",
+        "select": "id,source_row_number,transaction_date" + (",staged" if replace_enabled() else ""),
         "import_id": f"eq.{int(import_id)}",
         "order": "id.asc",
         "limit": str(PAGE_SIZE),
@@ -492,6 +540,106 @@ def fetch_import_rows(
         params["source_row_number"] = f"in.({','.join(str(int(r)) for r in sorted(set(source_rows)))})"
     url = get_supabase_rest_url("fuel_transactions")
     return _fetch_all_pages(url, params, _read_headers(bearer_token), f"rows stored by import #{import_id}", deadline)
+
+
+def fetch_import_coverage(
+    import_ids: Iterable[Any],
+    bearer_token: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Coverage metadata of the given imports by id: id, status, import_mode, replace_scope (see
+    reporting_period.confirmed_coverage_period). Read-only. Empty without FUEL_IMPORT_REPLACE: before
+    Backend/sql/fuel_import_replacement.sql those columns do not exist, so no import can establish coverage.
+    Raises FuelDataFetchError unless read completely (an unread import must not look uncovered or covered).
+    """
+    ids = sorted({int(i) for i in import_ids if i is not None and str(i).strip().lstrip("-").isdigit()})
+    if not ids or not replace_enabled():
+        return {}
+    url = get_supabase_rest_url("fuel_imports")
+    out: Dict[int, Dict[str, Any]] = {}
+    for start in range(0, len(ids), 200):  # bounded URL length
+        chunk = ids[start:start + 200]
+        params = {
+            "select": "id,status,import_mode,replace_scope",
+            "id": f"in.({','.join(str(i) for i in chunk)})",
+            "order": "id.asc",
+            "limit": str(PAGE_SIZE),
+        }
+        for r in _fetch_all_pages(url, params, _read_headers(bearer_token), "fuel import coverage", deadline):
+            if r.get("id") is not None:
+                out[int(r["id"])] = r
+    return out
+
+
+def fetch_visible_rows_in_range(
+    date_from: str,
+    date_to: str,
+    bearer_token: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Every visible transaction (FUEL_IMPORT_REPLACE) with transaction_date in [date_from, date_to] (inclusive days),
+    all vehicles, with the values needed to define and fingerprint a replacement scope. Read-only; raises
+    FuelDataFetchError unless read completely: a partial read would leave old rows visible next to their replacement.
+    """
+    params: Dict[str, str] = {
+        "select": "id,import_id,transaction_date,vehicle_identifier,litres,total_cost,invoice_number,odometer_km,date_basis",
+        "order": "id.asc",
+        "limit": str(PAGE_SIZE),
+        "and": (f"(transaction_date.gte.{normalize_date_filter(date_from, is_end=False)},"
+                f"transaction_date.lte.{normalize_date_filter(date_to, is_end=True)})"),
+    }
+    apply_visible_filter(params)
+    url = get_supabase_rest_url("fuel_transactions")
+    return _fetch_all_pages(url, params, _read_headers(bearer_token), "transactions in the replacement period", deadline)
+
+
+class FuelCommitError(RuntimeError):
+    """The database refused to commit an import; nothing was changed by the commit."""
+
+
+def commit_fuel_import(
+    import_id: int,
+    supersede_ids: List[int],
+    expected_rows: int,
+    bearer_token: Optional[str] = None,
+    deadline: Optional[float] = None,
+) -> Optional[Dict[str, int]]:
+    """
+    Make one import's staged rows visible and mark the rows it replaces as superseded, in ONE database transaction
+    (public.fuel_commit_import, Backend/sql/fuel_import_replacement.sql). The function refuses (and changes nothing)
+    unless every id in supersede_ids is still visible and exactly expected_rows rows of the import are staged.
+
+    Returns {"superseded": n, "committed": m} on success and None when the outcome is unknown (the request was sent
+    but no usable answer came back: the caller must read the import's rows to find out). Raises FuelCommitError
+    when the database refused it or the request was never sent; nothing changed in either case.
+    """
+    url = get_supabase_rest_url("rpc/fuel_commit_import")
+    payload = {"p_import_id": int(import_id), "p_supersede_ids": [int(i) for i in supersede_ids],
+               "p_expected_rows": int(expected_rows)}
+    if _remaining(deadline) < _MIN_CALL_SECONDS:
+        raise FuelCommitError("no time left before the request limit")
+    try:
+        response = requests.post(url, json=payload, headers=get_headers(bearer_token),
+                                 timeout=_clipped_timeout(5.0, 30.0, deadline))
+    except requests.RequestException as exc:
+        if _not_sent(exc):
+            raise FuelCommitError("the commit request could not be sent") from None
+        logger.error("Commit of fuel import #%s: outcome unknown (%s)", import_id, type(exc).__name__)
+        return None
+    if response.ok:
+        try:
+            body = response.json()
+            return {"superseded": int(body["superseded"]), "committed": int(body["committed"])}
+        except (ValueError, TypeError, KeyError):
+            logger.error("Commit of fuel import #%s: unreadable response", import_id)
+            return None
+    if response.status_code in _RETRYABLE_STATUS:
+        logger.error("Commit of fuel import #%s: outcome unknown (HTTP %s)", import_id, response.status_code)
+        return None
+    logger.error("Commit of fuel import #%s rejected: %s - %s", import_id, response.status_code, response.text[:300])
+    raise FuelCommitError(f"rejected by the database (HTTP {response.status_code})")
 
 
 def _row_key(tx: Dict[str, Any]) -> Optional[Tuple[int, int]]:
@@ -852,6 +1000,7 @@ def get_fuel_transactions_list(
         params["fuel_type"] = f"ilike.*{filters['fuel_type']}*"
     if filters.get("import_id"):
         params["import_id"] = f"eq.{filters['import_id']}"
+    apply_visible_filter(params)
 
     try:
         response = _session.get(url, params=params, headers=headers, timeout=15)
@@ -891,7 +1040,8 @@ def fetch_fuel_transactions_for_analytics(
 
     params: Dict[str, str] = {
         "select": "id,import_id,transaction_date,vehicle_identifier,fuel_type,litres,total_cost,unit_price,odometer_km,station_name,invoice_number,driver_name,card_number"
-        + (",cost_derived" if schema_v2_enabled() else ""),
+        + (",cost_derived" if schema_v2_enabled() else "")
+        + (",date_basis" if replace_enabled() else ""),
         "order": "transaction_date.asc,id.asc",
         "limit": str(PAGE_SIZE),
     }
@@ -914,6 +1064,7 @@ def fetch_fuel_transactions_for_analytics(
         params["fuel_type"] = f"ilike.*{filters['fuel_type']}*"
     if filters.get("import_id") is not None:
         params["import_id"] = f"eq.{filters['import_id']}"
+    apply_visible_filter(params)
 
     return _fetch_all_pages(url, params, headers, "fuel transactions")
 
@@ -924,7 +1075,7 @@ def fetch_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[s
     Reads every page (see _fetch_all_pages) or raises FuelDataFetchError; never returns a partial list.
     """
     url = get_supabase_rest_url("fuel_transactions")
-    params = {"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)}
+    params = apply_visible_filter({"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)})
     rows = _fetch_all_pages(url, params, _read_headers(bearer_token), "fuel vehicle identifiers")
     return sorted({str(r.get("vehicle_identifier") or "").strip() for r in rows} - {""})
 

@@ -50,9 +50,9 @@ test("fuel vehicle list: the global filter is exact (vehicle_filter), the search
     assert.deepEqual(fuelVehicleListParams({}, ""), {})
 })
 
-test("Fuel page sends the exact vehicle filter for the vehicle table and best/worst lists", () => {
+test("Fuel page sends the exact vehicle filter for the vehicle table and the idle-waster ranking", () => {
     const page = readFileSync(new URL("../pages/FuelPerformance.jsx", import.meta.url), "utf8")
-    assert.equal((page.match(/fuelVehicleListParams\(/g) || []).length, 3, "rankings, worst and best lists")
+    assert.equal((page.match(/fuelVehicleListParams\(/g) || []).length, 2, "rankings and idle-waster lists")
     assert.doesNotMatch(page, /getVehicleEfficiencyList\(\{[^}]*\.\.\.queryParams/s)
 })
 

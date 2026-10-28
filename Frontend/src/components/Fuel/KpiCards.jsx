@@ -7,7 +7,7 @@ import {
     Database,
     Calculator,
 } from "lucide-react"
-import { fuelShareNote } from "./fuelLabels"
+import { fuelShareNote, transactionCountLabel, TREND_STATUS_LABELS } from "./fuelLabels"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -55,9 +55,14 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const totalCost = efficiencyData?.total_cost
     const transactionCount = efficiencyData?.transaction_count
     const vehicleCount = efficiencyData?.vehicle_count
+    const unmatchedCount = efficiencyData?.unmatched_vehicle_count
+    // Monthly-summary rows are statement totals, not refuels: counts are labelled as rows when any are in scope
+    const summaryRows = efficiencyData?.excluded_scope?.monthly_summary_rows
+    const rowsLabel = transactionCountLabel(transactionCount, summaryRows)
     const trackedLitres = efficiencyData?.tracked_litres
     // Basis of the idle/driving fuel shares: litres of vehicles with distance or engine hours
-    const telemetryLitres = efficiencyData?.telemetry_litres
+    // Litres of the vehicles whose idle fuel is estimated: the basis of the idle/driving fuel shares
+    const idleBasisLitres = efficiencyData?.idle_basis_litres
     const vehiclesWithDistance = efficiencyData?.vehicles_with_distance
     const engineOnlyCount = efficiencyData?.vehicles_engine_hours_only
     const suppressedReason = efficiencyData?.efficiency_suppressed_reason
@@ -96,7 +101,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     natureText: "Directly aggregated from uploaded fuel statement invoices. Refunds and negative billing adjustments are deducted.",
                     inputs: [
                         { label: "Net Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Statement Aggregation" },
-                        { label: "Refuel Transactions", value: `${transactionCount != null ? formatCurrency(transactionCount) : "—"} refuels`, source: "Invoice Row Count" },
+                        { label: "Statement rows", value: rowsLabel, source: "Invoice Row Count" },
                         { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoice Total Costs" },
                         { label: "Weighted Average Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
                     ],
@@ -119,7 +124,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoice Cost Sum" },
                         { label: "Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Litres Sum" },
                         { label: "Effective Fuel Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
-                        { label: "Refuel Events", value: `${transactionCount != null ? formatCurrency(transactionCount) : "—"} events`, source: "Invoice Rows" },
+                        { label: "Statement rows", value: rowsLabel, source: "Invoice Rows" },
                     ],
                     calculationSteps: [
                         "Total Expenditure = Sum(Line Item Amounts in AED)",
@@ -182,7 +187,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Productive Driving Time", value: drivingHours !== null && drivingHours !== undefined ? `${drivingHours.toFixed(1)} hrs` : "—", source: "Wialon Motion Telematics" },
                         { label: "Estimated Driving Fuel", value: estimatedDrivingFuel !== null && estimatedDrivingFuel !== undefined ? `${formatNumber(estimatedDrivingFuel, 1)} L` : "—", source: "Tracked Litres - Estimated Idle Fuel" },
-                        { label: "Estimated driving share of fuel", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Estimated driving litres ÷ litres of vehicles with telemetry" },
+                        { label: "Estimated driving share of fuel", value: drivingPct !== null && drivingPct !== undefined ? `${drivingPct.toFixed(1)}%` : "—", source: "Estimated driving litres ÷ litres of vehicles with known idle hours" },
                     ],
                     calculationSteps: [
                         "Driving Hours = Sum of motion durations across matched units",
@@ -202,7 +207,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Stationary Idle Time", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Stationary Engine Telematics" },
                         { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Configurable Idle Parameter" },
-                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with telemetry" },
+                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with known idle hours" },
                     ],
                     calculationSteps: [
                         "Idling Hours = Sum of stationary engine durations",
@@ -222,13 +227,13 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     inputs: [
                         { label: "Qualifying Idle Duration", value: idleHours !== null && idleHours !== undefined ? `${idleHours.toFixed(1)} hrs` : "—", source: "Wialon Telematics (Stationary Engine)" },
                         { label: "Configured Idle Burn Rate", value: `${idleRate.toFixed(1)} L/h`, source: "Dashboard Coefficient Parameter" },
-                        { label: "Fuel of vehicles with telemetry", value: `${formatNumber(telemetryLitres, 1)} L`, source: "Purchased litres of vehicles with Wialon distance or engine hours" },
-                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with telemetry" },
-                        { label: "Estimated Idle Spend", value: `AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`, source: "Idle Litres × Weighted Avg Price" },
+                        { label: "Fuel of vehicles with known idle hours", value: idleBasisLitres !== null && idleBasisLitres !== undefined ? `${formatNumber(idleBasisLitres, 1)} L` : "—", source: "Net purchased litres of vehicles with known Wialon idle hours, recorded 0 h included (mixed-fuel vehicles excluded under a fuel-type filter)" },
+                        { label: "Estimated idle share of fuel", value: idlePct !== null && idlePct !== undefined ? `${idlePct.toFixed(1)}%` : "—", source: "Estimated idle litres ÷ litres of vehicles with known idle hours" },
+                        { label: "Estimated Idle Spend", value: `AED ${estimatedIdleCost !== null && estimatedIdleCost !== undefined ? formatCurrency(estimatedIdleCost) : "—"}`, source: "Sum of each vehicle's idle litres × its own average price" },
                     ],
                     calculationSteps: [
-                        `Idle Fuel = ${idleHours !== null && idleHours !== undefined ? idleHours.toFixed(1) : "—"} hrs × ${idleRate.toFixed(1)} L/h`,
-                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of telemetry vehicles' fuel" : "—"})`,
+                        `Idle Fuel = Σ per vehicle (idle hours × ${idleRate.toFixed(1)} L/h), over ${idleHours !== null && idleHours !== undefined ? idleHours.toFixed(1) : "—"} idle hrs`,
+                        `Result = ${estimatedIdleFuel !== null && estimatedIdleFuel !== undefined ? formatNumber(estimatedIdleFuel, 1) + " L" : "—"} (${idlePct !== null && idlePct !== undefined ? idlePct.toFixed(1) + "% of those vehicles' fuel" : "—"})`,
                     ],
                 }
             case "vehicle_count":
@@ -240,11 +245,12 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     dateRange: dateRangeStr,
                     dataSource: "Wialon Unit Registry & Fuel Statement Plate Resolution",
                     formulaText: "Count of Unique Wialon Units with Refuel Transactions in Period",
-                    natureText: "Fleet units matched to an active Wialon telematics unit that recorded fuel transactions.",
+                    natureText: "Fleet units matched to an active Wialon telematics unit that recorded fuel transactions. This is not the total fleet size.",
                     inputs: [
                         { label: "Matched Wialon Units", value: `${vehicleCount ?? "—"}`, source: "Wialon Unit Registry" },
                         { label: "Units with GPS Distance", value: `${vehiclesWithDistance ?? "—"}`, source: "Wialon Odometer Reports" },
-                        { label: "Units with Engine-Hours Only", value: `${engineOnlyCount ?? 0}`, source: "Wialon Engine Reports" },
+                        { label: "Units with Engine-Hours Only", value: `${engineOnlyCount ?? "—"}`, source: "Wialon Engine Reports" },
+                        { label: "Unmatched Fuel Identifiers", value: `${unmatchedCount ?? "—"}`, source: "Excluded from KPIs (no or several Wialon units)" },
                         { label: "Fuel Volume (Tracked Units)", value: `${formatNumber(trackedLitres, 1)} L`, source: "Matched Vehicle Invoices" },
                     ],
                     calculationSteps: [
@@ -260,80 +266,88 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const activeBreakdown = selectedKpi ? getBreakdownDetails(selectedKpi) : null
     const has = (v) => v !== null && v !== undefined
 
-    // Primary & Secondary KPI configurations
+    // Primary & Secondary KPI configurations. Unknown values render as "—" with an "Unavailable" note, never as 0.
+    const efficiencyWithheld = !has(efficiency) && suppressedReason ? (TREND_STATUS_LABELS[suppressedReason] || "Withheld") : null
     const primaryMetrics = [
         {
             key: "total_litres",
-            label: "Total fuel purchased",
+            label: "Fuel Purchased",
             value: formatNumber(totalLitres, 1),
             unit: "L",
-            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : "Net statement purchases",
+            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : "Net of refunds",
             provenance: "Recorded",
         },
         {
             key: "total_cost",
-            label: "Total fuel cost",
+            label: "Fuel Cost",
             prefix: "AED",
             value: formatCurrency(totalCost),
-            note: transactionCount != null ? `${formatCurrency(transactionCount)} statement refuels` : "Net spend",
+            note: rowsLabel,
             provenance: "Recorded",
         },
         {
             key: "total_distance",
-            label: "Total distance travelled",
+            label: "Distance",
             value: has(totalDistance) ? formatNumber(totalDistance, 0) : "—",
             unit: "km",
-            note: has(vehiclesWithDistance) ? `${vehiclesWithDistance} vehicles with GPS` : "Wialon verified",
+            note: !has(totalDistance)
+                ? "Unavailable"
+                : has(vehiclesWithDistance) && has(vehicleCount) ? `${vehiclesWithDistance} of ${vehicleCount} vehicles` : "Wialon trips",
             provenance: "Recorded",
         },
         {
             key: "efficiency",
-            label: "Fleet fuel efficiency",
+            label: "Fuel Efficiency",
             value: has(kmPerLitre) ? formatNumber(kmPerLitre, 2) : (has(efficiency) ? formatNumber(efficiency, 1) : "—"),
             unit: has(kmPerLitre) ? "km/L" : (has(efficiency) ? "L/100km" : ""),
-            note: has(kmPerLitre) && has(efficiency)
-                ? `${efficiency.toFixed(1)} L/100km · AED ${fixedOrDash(costPerKm)}/km`
-                : (has(costPerKm) ? `AED ${fixedOrDash(costPerKm)} / km` : "Purchase-based ratio"),
+            note: efficiencyWithheld
+                ?? (has(kmPerLitre) && has(efficiency)
+                    ? `${efficiency.toFixed(1)} L/100km · AED ${fixedOrDash(costPerKm)}/km`
+                    : (has(costPerKm) ? `AED ${fixedOrDash(costPerKm)} / km` : "Unavailable")),
             provenance: "Derived",
+            title: "Fuel purchased ÷ Wialon distance (purchase-based, not measured consumption)",
         },
     ]
 
     const secondaryMetrics = [
         {
             key: "driving_hours",
-            label: "Driving hours",
+            label: "Driving Hours",
             value: has(drivingHours) ? formatNumber(drivingHours, 1) : "—",
             unit: "h",
-            note: fuelShareNote(drivingPct) ?? "In active motion",
+            note: has(drivingHours) ? (fuelShareNote(drivingPct) ?? "Wialon motion") : "Unavailable",
             provenance: "Recorded",
         },
         {
             key: "idle_hours",
-            label: "Idling hours",
+            label: "Idling Hours",
             value: has(idleHours) ? formatNumber(idleHours, 1) : "—",
             unit: "h",
-            note: fuelShareNote(idlePct) ?? "Stationary engine",
+            note: has(idleHours) ? (fuelShareNote(idlePct) ?? "Engine on, stationary") : "Unavailable",
             provenance: "Recorded",
         },
         {
             key: "estimated_idle_fuel",
-            label: "Estimated idle fuel",
+            label: "Est. Idle Fuel",
             value: has(estimatedIdleFuel) ? formatNumber(estimatedIdleFuel, 1) : "—",
             unit: "L",
-            note: has(estimatedIdleCost) ? `AED ${formatCurrency(estimatedIdleCost)} estimated loss` : "Stationary burn",
+            note: has(estimatedIdleCost) ? `AED ${formatCurrency(estimatedIdleCost)} est. cost` : "Unavailable",
             valueClass: has(estimatedIdleCost) && estimatedIdleCost > 0 ? "text-amber-800" : "text-slate-900",
             tag: `${idleRate.toFixed(1)} L/h`,
             provenance: "Estimated",
+            title: "Sum per vehicle of idle hours × idle fuel rate (estimate, not measured consumption)",
         },
         {
             key: "vehicle_count",
-            label: "Vehicles refuelled",
+            label: "Vehicles",
             value: has(vehicleCount) ? vehicleCount : "—",
-            unit: "units",
-            note: has(vehiclesWithDistance)
-                ? `${vehiclesWithDistance} eligible for distance`
-                : (engineOnlyCount ? `${engineOnlyCount} engine-only` : "Matched scope"),
+            unit: "refuelled",
+            note: [
+                has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : null,
+                unmatchedCount ? `${unmatchedCount} unmatched` : null,
+            ].filter(Boolean).join(" · ") || "Matched to Wialon",
             provenance: "Recorded",
+            title: "Refuelled vehicles matched to one Wialon unit (not total fleet size)",
         },
     ]
 
@@ -348,7 +362,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             type="button"
             onClick={() => setSelectedKpi(cell.key)}
             className="group flex min-w-0 flex-col bg-white p-3.5 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-            title={`Click to view ${cell.label} calculation formula and audit breakdown`}
+            title={cell.title ? `${cell.title}. Click for the calculation.` : `${cell.label}: click for the calculation`}
         >
             <span className="flex items-center justify-between gap-1.5">
                 <span className="truncate text-xs font-medium text-slate-500">

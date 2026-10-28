@@ -39,6 +39,8 @@ export function excludedSummary(scope) {
         unmatched: part("unmatched"),
         ambiguous: part("ambiguous"),
         duplicates: part("suspected_duplicates"),
+        partialSummaries: part("partial_period_summary"),
+        summaryOverlaps: part("summary_dated_overlap"),
     }
 }
 
@@ -46,6 +48,9 @@ export const EXCLUDED_REASON_LABELS = {
     unmatched: "No Wialon unit",
     ambiguous: "Several Wialon units",
     suspected_duplicate: "Suspected re-import",
+    partial_period_summary: "Monthly summary, partial range",
+    summary_dated_overlap: "Summary and dated rows overlap",
+    summary_superseded_by_dated: "Summary replaced by full-month dated rows",
 }
 
 // Number with fixed decimals, or "—" when the value is missing/not finite (a recorded 0 stays "0.00").
@@ -90,9 +95,24 @@ export function skippedRowsLabel(record) {
     return `${parts.join(", ")} skipped`
 }
 
-// estimated_idle/driving_percentage are shares of FUEL (estimated litres / litres of vehicles with telemetry),
+// estimated_idle/driving_percentage are shares of FUEL (estimated litres / litres of vehicles with known idle hours),
 // not of engine time: the label says so. Unknown -> null.
 export function fuelShareNote(pct) {
     if (pct === null || pct === undefined || !Number.isFinite(Number(pct))) return null
     return `${Number(pct).toFixed(1)}% of fuel (estimated)`
+}
+
+// Statement row count. Monthly-summary rows are totals, not refuels: once any are in scope the count is "rows".
+export function transactionCountLabel(count, summaryRows = 0) {
+    if (count === null || count === undefined || count === "" || !Number.isFinite(Number(count))) return "—"
+    const n = Number(count).toLocaleString("en-US")
+    const summaries = Number(summaryRows) || 0
+    return summaries > 0 ? `${n} rows incl. ${summaries.toLocaleString("en-US")} monthly summary` : `${n} refuels`
+}
+
+// Two-part split in percent, or null when the data cannot support one: a part unknown or negative, or a zero total
+export function shareSplit(a, b) {
+    const known = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0
+    if (!known(a) || !known(b) || a + b <= 0) return null
+    return { first: (a / (a + b)) * 100, second: (b / (a + b)) * 100 }
 }

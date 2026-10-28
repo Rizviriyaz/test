@@ -2,11 +2,13 @@ import { useState, useEffect, useMemo, useCallback } from "react"
 import { getFuelTypes, getFuelVehicles } from "../api/fleetApi"
 import { getUAETodayStr, getUAEDateStr } from "../utils/datetime"
 import { FuelFilterContext } from "./fuel-filter-context"
+import { lastCompleteMonth, monthBounds, monthLabel } from "../components/Fuel/fuelPeriod"
 
 export function FuelFilterProvider({ children }) {
-    // Period selection: 'today', '7d', '30d', 'custom', 'all'
-    // Default to 'all' so that historical imported statements and telematics immediately display upon landing
-    const [period, setPeriod] = useState("all")
+    // Period selection: 'month' (selectedMonth, the default: the last complete UAE month) or 'custom'.
+    // 'today', 'yesterday', '7d', '30d' and 'all' remain supported values.
+    const [period, setPeriod] = useState("month")
+    const [selectedMonth, setSelectedMonth] = useState(() => lastCompleteMonth(getUAETodayStr()))
     const [customFrom, setCustomFrom] = useState("")
     const [customTo, setCustomTo] = useState("")
     const [vehicle, setVehicle] = useState("")
@@ -51,6 +53,14 @@ export function FuelFilterProvider({ children }) {
     // Calculate effective date_from and date_to based on current period and UAE time
     const { dateFrom, dateTo, periodLabel } = useMemo(() => {
         const todayStr = getUAETodayStr()
+        if (period === "month") {
+            const { from, to } = monthBounds(selectedMonth)
+            return {
+                dateFrom: from,
+                dateTo: to,
+                periodLabel: monthLabel(selectedMonth, true),
+            }
+        }
         if (period === "today") {
             return {
                 dateFrom: todayStr,
@@ -98,7 +108,12 @@ export function FuelFilterProvider({ children }) {
             dateTo: "",
             periodLabel: "All Time",
         }
-    }, [period, customFrom, customTo])
+    }, [period, selectedMonth, customFrom, customTo])
+
+    const setMonth = useCallback((month) => {
+        setSelectedMonth(month)
+        setPeriod("month")
+    }, [])
 
     const applyCustomRange = useCallback((from, to) => {
         setCustomFrom(from || "")
@@ -106,8 +121,10 @@ export function FuelFilterProvider({ children }) {
         setPeriod("custom")
     }, [])
 
+    // Back to the default view: the last complete month, every vehicle and fuel type
     const resetFilters = useCallback(() => {
-        setPeriod("today")
+        setSelectedMonth(lastCompleteMonth(getUAETodayStr()))
+        setPeriod("month")
         setCustomFrom("")
         setCustomTo("")
         setVehicle("")
@@ -126,6 +143,8 @@ export function FuelFilterProvider({ children }) {
     const value = {
         period,
         setPeriod,
+        selectedMonth,
+        setMonth,
         customFrom,
         customTo,
         applyCustomRange,

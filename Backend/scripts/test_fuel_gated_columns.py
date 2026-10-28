@@ -15,6 +15,9 @@ from unittest.mock import MagicMock, patch
 import openpyxl
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# These tests cover the import with FUEL_IMPORT_REPLACE off (the replacement path has its own suites); a local
+# .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
+os.environ["FUEL_IMPORT_REPLACE"] = ""
 
 from test_fuel_scope import run  # noqa: E402
 
@@ -25,7 +28,7 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 MAPPING = {"transaction_date": "Date", "vehicle_identifier": "Vehicle", "litres": "Litres",
            "unit_price": "Rate", "total_cost": "Amount", "invoice_number": "Invoice"}
 ROWS = [["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, "A1"],
-        ["2026-03-06 10:00:00", "AUH 44120", -10, None, None, "A2"]]
+        ["2026-03-06 10:00:00", "AUH 44120", 10, 3.0, None, "A2"]]
 V2_KEYS = {"fingerprint", "transaction_kind", "cost_derived", "unit_price_derived"}
 
 
@@ -75,7 +78,7 @@ def test_flag_on_columns_hash_and_conflicts():
     sent = [t for call in insert_v2.call_args_list for t in call.args[0]]
     assert all(V2_KEYS <= set(t) for t in sent) and not insert.called
     kinds = sorted(t["transaction_kind"] for t in sent)
-    assert kinds == ["purchase", "refund_adjustment"]
+    assert kinds == ["purchase", "purchase"]  # litres must be > 0: refund rows are rejected before any insert
     assert create.call_args.kwargs["file_sha256"] == res.file_sha256
     try:
         run_import(True, sha_hit=41)
@@ -94,7 +97,7 @@ def test_on_conflict_counts_from_returned_rows():
     assert "ignore-duplicates" in post.call_args.kwargs["headers"]["Prefer"]
     calls = []
     res, *_ = run_import(True, insert_v2_result=lambda group, batch_size=100, bearer_token=None, **_: (0, len(group), []) if not calls.append(1) and len(calls) == 1 else (len(group), 0, []))
-    assert res.rows_duplicate == 1, res.rows_duplicate
+    assert res.rows_duplicate == 2, res.rows_duplicate  # both rows are purchases in one batch, skipped by the index
     print("[PASS] on_conflict=fingerprint: rows the database skipped are counted as duplicates (from returned rows).")
 
 

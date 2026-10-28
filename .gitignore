@@ -66,3 +66,10 @@ desktop.ini
 *.temp
 *.cache
 .cache/
+
+# ── Local database backups (real fuel data; never commit) ────
+Backend/db_backups/
+*.dump
+*.pgdump
+# ── Generated code graph (rebuilt locally by graphify) ───────
+graphify-out/

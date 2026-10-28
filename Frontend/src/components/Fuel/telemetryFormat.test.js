@@ -3,6 +3,8 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 import {
+    TELEMATICS_MAX_RETRIES,
+    shouldRetryTelematics,
     UNKNOWN,
     isKnownNumber,
     firstKnown,
@@ -141,4 +143,18 @@ test("fuel detail modal uses the idle session caption and marks a partial event 
     assert.match(modal, /\{idleSessionsLabel\(activity\)\}/)
     assert.doesNotMatch(modal, /idle_events_count \?/, "modal still tests the count by truthiness")
     assert.match(modal, /activity\.idle_events_complete === false && \(/)
+})
+
+test("telematics still running on the server is retried a bounded number of times; failures never", () => {
+    const pending = { telematics_status: "unavailable", telematics_pending: true }
+    assert.equal(shouldRetryTelematics(pending, 0), true)
+    assert.equal(shouldRetryTelematics(pending, TELEMATICS_MAX_RETRIES - 1), true)
+    assert.equal(shouldRetryTelematics(pending, TELEMATICS_MAX_RETRIES), false, "bounded")
+    assert.equal(shouldRetryTelematics({ telematics_status: "unavailable", telematics_pending: false }, 0), false, "a failure stays unavailable")
+    assert.equal(shouldRetryTelematics({ telematics_status: "complete" }, 0), false)
+    assert.equal(shouldRetryTelematics(null, 0), false)
+    const page = readFileSync(new URL("../../pages/FuelPerformance.jsx", import.meta.url), "utf8")
+    assert.match(page, /shouldRetryTelematics\(efficiency, telematicsRetries\)/)
+    assert.match(page, /clearClientCache\("\/api\/fuel\/analytics\/efficiency"\)/, "a retry bypasses the 30 s client cache")
+    assert.match(page, /loadEfficiencyData\(\{ silent: true \}\)/, "retries keep the fuel figures on screen")
 })

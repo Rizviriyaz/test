@@ -397,13 +397,29 @@ export async function getFuelExcluded(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/excluded${buildFuelQueryString(params)}`, options, 30000)
 }
 
+// Every calendar day with dated fuel and its statement coverage (null values = unknown, never 0)
+export async function getFuelDaily(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/daily${buildFuelQueryString(params)}`, options, 30000)
+}
+
 export async function getFuelVehicleDistance(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`, options, 30000)
 }
 
-export async function previewFuelImport(file) {
+// Optional import choices as form fields: column mapping, reporting month (statements without a date column),
+// explicit confirmation of ambiguous columns, whole-month statement period, and the replace count the preview showed.
+function appendImportOptions(formData, { mapping, reportingMonth, mappingConfirmed, extendToFullMonths, expectedReplaceCount } = {}) {
+    if (mapping) formData.append("mapping", typeof mapping === "string" ? mapping : JSON.stringify(mapping))
+    if (reportingMonth) formData.append("reporting_month", reportingMonth)
+    if (mappingConfirmed) formData.append("mapping_confirmed", "true")
+    if (extendToFullMonths) formData.append("extend_to_full_months", "true")
+    if (Number.isInteger(expectedReplaceCount)) formData.append("expected_replace_count", String(expectedReplaceCount))
+}
+
+export async function previewFuelImport(file, options = {}) {
     const formData = new FormData()
     formData.append("file", file)
+    appendImportOptions(formData, options)
     const response = await apiFetch(`${API_URL}/api/fuel/import/preview`, {
         method: "POST",
         body: formData,
@@ -411,10 +427,10 @@ export async function previewFuelImport(file) {
     return response.json()
 }
 
-export async function executeFuelImport(file, mapping) {
+export async function executeFuelImport(file, mapping, options = {}) {
     const formData = new FormData()
     formData.append("file", file)
-    formData.append("mapping", typeof mapping === "string" ? mapping : JSON.stringify(mapping))
+    appendImportOptions(formData, { ...options, mapping })
     const response = await apiFetch(`${API_URL}/api/fuel/import`, {
         method: "POST",
         body: formData,

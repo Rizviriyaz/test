@@ -1,9 +1,13 @@
 import asyncio
+import concurrent.futures
+import contextvars
 import json
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -13,6 +17,7 @@ from app.fuel.analytics import (
     VALID_GROUP_BY,
     VALID_SORT_FIELDS,
     VALID_SORT_ORDERS,
+    calculate_daily_fuel,
     calculate_fuel_summary,
     calculate_fuel_trend,
     calculate_fuel_type_analytics,
@@ -21,6 +26,8 @@ from app.fuel.analytics import (
 from app.fuel.db import (
     FuelDataFetchError,
     fetch_fuel_transactions_for_analytics,
+    fetch_import_coverage,
+    replace_enabled,
     get_fuel_imports_list,
     get_fuel_vehicle_identifiers,
     get_fuel_transactions_list,
@@ -34,6 +41,8 @@ from app.fuel.scope import (
     REASON_AMBIGUOUS,
     ScopeContext,
     UnitResolver,
+    apply_fuel_type,
+    build_excluded_scope,
     build_scope,
     resolve_effective_dates,
     summarize_excluded,
@@ -49,6 +58,7 @@ from app.fuel.schemas import (
     FuelTransactionItem,
     FuelTransactionsListResponse,
     FuelTrendResponse,
+    DailyFuelResponse,
     FuelTypeAnalyticsResponse,
     VehicleAnalyticsResponse,
     VehicleDistanceResponse,
@@ -82,6 +92,7 @@ from app.fuel.wialon_distance import (
 )
 from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_int
+from app.utils.datetime_helpers import get_uae_now
 from app.utils.ttl_cache import InFlight
 from app.wialon import WialonAPIError
 from app.vehicles import get_all_vehicles, extract_registration_plate
@@ -110,6 +121,20 @@ async def _read_upload(file: UploadFile) -> bytes:
     if not file_bytes:
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
     return file_bytes
+
+
+def _parse_mapping_form(mapping: str) -> Dict[str, Any]:
+    """The mapping form field as a JSON object, or 400."""
+    try:
+        parsed = json.loads(mapping)
+        if not isinstance(parsed, dict):
+            raise ValueError()
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid mapping parameter. Expected a valid JSON object of canonical-to-header mappings.",
+        )
+    return parsed
 
 
 # Roles allowed to write fuel data (import and its preview). Read-only roles such as 'viewer' get 403.
@@ -165,6 +190,106 @@ def _attach_telematics_status(response: Any, bundle: Dict[str, Any], items: Opti
     response.data_warnings = warnings
 
 
+# ─── Bounded wait for Wialon telematics ────────────────────────────────────────
+# A Wialon group report can hang: exec_report waits up to 120 s, transport failures are retried, and a failed report is
+# run once more after a re-login, all under that fuel session's report lock, so one slow report can hold every fuel
+# request for minutes. Requests stop waiting after FUEL_TELEMATICS_WAIT_S and answer with their recorded fuel figures
+# and telematics unavailable (None, never 0). The report keeps running on this executor and fills the single-flight
+# cache, so a later request for the same period reuses it instead of starting another.
+TELEMATICS_WAIT_S = 45
+TELEMATICS_UNAVAILABLE = "unavailable"
+TELEMATICS_TIMEOUT_WARNING = ("Wialon reports did not respond in time; distance, driving/idle hours and idle estimates "
+                              "are unavailable for this request. Reload to retry.")
+TELEMATICS_FAILED_WARNING = ("Wialon reports failed; distance, driving/idle hours and idle estimates are unavailable "
+                             "for this request.")
+# Abandoned waiters keep a worker until their report ends; once all are busy, new requests time out to "unavailable"
+_TELEMATICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fuel-telematics")
+
+
+async def _run_wialon_bounded(fn, *args):
+    """Run a Wialon-bound call off the request pool; asyncio.TimeoutError after FUEL_TELEMATICS_WAIT_S (the call
+    itself keeps running and caches its result)."""
+    loop = asyncio.get_running_loop()
+    future = loop.run_in_executor(_TELEMATICS_EXECUTOR, contextvars.copy_context().run, fn, *args)
+    return await asyncio.wait_for(future, timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
+
+
+def run_wialon_bounded_sync(fn, *args):
+    """Blocking twin of _run_wialon_bounded for synchronous callers (the AI fuel tools): same executor and
+    FUEL_TELEMATICS_WAIT_S; concurrent.futures.TimeoutError when exceeded (the call keeps running and caches its result)."""
+    future = _TELEMATICS_EXECUTOR.submit(contextvars.copy_context().run, fn, *args)
+    return future.result(timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
+
+
+async def _telematics_bundle_or_unavailable(dates: Tuple[str, str], sid: Optional[str]
+                                            ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """(fleet telematics bundle, []) or (None, [warning]) when Wialon failed or did not answer in time."""
+    try:
+        return await _run_wialon_bounded(get_fleet_telematics_bundle, dates[0], dates[1], sid), []
+    except asyncio.TimeoutError:
+        logger.warning("Fuel telematics %s..%s exceeded FUEL_TELEMATICS_WAIT_S; answering without telematics", *dates)
+        return None, [TELEMATICS_TIMEOUT_WARNING]
+    except WialonAPIError as exc:
+        logger.warning("Fuel telematics %s..%s failed; answering without telematics: %s", dates[0], dates[1], exc)
+        return None, [TELEMATICS_FAILED_WARNING]
+
+
+# The fuel trend's reports run as one chain per range: the fleet telematics bundle, then the fleet trips report, one
+# after the other under ONE bounded wait. A request that stops waiting leaves the chain running on the executor, filling
+# both caches in order; a later request for the range joins the running chain, or reads the caches once it finished.
+_TREND_CHAINS: Dict[Tuple[str, str, bool], concurrent.futures.Future] = {}
+_TREND_CHAINS_LOCK = threading.Lock()
+
+
+def _trend_telematics_chain(date_from: str, date_to: str, sid: Optional[str], with_fleet_trips: bool):
+    """The fleet telematics bundle, then (when wanted) the fleet trips report: never at the same time."""
+    bundle = get_fleet_telematics_bundle(date_from, date_to, sid)
+    if with_fleet_trips:
+        get_fleet_trips(date_from, date_to)  # cached for get_units_trips_for_range; a failure there is not raised
+    return bundle
+
+
+def _forget_trend_chain(key, future) -> None:
+    with _TREND_CHAINS_LOCK:
+        if _TREND_CHAINS.get(key) is future:
+            del _TREND_CHAINS[key]
+
+
+async def _trend_telematics_or_unavailable(dates: Tuple[str, str], sid: Optional[str], with_fleet_trips: bool
+                                           ) -> Optional[Dict[str, Any]]:
+    """The bundle once the whole chain finished within FUEL_TELEMATICS_WAIT_S, else None (the chain keeps running)."""
+    key = (dates[0], dates[1], with_fleet_trips)
+    with _TREND_CHAINS_LOCK:
+        future = _TREND_CHAINS.get(key)
+        started = future is None
+        if started:
+            future = _TELEMATICS_EXECUTOR.submit(
+                contextvars.copy_context().run, _trend_telematics_chain, dates[0], dates[1], sid, with_fleet_trips
+            )
+            _TREND_CHAINS[key] = future
+    if started:
+        future.add_done_callback(lambda f: _forget_trend_chain(key, f))
+    waiter = asyncio.wrap_future(future)
+    # A chain that fails after its waiters left is logged by them or the next request, not as "never retrieved"
+    waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+    try:
+        # shield: stopping the wait never cancels the chain, not even while it is still queued on the executor
+        return await asyncio.wait_for(asyncio.shield(waiter),
+                                      timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
+    except asyncio.TimeoutError:
+        logger.warning("Fuel telematics %s..%s exceeded FUEL_TELEMATICS_WAIT_S; answering without telematics", *dates)
+    except WialonAPIError as exc:
+        logger.warning("Fuel telematics %s..%s failed; answering without telematics: %s", dates[0], dates[1], exc)
+    return None
+
+
+def _mark_telematics_unavailable(response: Any, warnings: List[str]) -> None:
+    response.telematics_status = TELEMATICS_UNAVAILABLE
+    response.data_warnings = list(warnings)
+    # Timed out, not failed: the shared report keeps running and is cached, so the client may ask again
+    response.telematics_pending = TELEMATICS_TIMEOUT_WARNING in warnings
+
+
 def _to_tx_item(record: Dict[str, Any]) -> FuelTransactionItem:
     """Build a transaction item, labelling negative-litre rows as refund adjustments."""
     item = FuelTransactionItem(**record)
@@ -198,6 +323,10 @@ def _filter_wialon_matched_transactions(
 async def preview_fuel_import(
     request: Request,
     file: UploadFile = File(..., description="Excel fuel statement file (.xlsx)"),
+    mapping: Optional[str] = Form(None, description="JSON object of the user's column mapping (default: the suggestion)"),
+    reporting_month: Optional[str] = Form(None, description="YYYY-MM for a statement without a transaction date column"),
+    mapping_confirmed: bool = Form(False, description="The user explicitly confirmed the ambiguous column mappings"),
+    extend_to_full_months: bool = Form(False, description="A dated statement covers whole calendar months"),
 ):
     """
     Preview and dynamically map fuel spreadsheet data before database commit.
@@ -214,10 +343,15 @@ async def preview_fuel_import(
             detail=f"Unsupported file format '{file.filename}'. Please upload an Excel spreadsheet (.xlsx).",
         )
 
+    preview_mapping = _parse_mapping_form(mapping) if mapping is not None else None
+
     try:
         file_bytes = await _read_upload(file)
 
-        preview_data = await run_in_threadpool(generate_fuel_preview, file_bytes, file.filename)
+        preview_data = await run_in_threadpool(
+            generate_fuel_preview, file_bytes, file.filename, preview_mapping, reporting_month, mapping_confirmed,
+            extend_to_full_months, _get_bearer_token(request),
+        )
         return preview_data
 
     except FuelImportError as exc:
@@ -242,6 +376,10 @@ async def import_fuel_statement(
     request: Request,
     file: UploadFile = File(..., description="Excel fuel statement file (.xlsx)"),
     mapping: str = Form(..., description="JSON string of confirmed canonical field mappings"),
+    reporting_month: Optional[str] = Form(None, description="YYYY-MM for a statement without a transaction date column"),
+    mapping_confirmed: bool = Form(False, description="The user explicitly confirmed the ambiguous column mappings"),
+    extend_to_full_months: bool = Form(False, description="A dated statement covers whole calendar months"),
+    expected_replace_count: Optional[int] = Form(None, ge=0, description="Rows the preview showed would be replaced; a different count at import time is refused (409)"),
 ):
     """
     Execute full fuel statement ingestion.
@@ -258,16 +396,7 @@ async def import_fuel_statement(
             detail=f"Unsupported file format '{file.filename}'. Please upload an Excel spreadsheet (.xlsx).",
         )
 
-    # Parse JSON mapping string
-    try:
-        confirmed_mapping = json.loads(mapping)
-        if not isinstance(confirmed_mapping, dict):
-            raise ValueError()
-    except Exception:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid mapping parameter. Expected a valid JSON object of canonical-to-header mappings.",
-        )
+    confirmed_mapping = _parse_mapping_form(mapping)
 
     # User ID from authentication middleware
     user = getattr(request.state, "user", None)
@@ -285,6 +414,10 @@ async def import_fuel_statement(
             imported_by,
             bearer_token,
             getattr(request.state, "started", None),
+            reporting_month,
+            mapping_confirmed,
+            extend_to_full_months,
+            expected_replace_count,
         )
         return import_result
 
@@ -339,6 +472,11 @@ async def reconcile_import(request: Request, import_id: int):
     return FuelImportItem(**record)
 
 
+def _auth_key(bearer_token: Optional[str]) -> Optional[str]:
+    """Shared-read key part: reads with the caller's token (no service-role key) may see different rows (RLS)."""
+    return None if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else bearer_token
+
+
 async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
                        login_fn: Optional[Any] = None, units_fn: Optional[Any] = None) -> ScopeContext:
     """
@@ -351,7 +489,7 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
     read_ms = [0.0]
 
     def fetch(f: Dict[str, Any]) -> List[Dict[str, Any]]:
-        auth_key = None if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else bearer_token
+        auth_key = _auth_key(bearer_token)
         started = time.perf_counter()
         try:
             rows = _shared_reads.run(
@@ -374,6 +512,8 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
             login_fn or (lambda: login()),
             units_fn or units,
             lambda: get_fuel_vehicle_identifiers(bearer_token),
+            lambda ids: _shared_reads.run(("coverage", _auth_key(bearer_token), tuple(sorted(ids))),
+                                          lambda: fetch_import_coverage(ids, bearer_token)),
         )
     except FuelDataFetchError as exc:
         # The cause (which page, which failure, how many attempts) is logged by the read itself
@@ -562,6 +702,57 @@ async def get_fuel_analytics_trend(
     return trend
 
 
+MAX_DAILY_RANGE_DAYS = 62
+
+
+@router.get(
+    "/analytics/daily",
+    response_model=DailyFuelResponse,
+    summary="Daily dated fuel with statement coverage",
+    description="Every calendar day of the range with dated litres, cost, purchase and refund counts and its coverage. A day "
+                "without rows is 0 only when a committed dated import confirmed as covering whole months covers it for "
+                "every vehicle in scope (statement_covered); otherwise its values are null. Statement coverage does not "
+                "prove that every supplier's fuel was imported (supplier_completeness). Monthly summaries are never placed on days.",
+)
+async def get_fuel_analytics_daily(
+    request: Request,
+    date_from: str = Query(..., description="Start date (YYYY-MM-DD)"),
+    date_to: str = Query(..., description="End date (YYYY-MM-DD)"),
+    vehicle_identifier: Optional[str] = Query(None, description="Exact vehicle filter"),
+    fuel_type: Optional[str] = Query(None, description="Filter by fuel product type (coverage is judged on every fuel type)"),
+):
+    _validate_range(date_from, date_to)
+    if _period_days(date_from, date_to) > MAX_DAILY_RANGE_DAYS:
+        raise HTTPException(status_code=400, detail=f"The daily view covers at most {MAX_DAILY_RANGE_DAYS} days.")
+    bearer_token = _get_bearer_token(request)
+    # The scope without the fuel-type filter gives the vehicles a day must cover; the filter is applied in memory,
+    # exactly as build_scope applies it, so a fuel-type filter can never turn an uncovered day into a verified zero.
+    base = await _build_scope({"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier,
+                               "fuel_type": None}, bearer_token)
+    part, _ = apply_fuel_type(base.partition, fuel_type)
+    coverage_rows = base.partition.matched + base.partition.summary_overlap
+    warnings: List[str] = []
+    try:
+        meta = await run_in_threadpool(fetch_import_coverage, {r.get("import_id") for r in coverage_rows}, bearer_token)
+    except FuelDataFetchError:
+        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+    if not replace_enabled():
+        warnings.append("Statement coverage cannot be verified: import coverage metadata needs "
+                        "Backend/sql/fuel_import_replacement.sql and FUEL_IMPORT_REPLACE=1. Days without rows are unknown.")
+    result = await run_in_threadpool(
+        calculate_daily_fuel, part.matched, coverage_rows, meta, date_from, date_to, get_uae_now().date(),
+    )
+    result.coverage_metadata_available = replace_enabled()
+    if fuel_type and str(fuel_type).strip() and not part.all_rows():
+        warnings.append(f"No fuel transactions of type '{fuel_type}' in the selected scope.")
+    result.data_warnings = list(base.warnings) + warnings
+    excluded = build_excluded_scope(part, [w for w in base.excluded_scope.get("warnings") or [] if w not in part.warnings])
+    excluded["warnings"] = list(dict.fromkeys(excluded["warnings"]))
+    result.excluded_scope = excluded
+    result.value_classification = classification.DAILY_FUEL
+    return result
+
+
 @router.get(
     "/analytics/vehicles",
     response_model=VehicleAnalyticsResponse,
@@ -735,18 +926,21 @@ async def get_fleet_fuel_efficiency(
     if scope.is_empty or dates is None:
         result = calculate_fleet_efficiency([], {}, [], idle_rate_lph, data_warnings=list(scope.warnings))
     else:
-        bundle = await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
+        # Fuel purchased and cost need no telematics: without them only the Wialon-based values are unknown
+        bundle, unavailable = await _telematics_bundle_or_unavailable(dates, scope.sid)
         result = await run_in_threadpool(
             calculate_fleet_efficiency,
             scope.matched,
-            bundle["by_name"],
+            bundle["by_name"] if bundle else {},
             scope.units,
             idle_rate_lph,
-            telematics_status=bundle["status"],
-            data_warnings=_bundle_warnings(bundle),
-            duplicate_names=bundle["duplicate_names"],
+            telematics_status=bundle["status"] if bundle else TELEMATICS_UNAVAILABLE,
+            data_warnings=_bundle_warnings(bundle) if bundle else unavailable,
+            duplicate_names=bundle["duplicate_names"] if bundle else None,
             mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
         )
+        # Timed out, not failed: the shared report keeps running and is cached, so the client may ask again
+        result.telematics_pending = bundle is None and TELEMATICS_TIMEOUT_WARNING in unavailable
     _apply_excluded_to_efficiency(result, scope)
     result.excluded_scope = _with_period(scope, dates)
     return result
@@ -798,6 +992,7 @@ async def get_vehicles_fuel_efficiency(
                "fuel_type": fuel_type}
     scope = await _build_scope(filters, _get_bearer_token(request))
     bundle = None
+    unavailable: List[str] = []
 
     if status_clean in ("not_tracked", "ambiguous"):
         # Excluded identifiers, listed for review (never in KPIs); no telematics needed.
@@ -807,14 +1002,14 @@ async def get_vehicles_fuel_efficiency(
         dates = _resolve_effective_dates(scope.matched, date_from, date_to)
         items = []
         if not scope.is_empty and dates is not None:
-            bundle = await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
+            bundle, unavailable = await _telematics_bundle_or_unavailable(dates, scope.sid)
             items = await run_in_threadpool(
                 calculate_vehicle_efficiency_records,
                 scope.matched,
-                bundle["by_name"],
+                bundle["by_name"] if bundle else {},
                 scope.units,
                 idle_rate_lph,
-                duplicate_names=bundle["duplicate_names"],
+                duplicate_names=bundle["duplicate_names"] if bundle else None,
                 mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
             )
 
@@ -823,6 +1018,8 @@ async def get_vehicles_fuel_efficiency(
     )
     if bundle is not None:
         _attach_telematics_status(result, bundle, items)
+    elif unavailable:
+        _mark_telematics_unavailable(result, unavailable)
     elif scope.is_empty:
         result.data_warnings = list(scope.warnings)
     result.excluded_scope = scope.excluded_scope
@@ -854,16 +1051,18 @@ async def get_fuel_waste_and_anomalies(
     dates = _resolve_effective_dates(scope.matched, date_from, date_to)
 
     bundle = None
+    unavailable: List[str] = []
     vehicle_items: List[VehicleEfficiencyItem] = []
     if not scope.is_empty and dates is not None:
-        bundle = await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
+        # Refuel anomalies need no telematics; without them idle checks cannot run (unknown, not "no excessive idle")
+        bundle, unavailable = await _telematics_bundle_or_unavailable(dates, scope.sid)
         vehicle_items = await run_in_threadpool(
             calculate_vehicle_efficiency_records,
             scope.matched,
-            bundle["by_name"],
+            bundle["by_name"] if bundle else {},
             scope.units,
             idle_rate_lph,
-            duplicate_names=bundle["duplicate_names"],
+            duplicate_names=bundle["duplicate_names"] if bundle else None,
             mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
         )
 
@@ -876,9 +1075,12 @@ async def get_fuel_waste_and_anomalies(
         summarize_excluded(scope.partition),
         mode,
         _period_days(*dates) if dates else None,
+        scope.excluded_scope.get("overlap_conflicts"),
     )
     if bundle is not None:
         _attach_telematics_status(waste_report, bundle, vehicle_items)
+    elif unavailable:
+        _mark_telematics_unavailable(waste_report, unavailable)
     else:
         waste_report.data_warnings = list(scope.warnings)
     waste_report.excluded_scope = scope.excluded_scope
@@ -963,6 +1165,11 @@ async def get_vehicle_fuel_detail(
             "driving_hours": telematics_detail["driving_duration_hours"],
             "idle_hours": telematics_detail["idle_duration_hours"],
             "engine_hours": telematics_detail["engine_hours"],
+            # Raw seconds when the report gave them, so the idle estimate is not computed from 0.01 h rounded hours.
+            # The per-unit report itself can still differ slightly from the group report used by the rankings.
+            "driving_seconds": telematics_detail.get("driving_seconds"),
+            "idle_seconds": telematics_detail.get("idle_seconds"),
+            "engine_hours_seconds": telematics_detail.get("engine_hours_seconds"),
             "has_telemetry": telematics_detail["has_data"],
         }
     } if raw_records else {}
@@ -1055,18 +1262,11 @@ async def get_fuel_efficiency_trend(
         unit_ids = sorted({int(r["_unit_id"]) for r in scope.matched})
         max_units = get_env_int("FUEL_TREND_MAX_UNITS", 200)
 
-        async def fetch_bundle():
-            try:
-                return await run_in_threadpool(get_fleet_telematics_bundle, dates[0], dates[1], scope.sid)
-            except WialonAPIError:
-                return None
-
-        if len(unit_ids) <= max_units:
-            # The fleet trips report (own session) runs while the bundle's reports do; its result is cached and
-            # read by get_units_trips_for_range below. A failure there only means per-unit reports instead.
-            bundle, _ = await asyncio.gather(fetch_bundle(), run_in_threadpool(get_fleet_trips, dates[0], dates[1]))
-        else:
-            bundle = await fetch_bundle()
+        # The fleet trips report (own session) runs only after the bundle's reports, never alongside them: three
+        # month-long group reports at once exceed Wialon's message-load limit (error 1004). Both stages share one
+        # wait; past it no distance is shown (no per-unit reports queue behind a fleet report still running), and a
+        # fleet trips failure leaves its units 'failed' in get_units_trips_for_range: distance withheld, never 0.
+        bundle = await _trend_telematics_or_unavailable(dates, scope.sid, len(unit_ids) <= max_units)
         if bundle is None:
             # Fuel and cost per period need no telematics: keep them, mark distance unavailable.
             trend_warnings.append("Wialon reports unavailable; distance and efficiency withheld for this request.")
@@ -1075,9 +1275,13 @@ async def get_fuel_efficiency_trend(
                 f"{len(unit_ids)} units exceed FUEL_TREND_MAX_UNITS={max_units}; per-period distance withheld (never partial)."
             )
         else:
-            unit_trips = await run_in_threadpool(
-                get_units_trips_for_range, unit_ids, dates[0], dates[1], scope.sid, scope.units
-            )
+            # Units the fleet report cannot cover get one report each, serially: bounded like the reports above
+            try:
+                unit_trips = await _run_wialon_bounded(
+                    get_units_trips_for_range, unit_ids, dates[0], dates[1], scope.sid, scope.units
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Fuel unit trips %s..%s exceeded FUEL_TELEMATICS_WAIT_S; trend distance withheld", *dates)
         result = await run_in_threadpool(
             calculate_efficiency_trend,
             scope.matched,
@@ -1087,6 +1291,7 @@ async def get_fuel_efficiency_trend(
             duplicate_names=(bundle or {}).get("duplicate_names"),
             unit_trips=unit_trips,
             mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
+            mixed_fuel_unit_months=scope.mixed_fuel_unit_months,
         )
         trend_warnings = list(result.data_warnings) + trend_warnings
         if bundle is not None:

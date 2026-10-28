@@ -107,3 +107,13 @@ export function trendNotice(res) {
     if (status === "complete" && warnings.length === 0 && !unitsFailed && !mismatches) return null
     return { status, warnings, unitsFailed, mismatches }
 }
+
+// Wialon reports for the period did not answer within the server's wait but are still running there (shared, and
+// cached when they finish): the page asks again a bounded number of times so the real values replace the
+// placeholders. A failure (telematics_pending false) is never retried silently; it stays "unavailable".
+export const TELEMATICS_RETRY_DELAY_MS = 3000
+export const TELEMATICS_MAX_RETRIES = 6
+
+export function shouldRetryTelematics(response, retriesSoFar) {
+    return Boolean(response?.telematics_pending) && retriesSoFar < TELEMATICS_MAX_RETRIES
+}

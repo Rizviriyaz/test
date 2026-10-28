@@ -12,6 +12,9 @@ from fastapi.testclient import TestClient
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# These tests cover the import with FUEL_IMPORT_REPLACE off (the replacement path has its own suites); a local
+# .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
+os.environ["FUEL_IMPORT_REPLACE"] = ""
 
 from app.main import app
 from app.fuel.db import build_fingerprint
@@ -200,12 +203,12 @@ def run_phase2_tests():
     # Test 4: Invalid Required Row (Bad date / missing vehicle / negative litres)
     print("\n--- Test 4: Invalid Required Rows Handling ---")
     excel_bad_rows = create_test_excel(
-        headers=["Date", "Vehicle", "Litres"],
+        headers=["Date", "Vehicle", "Litres", "Amount"],
         rows=[
-            ["2026-03-05", "AUH 44120", "80.0"],       # Valid
-            ["NOT_A_DATE", "AUH 44120", "80.0"],       # Invalid date
-            ["2026-03-06", "", "80.0"],                # Missing vehicle
-            ["2026-03-07", "AUH 44120", "-15.0"],      # Negative litres: refund adjustment (Phase 1)
+            ["2026-03-05", "AUH 44120", "80.0", "248.00"],       # Valid
+            ["NOT_A_DATE", "AUH 44120", "80.0", "248.00"],       # Invalid date
+            ["2026-03-06", "", "80.0", "248.00"],                # Missing vehicle
+            ["2026-03-07", "AUH 44120", "-15.0", "-46.50"],      # Negative litres: rejected (litres must be > 0)
         ]
     )
     with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
@@ -217,16 +220,17 @@ def run_phase2_tests():
         res_bad = execute_fuel_import(
             file_bytes=excel_bad_rows,
             file_name="mixed_validity.xlsx",
-            confirmed_mapping={"transaction_date": "Date", "vehicle_identifier": "Vehicle", "litres": "Litres"},
+            confirmed_mapping={"transaction_date": "Date", "vehicle_identifier": "Vehicle", "litres": "Litres",
+                               "total_cost": "Amount"},
             imported_by="user-uuid-1",
         )
         print(f"Import status: {res_bad.status}, imported: {res_bad.rows_imported}, failed: {res_bad.rows_failed}")
         assert res_bad.status == "completed_with_errors"
-        # Negative litres are now stored as a signed refund adjustment instead of being rejected
-        assert res_bad.rows_imported == 2
-        assert res_bad.rows_refund == 1
-        assert res_bad.rows_failed == 2
-        print("[PASS] Invalid rows correctly isolated without destroying valid transactions; refund kept as adjustment.")
+        # Negative litres are rejected like the other invalid rows (zero would be kept as a genuine 0)
+        assert res_bad.rows_imported == 1
+        assert res_bad.rows_refund == 0
+        assert res_bad.rows_failed == 3
+        print("[PASS] Invalid rows (incl. negative litres) isolated without destroying valid transactions.")
 
     # Test 5 & 6 & 7: Deduplication (Internal, External, Legitimate Multi-Refuel)
     print("\n--- Test 5, 6, 7: Duplicate Detection & Multi-Refuel Validation ---")
@@ -261,9 +265,10 @@ def run_phase2_tests():
             imported_by="user-uuid-1",
         )
         print(f"Dupe import status: {res_dupe.status}, imported: {res_dupe.rows_imported}, duplicate: {res_dupe.rows_duplicate}")
-        assert res_dupe.rows_imported == 1  # Only Row B imported
-        assert res_dupe.rows_duplicate == 2 # Row A (db dupe) + Row C (file dupe)
-        print("[PASS] External & internal duplicates filtered while legitimate multi-refuels preserved.")
+        assert res_dupe.rows_imported == 2  # Row B and its identical repeat Row C (repeated refuels are kept)
+        assert res_dupe.rows_duplicate == 1  # Row A (already stored)
+        assert res_dupe.rows_identical_in_file == 1
+        print("[PASS] Stored duplicates filtered; identical rows within the file kept as repeated refuels.")
 
     # Test 8 & 9 & 10: Status transitions (completed, completed_with_errors, failed)
     print("\n--- Test 8, 9, 10: Import Status Verifications ---")
@@ -272,8 +277,8 @@ def run_phase2_tests():
 
     # Failed import: All rows unparseable
     excel_all_fail = create_test_excel(
-        headers=["Date", "Vehicle", "Litres"],
-        rows=[["bad_date", "v1", "bad_litres"]]
+        headers=["Date", "Vehicle", "Litres", "Amount"],
+        rows=[["bad_date", "v1", "bad_litres", "10"]]
     )
     with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", side_effect=mock_create_import_record), \
          patch("app.fuel.importer.update_fuel_import_record", side_effect=mock_update_import_record), \
@@ -284,7 +289,8 @@ def run_phase2_tests():
         res_fail = execute_fuel_import(
             file_bytes=excel_all_fail,
             file_name="failed.xlsx",
-            confirmed_mapping={"transaction_date": "Date", "vehicle_identifier": "Vehicle", "litres": "Litres"},
+            confirmed_mapping={"transaction_date": "Date", "vehicle_identifier": "Vehicle", "litres": "Litres",
+                               "total_cost": "Amount"},
             imported_by="user-uuid-1",
         )
         print(f"Failed import status: {res_fail.status}, error_message: {res_fail.error_message}")

@@ -16,7 +16,7 @@ const SORT_OPTIONS = [
     { label: "Fuel Expenditure (AED)", value: "cost" },
     { label: "Distance Traveled (km)", value: "distance" },
     { label: "Cost Per km (AED/km)", value: "cost_per_km" },
-    { label: "Refuel Count (Tx)", value: "transactions" },
+    { label: "Statement Rows", value: "transactions" },
     { label: "Vehicle Identifier", value: "vehicle_identifier" },
 ]
 
@@ -37,6 +37,8 @@ export default function VehicleLeaderboard({
     setPage,
     pageSize,
     onSelectVehicle,
+    // Monthly-summary rows in the period scope (excluded_scope.monthly_summary_rows): counts are rows, not refuels
+    monthlySummaryRows = 0,
 }) {
     const [expandedIds, setExpandedIds] = useState(new Set())
 
@@ -141,7 +143,7 @@ export default function VehicleLeaderboard({
                     >
                         <option value="">All Vehicles</option>
                         <option value="matched">Active Telemetry</option>
-                        <option value="no_distance_data">Zero Distance</option>
+                        <option value="no_distance_data">No Distance Data</option>
                     </select>
                 </div>
             </div>
@@ -198,7 +200,9 @@ export default function VehicleLeaderboard({
 
                                 // Honest data status
                                 const hasValidEfficiency = v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
-                                const isZeroDistance = v.status === "no_distance_data" || v.distance_km === 0
+                                // A recorded 0 km and an unknown distance (no_distance_data with distance_km null) are different
+                                const isZeroDistance = v.distance_km === 0
+                                const isDistanceUnknown = v.status === "no_distance_data" && (v.distance_km === null || v.distance_km === undefined)
                                 const isUntracked = v.status === "not_tracked"
 
                                 const isTopRanked = sortBy === "efficiency" && rankNum <= 3 && hasValidEfficiency
@@ -273,7 +277,9 @@ export default function VehicleLeaderboard({
                                                         ? "Insufficient km"
                                                         : isZeroDistance
                                                             ? "Zero distance"
-                                                            : isUntracked
+                                                            : isDistanceUnknown
+                                                                ? "Distance unknown"
+                                                                : isUntracked
                                                                 ? "No Wialon unit"
                                                                 : "—"}
                                                 </span>
@@ -385,7 +391,7 @@ export default function VehicleLeaderboard({
                                         <div>
                                             <span className="text-slate-400 block">Transactions</span>
                                             <span className="font-semibold text-slate-800 tabular-nums">
-                                                {v.transaction_count != null ? `${v.transaction_count} refuels` : "—"}
+                                                {v.transaction_count != null ? `${v.transaction_count} ${monthlySummaryRows > 0 ? "rows" : "refuels"}` : "—"}
                                             </span>
                                         </div>
                                         <div>

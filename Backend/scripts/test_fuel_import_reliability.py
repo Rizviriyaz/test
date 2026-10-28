@@ -33,6 +33,9 @@ import requests
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# These tests cover the import with FUEL_IMPORT_REPLACE off (the replacement path has its own suites); a local
+# .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
+os.environ["FUEL_IMPORT_REPLACE"] = ""
 
 from test_fuel_import_integrity import AUTH, FAKE_USER, MAPPING, make_xlsx  # noqa: E402
 from test_fuel_scope import run  # noqa: E402
@@ -421,70 +424,18 @@ def refund_rows(n):
              -round((20 + i) * 3.0, 2), f"RF-{i}", None] for i in range(n)]
 
 
-def test_refund_counts_end_to_end_both_flags():
-    rows = statement_rows(2) + refund_rows(3)  # purchases: source rows 2-3; refunds: 4-6
-    # FUEL_SCHEMA_V2 on: a concurrent import stored one refund first; the index skips it -> duplicate, not failed
-    fake = FakeSupabase()
-    fake.tx_actions = ["ok", "concurrent_duplicate"]
-    res = run_import(fake, rows, v2=True)
-    assert (res.rows_imported, res.rows_refund, res.rows_duplicate, res.rows_failed) == (4, 2, 1, 0), res
-    assert not res.failed_row_details, res.failed_row_details
-    assert_history_matches(fake, res)
-
-    # FUEL_SCHEMA_V2 off: refunds rejected -> exactly the 3 refund rows are failed, purchases unaffected
-    fake = FakeSupabase()
-    fake.tx_actions = ["ok", "http400"]
-    res = run_import(fake, rows)
-    assert (res.rows_imported, res.rows_refund, res.rows_failed) == (2, 0, 3), res
-    assert sorted(d["source_row"] for d in res.failed_row_details) == [4, 5, 6], res.failed_row_details
-    assert all("negative litres" in d["reason"] for d in res.failed_row_details)
-    assert_history_matches(fake, res)
-
-    # FUEL_SCHEMA_V2 off: refund outcome unknown -> unverified, not failed, no rejection details
-    fake = FakeSupabase()
-    fake.tx_actions = ["ok", "timeout_before_write"]
-    res = run_import(fake, rows)
-    assert (res.rows_imported, res.rows_failed, res.rows_unverified) == (2, 0, 3), res
-    assert not res.failed_row_details, res.failed_row_details
-    assert_history_matches(fake, res)
-    print("[PASS] Refunds end to end: index-skipped refund is a duplicate (V2 on); rejected refunds name only refund rows; "
-          "unknown outcome is unverified, not failed (V2 off).")
-
-
-def test_refund_partial_insert_not_counted_failed_both_flags():
-    # Insert functions report a partly stored refund group: 1 stored, 1 rejected, 1 unverified (V2 off) or
-    # 1 stored, 1 skipped by the index, 1 rejected (V2 on). Only the rejected one is failed.
-    rows = statement_rows(2) + refund_rows(3)
-
-    def v1_insert(transactions, batch_size=100, bearer_token=None, deadline=None, outcome=None):
-        if transactions[0]["litres"] > 0:
-            return len(transactions), []
-        outcome.update(unverified_rows=1, failed_rows=1, failed_source_rows=[(5, "rejected by the database: HTTP 400")])
-        return 1, ["Batch 1 (source rows 4-6) partly failed"]
-
-    def v2_insert(group, batch_size=100, bearer_token=None, deadline=None, outcome=None):
-        if group[0]["litres"] > 0:
-            return len(group), 0, []
-        outcome.update(failed_rows=1, failed_source_rows=[(6, "not stored after 3 attempt(s) (ConnectTimeout)")])
-        return 1, 1, ["Batch 1 (source rows 4-6) partly failed"]
-
+def test_negative_litres_rejected_before_insert_both_flags():
+    # Litres must be >= 0: negative rows fail validation and are never sent, with either schema flag
+    rows = statement_rows(2) + refund_rows(3)  # purchases: source rows 2-3; negative rows: 4-6
     for v2 in (False, True):
-        update = MagicMock(return_value=True)
-        with patch.dict(os.environ, {"FUEL_SCHEMA_V2": "1" if v2 else ""}), \
-             patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", return_value=900), \
-             patch("app.fuel.importer.update_fuel_import_record", update), \
-             patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=v1_insert), \
-             patch("app.fuel.importer.insert_fuel_transactions_ignore_duplicates", side_effect=v2_insert), \
-             patch("app.fuel.importer.find_import_by_sha256", return_value=None), \
-             patch("app.fuel.importer.fetch_import_rows", side_effect=fuel_db.FuelDataFetchError("re-count unavailable")), \
-             patch("app.fuel.importer.fetch_existing_transaction_fingerprints", return_value=set()):
-            res = execute_fuel_import(make_xlsx(rows), "s.xlsx", MAPPING, FAKE_USER["id"])
-        assert res.rows_refund == 1 and res.rows_imported == 3 and res.rows_failed == 1, (v2, res)
-        assert res.rows_duplicate == (1 if v2 else 0) and res.rows_unverified == (0 if v2 else 1), (v2, res)
-        assert [d["source_row"] for d in res.failed_row_details] == [6 if v2 else 5], res.failed_row_details
-        assert res.rows_found == res.rows_imported + res.rows_duplicate + res.rows_failed + res.rows_unverified
-        assert update.call_args.kwargs["updates"]["rows_failed"] == 1
-    print("[PASS] Partly stored refunds: inserted and index-skipped refunds are not failed; only the failed row is reported (both flags).")
+        fake = FakeSupabase()
+        res = run_import(fake, rows, v2=v2)
+        assert (res.rows_imported, res.rows_refund, res.rows_failed, res.rows_unverified) == (2, 0, 3, 0), (v2, res)
+        assert sorted(d["source_row"] for d in res.failed_row_details) == [4, 5, 6], res.failed_row_details
+        assert all("cannot be negative" in d["reason"] for d in res.failed_row_details)
+        assert all(t["litres"] > 0 for t in fake.tx), "no negative row reached the database"
+        assert_history_matches(fake, res)
+    print("[PASS] Negative litres are rejected during validation (both flags); purchases stored; nothing negative sent.")
 
 
 # ─── Terminal status and resume ────────────────────────────────────────────────
@@ -721,7 +672,8 @@ def test_reported_incident_reconcile_then_reimport():
     # Shape of import #17: 2,341 sheet rows (6 invalid), 2,235 stored, record left 'processing' by the interrupted run
     fake = FakeSupabase()
     good = statement_rows(2335)
-    bad = [[(BASE + timedelta(days=5, minutes=i)).strftime("%Y-%m-%d %H:%M:%S"), "AUH 44120", 0, 3.0, 0, f"BAD-{i}", 1]
+    # Invalid rows: negative litres (zero litres are a genuine 0 and would be imported)
+    bad = [[(BASE + timedelta(days=5, minutes=i)).strftime("%Y-%m-%d %H:%M:%S"), "AUH 44120", -1, 3.0, 0, f"BAD-{i}", 1]
            for i in range(6)]
     _seed(fake, 17, 2235, status="processing", rows_found=2341)
     rec = _reconcile(fake, 17)
@@ -870,8 +822,7 @@ TESTS = [
     test_flag_on_uncertain_outcomes_resend_safely,
     test_unreadable_readback_never_resends,
     test_v2_on_conflict_readback_counts_inserted_not_duplicate,
-    test_refund_counts_end_to_end_both_flags,
-    test_refund_partial_insert_not_counted_failed_both_flags,
+    test_negative_litres_rejected_before_insert_both_flags,
     test_time_budget_terminal_status_then_resume_without_duplicates,
     test_time_budget_starts_at_request_entry_and_bounds_lock_wait,
     test_worst_case_every_call_hangs_still_ends_within_request_limit,

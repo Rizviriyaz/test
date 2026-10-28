@@ -12,6 +12,7 @@ import VehicleStatusBadge from "./VehicleStatusBadge"
 import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber, idleSessionsLabel } from "./telemetryFormat"
 import ClassificationBadge from "./ClassificationBadge"
 import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels"
+import { transactionDateLabel } from "./fuelImportState"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -382,7 +383,7 @@ export default function VehicleFuelDetailModal({
                                                     txns.map((t) => (
                                                         <tr key={t.id} className="hover:bg-slate-50/60 transition-colors">
                                                             <td className="px-3.5 py-2.5 font-mono text-[11px] font-semibold text-slate-800 whitespace-nowrap">
-                                                                {t.transaction_date}
+                                                                {transactionDateLabel(t)}
                                                             </td>
                                                             <td className="px-3.5 py-2.5 text-slate-700 whitespace-nowrap">
                                                                 {t.station_name || "—"}

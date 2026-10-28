@@ -27,6 +27,7 @@ const operationalPages = {
 // Main Fleet Dashboard Pages
 const Dashboard = lazy(operationalPages.dashboard)
 const FuelPerformance = lazy(operationalPages.fuel)
+const FuelDailyDashboard = lazy(() => import("./pages/FuelDailyDashboard"))
 
 // Additional Fleet Operations Pages
 const Tracking = lazy(operationalPages.tracking)
@@ -82,6 +83,14 @@ function App() {
                                 element={
                                     <ProtectedRoute>
                                         <FuelPerformance />
+                                    </ProtectedRoute>
+                                }
+                            />
+                            <Route
+                                path="/fuel/daily"
+                                element={
+                                    <ProtectedRoute>
+                                        <FuelDailyDashboard />
                                     </ProtectedRoute>
                                 }
                             />

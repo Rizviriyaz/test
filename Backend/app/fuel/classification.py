@@ -18,6 +18,10 @@ FLEET_EFFICIENCY = {
     "total_litres": DERIVED,  # net of refund adjustments
     "total_cost": DERIVED,
     "transaction_count": RECORDED,
+    "dated_purchase_count": RECORDED,
+    "refund_count": RECORDED,
+    "monthly_summary_rows": RECORDED,
+    "idle_basis_litres": DERIVED,
     "tracked_litres": DERIVED,
     "tracked_cost": DERIVED,
     "total_distance_km": RECORDED,
@@ -69,7 +73,17 @@ FUEL_SUMMARY = {
     "refund_litres": RECORDED,
     "refund_cost": RECORDED,
     "transaction_count": RECORDED,
+    "dated_purchase_count": RECORDED,
+    "monthly_summary_rows": RECORDED,
     "average_unit_price": DERIVED,
+}
+
+DAILY_FUEL = {
+    "litres": DERIVED,
+    "cost": DERIVED,
+    "dated_purchase_count": RECORDED,
+    "refund_count": RECORDED,
+    "transactions": RECORDED,
 }
 
 WASTE = {

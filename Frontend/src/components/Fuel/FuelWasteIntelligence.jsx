@@ -33,6 +33,8 @@ const CATEGORY_TABS = [
     { id: "odometer_inconsistency", label: "Odometer Issues" },
     { id: "duplicate_candidate", label: "Potential Duplicates" },
     { id: "unmatched_vehicle", label: "Unmatched GPS" },
+    // Matched vehicles whose monthly summary and dated rows overlap without confirmed full-month coverage
+    { id: "summary_dated_overlap", label: "Statement Overlaps" },
 ]
 
 function isExcludedIdentifierItem(item) {

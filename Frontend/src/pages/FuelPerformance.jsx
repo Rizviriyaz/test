@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { createPortal } from "react-dom"
+import { Link } from "react-router-dom"
 import {
     UploadCloud,
     AlertTriangle,
@@ -7,46 +8,43 @@ import {
     CheckCircle2,
     X,
     Loader2,
-    History,
-    RefreshCw,
-    BarChart3,
-    Truck,
-    Flame,
+    CalendarDays,
+    CalendarRange,
+    Info,
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
-import { ErrorBanner } from "../components/Common/StateViews"
+import { EmptyState, ErrorBanner } from "../components/Common/StateViews"
 import { useFuelFilters } from "../context/useFuelFilters"
 import {
     getFleetEfficiency,
     getVehicleEfficiencyList,
     previewFuelImport,
     executeFuelImport,
-    getFuelImports,
-    reconcileFuelImport,
-    getFuelWaste,
+    getFuelTrend,
+    getFuelDaily,
     clearClientCache,
 } from "../api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
 import KpiCards from "../components/Fuel/KpiCards"
 import DrivingVsIdlingChart from "../components/Fuel/DrivingVsIdlingChart"
 import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
-import FuelTrendChart from "../components/Fuel/FuelTrendChart"
-import FuelWasteIntelligence from "../components/Fuel/FuelWasteIntelligence"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
-import ExcludedFuelPanel from "../components/Fuel/ExcludedFuelPanel"
-import { skippedRowsLabel } from "../components/Fuel/fuelLabels"
+import { excludedSummary, skippedRowsLabel } from "../components/Fuel/fuelLabels"
+import FuelImportControls from "../components/Fuel/FuelImportControls"
+import { canConfirmImport, importOptions, isReportingMonth, mappingForImport, showColumnChoices } from "../components/Fuel/fuelImportState"
+import { dailySearch, datedDailyAvailability, datedTransactionCount, isCurrentMonth, latestMonthWithData, monthLabel } from "../components/Fuel/fuelPeriod"
 import { fuelVehicleListParams } from "../utils/fleetRules"
-import { formatUAEDateTime } from "../utils/datetime"
+import { getUAETodayStr } from "../utils/datetime"
+import { TELEMATICS_RETRY_DELAY_MS, shouldRetryTelematics } from "../components/Fuel/telemetryFormat"
+
+const NO_IMPORT_CHOICES = { mapping: null, reportingMonth: "", mappingConfirmed: false, extendToFullMonths: false }
 
 export default function FuelPerformance() {
-    const { queryParams, periodLabel, setPeriod } = useFuelFilters()
-
-    // Main Tabs State: 'overview' | 'vehicles' | 'waste'
-    const [activeTab, setActiveTab] = useState("overview")
+    const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, fuelType } = useFuelFilters()
 
     // Configurable Telematics Idle Rate (Litres/Hour)
     const [idleRate, setIdleRate] = useState(2.0)
-    const [idleThreshold, setIdleThreshold] = useState(5.0)
+    const [idleThreshold] = useState(5.0)
 
     // Requests use the debounced rate, so dragging the slider does not fire a request per 0.1 L/h step
     const [idleRateQuery, setIdleRateQuery] = useState(2.0)
@@ -58,18 +56,18 @@ export default function FuelPerformance() {
     // Latest-request guards: a slower earlier response must never overwrite a newer one
     const efficiencyRequestIdRef = useRef(0)
     const rankingsRequestIdRef = useRef(0)
-    const attentionRequestIdRef = useRef(0)
-    const wasteRequestIdRef = useRef(0)
+    const idleWastersRequestIdRef = useRef(0)
 
     // Fleet Efficiency & Overview Metrics
     const [efficiency, setEfficiency] = useState(null)
     const [loadingEfficiency, setLoadingEfficiency] = useState(true)
     const [overviewError, setOverviewError] = useState(null)
 
-    // Fuel Waste & Anomalies
-    const [wasteData, setWasteData] = useState(null)
-    const [loadingWaste, setLoadingWaste] = useState(true)
-    const [wasteError, setWasteError] = useState(null)
+
+    // Fleet-wide idle fuel ranking (independent of the leaderboard's page, search, sort and status)
+    const [idleWasters, setIdleWasters] = useState([])
+    const [loadingIdleWasters, setLoadingIdleWasters] = useState(true)
+    const [idleWastersError, setIdleWastersError] = useState(null)
 
     // Rankings & Leaderboard State
     const [sortBy, setSortBy] = useState("efficiency")
@@ -82,34 +80,34 @@ export default function FuelPerformance() {
     const [loadingRankings, setLoadingRankings] = useState(true)
     const [rankingsError, setRankingsError] = useState(null)
 
+
+    // Latest month with data, looked up only when the selected month is empty: idle | loading | found | none | error
+    const [latestMonth, setLatestMonth] = useState({ status: "idle", month: null })
+
     // Vehicle Detail Modal State
     const [selectedVehicleDetail, setSelectedVehicleDetail] = useState(null)
 
     // Excel Import Modal State
     const [isImportModalOpen, setIsImportModalOpen] = useState(false)
-    const [importModalTab, setImportModalTab] = useState("upload") // "upload" | "history"
     const [selectedFile, setSelectedFile] = useState(null)
     const [isDragging, setIsDragging] = useState(false)
     const [previewLoading, setPreviewLoading] = useState(false)
     const [previewData, setPreviewData] = useState(null)
     const [previewError, setPreviewError] = useState(null)
+    // User choices re-sent with every preview and with the import: column mapping, reporting month, confirmations
+    const [importChoices, setImportChoices] = useState(NO_IMPORT_CHOICES)
     const [importing, setImporting] = useState(false)
     const [importResult, setImportResult] = useState(null)
-    const [dataVersion, setDataVersion] = useState(0)
     const [importError, setImportError] = useState(null)
-    const [history, setHistory] = useState([])
-    const [loadingHistory, setLoadingHistory] = useState(false)
-    const [historyError, setHistoryError] = useState(null)
-    const [reconcilingId, setReconcilingId] = useState(null)
-    const [reconcileError, setReconcileError] = useState(null)
 
     const fileInputRef = useRef(null)
 
     // 1. Fetch Fleet Efficiency Metrics
-    const loadEfficiencyData = useCallback(async () => {
+    // `silent`: a background refresh (telematics retry) keeps the figures on screen instead of a loading state
+    const loadEfficiencyData = useCallback(async ({ silent = false } = {}) => {
         const requestId = ++efficiencyRequestIdRef.current
         try {
-            setLoadingEfficiency(true)
+            if (!silent) setLoadingEfficiency(true)
             setOverviewError(null)
             const res = await getFleetEfficiency({
                 ...queryParams,
@@ -126,37 +124,11 @@ export default function FuelPerformance() {
         }
     }, [queryParams, idleRateQuery])
 
-    // 2. Fetch Fuel Waste & Anomaly Intelligence
-    const loadWasteData = useCallback(async () => {
-        const requestId = ++wasteRequestIdRef.current
-        try {
-            setLoadingWaste(true)
-            setWasteError(null)
-            const res = await getFuelWaste({
-                ...queryParams,
-                idle_rate_lph: idleRateQuery,
-                idle_threshold_hours: idleThreshold,
-            })
-            if (requestId !== wasteRequestIdRef.current) return
-            setWasteData(res)
-            setWasteError(null)
-        } catch (err) {
-            if (requestId !== wasteRequestIdRef.current) return
-            console.error("Waste intelligence load error:", err)
-            setWasteData(null)
-            setWasteError(err.message || "Failed to load fuel waste intelligence report.")
-        } finally {
-            if (requestId === wasteRequestIdRef.current) {
-                setLoadingWaste(false)
-            }
-        }
-    }, [queryParams, idleRateQuery, idleThreshold])
-
     // 3. Fetch Vehicle Rankings
-    const loadRankingsData = useCallback(async () => {
+    const loadRankingsData = useCallback(async ({ silent = false } = {}) => {
         const requestId = ++rankingsRequestIdRef.current
         try {
-            setLoadingRankings(true)
+            if (!silent) setLoadingRankings(true)
             setRankingsError(null)
             const res = await getVehicleEfficiencyList({
                 page,
@@ -180,50 +152,67 @@ export default function FuelPerformance() {
         }
     }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
 
-    // 4. Fetch Vehicles Efficiency Outliers (Attention Required & Best Performers)
-    const loadAttentionData = useCallback(async () => {
-        const requestId = ++attentionRequestIdRef.current
+    // 4. Fetch the fleet-wide idle fuel ranking: period and global filters only, never the leaderboard's
+    // page, search, sort or status
+    const loadIdleWasters = useCallback(async ({ silent = false } = {}) => {
+        const requestId = ++idleWastersRequestIdRef.current
         try {
-            const [worstRes, bestRes] = await Promise.all([
-                getVehicleEfficiencyList({
-                    page: 1,
-                    page_size: 4,
-                    sort_by: "efficiency",
-                    sort_order: "desc",
-                    status: "matched",
-                    idle_rate_lph: idleRateQuery,
-                    ...fuelVehicleListParams(queryParams),
-                }),
-                getVehicleEfficiencyList({
-                    page: 1,
-                    page_size: 4,
-                    sort_by: "efficiency",
-                    sort_order: "asc",
-                    status: "matched",
-                    idle_rate_lph: idleRateQuery,
-                    ...fuelVehicleListParams(queryParams),
-                }),
-            ])
-            if (requestId !== attentionRequestIdRef.current) return
-            // Verified that fuel_efficiency_l_per_100km !== null is kept intact
-            const _worst = (worstRes?.data || []).filter(
-                (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
-            )
-            const _best = (bestRes?.data || []).filter(
-                (v) => v.fuel_efficiency_l_per_100km !== null && v.fuel_efficiency_l_per_100km !== undefined
-            )
+            if (!silent) setLoadingIdleWasters(true)
+            setIdleWastersError(null)
+            const res = await getVehicleEfficiencyList({
+                page: 1,
+                page_size: 5,
+                sort_by: "estimated_idle_fuel",
+                sort_order: "desc",
+                // No status filter: vehicles with known idle hours but unknown distance (no_distance_data) carry the
+                // same idle estimate as the KPI; unknown estimates are dropped below, never ranked as 0
+                idle_rate_lph: idleRateQuery,
+                ...fuelVehicleListParams(queryParams),
+            })
+            if (requestId !== idleWastersRequestIdRef.current) return
+            // Without Wialon telematics there is no ranking: say so rather than "no idle fuel"
+            if (res?.telematics_status === "unavailable") {
+                setIdleWasters([])
+                setIdleWastersError(res.data_warnings?.[0] || "Wialon telematics unavailable.")
+                return
+            }
+            // Unknown estimates are not ranked
+            setIdleWasters((res?.data || []).filter(
+                (v) => v.estimated_idle_fuel_litres !== null && v.estimated_idle_fuel_litres !== undefined
+            ))
         } catch (err) {
-            if (requestId !== attentionRequestIdRef.current) return
-            console.warn("Attention load error:", err)
+            if (requestId !== idleWastersRequestIdRef.current) return
+            setIdleWasters([])
+            setIdleWastersError(err.message || "Failed to load the idle fuel ranking.")
+        } finally {
+            if (requestId === idleWastersRequestIdRef.current) setLoadingIdleWasters(false)
         }
     }, [queryParams, idleRateQuery])
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
         loadEfficiencyData()
-        loadWasteData()
-        loadAttentionData()
-    }, [loadEfficiencyData, loadWasteData, loadAttentionData, idleThreshold])
+        loadIdleWasters()
+    }, [loadEfficiencyData, loadIdleWasters])
+
+    // Wialon reports still running on the server (telematics_pending): ask again, silently and a bounded number of
+    // times, so real distance, driving and idle values replace the placeholders. The server runs one report per period
+    // and caches it, so a retry joins it instead of starting another. Counted per filter set.
+    const telematicsKey = `${new URLSearchParams(queryParams).toString()}|${idleRateQuery}`
+    const [telematicsRetry, setTelematicsRetry] = useState({ key: null, count: 0 })
+    const telematicsRetries = telematicsRetry.key === telematicsKey ? telematicsRetry.count : 0
+    const telematicsPending = !loadingEfficiency && shouldRetryTelematics(efficiency, telematicsRetries)
+    useEffect(() => {
+        if (!telematicsPending) return undefined
+        const timer = setTimeout(() => {
+            setTelematicsRetry({ key: telematicsKey, count: telematicsRetries + 1 })
+            clearClientCache("/api/fuel/analytics/efficiency")
+            loadEfficiencyData({ silent: true })
+            loadRankingsData({ silent: true })
+            loadIdleWasters({ silent: true })
+        }, TELEMATICS_RETRY_DELAY_MS)
+        return () => clearTimeout(timer)
+    }, [telematicsPending, telematicsKey, telematicsRetries, loadEfficiencyData, loadRankingsData, loadIdleWasters])
 
     const [pageFilters, setPageFilters] = useState(queryParams)
     if (pageFilters !== queryParams) {
@@ -236,21 +225,6 @@ export default function FuelPerformance() {
         loadRankingsData()
     }, [loadRankingsData])
 
-    // Load Import History when modal is opened
-    const loadImportHistory = async () => {
-        try {
-            setLoadingHistory(true)
-            setHistoryError(null)
-            const res = await getFuelImports(10, 0)
-            setHistory(Array.isArray(res?.imports) ? res.imports : [])
-        } catch (err) {
-            setHistory([])
-            setHistoryError(err?.message || "Could not load import history.")
-        } finally {
-            setLoadingHistory(false)
-        }
-    }
-
     useEffect(() => {
         if (!isImportModalOpen) return undefined
         const onKey = (e) => { if (e.key === "Escape") setIsImportModalOpen(false) }
@@ -258,24 +232,8 @@ export default function FuelPerformance() {
         return () => document.removeEventListener("keydown", onKey)
     }, [isImportModalOpen])
 
-    const handleReconcile = async (importId) => {
-        try {
-            setReconcilingId(importId)
-            setReconcileError(null)
-            await reconcileFuelImport(importId)
-            await loadImportHistory()
-            setDataVersion((n) => n + 1)
-        } catch (err) {
-            setReconcileError(err?.message || "Could not reconcile the import.")
-        } finally {
-            setReconcilingId(null)
-        }
-    }
-
-    const openImportModal = (tab = "upload") => {
-        setImportModalTab(tab)
+    const openImportModal = () => {
         setIsImportModalOpen(true)
-        loadImportHistory()
     }
 
     const handleFileChosen = async (file) => {
@@ -286,14 +244,19 @@ export default function FuelPerformance() {
         }
 
         setSelectedFile(file)
-        setPreviewError(null)
         setPreviewData(null)
         setImportResult(null)
         setImportError(null)
+        setImportChoices(NO_IMPORT_CHOICES)
+        runPreview(file, NO_IMPORT_CHOICES)
+    }
 
+    // Re-runs the backend preview whenever the file, a column choice or the reporting month changes
+    const runPreview = async (file, choices) => {
+        setPreviewError(null)
         try {
             setPreviewLoading(true)
-            const preview = await previewFuelImport(file)
+            const preview = await previewFuelImport(file, choices)
             setPreviewData(preview)
         } catch (err) {
             console.error("Preview error:", err)
@@ -303,227 +266,226 @@ export default function FuelPerformance() {
         }
     }
 
+    const updateImportChoices = (changes, refreshPreview = true) => {
+        if (!selectedFile || !previewData) return
+        const next = { ...importChoices, ...changes }
+        setImportChoices(next)
+        if (refreshPreview) runPreview(selectedFile, next)
+    }
+
+    const handleMappingChange = (field, header) => {
+        const mapping = { ...(previewData.active_mapping || previewData.suggested_mapping || {}), [field]: header }
+        // Choosing a column is an explicit decision; a new choice must be confirmed again
+        updateImportChoices({ mapping, mappingConfirmed: false, ...(field === "transaction_date" && header ? { reportingMonth: "" } : {}) })
+    }
+
     const handleConfirmImport = async () => {
         if (!selectedFile || !previewData) return
 
         try {
             setImporting(true)
             setImportError(null)
-            const result = await executeFuelImport(selectedFile, previewData.suggested_mapping)
+            const result = await executeFuelImport(selectedFile, mappingForImport(previewData), importOptions(previewData, importChoices))
             setImportResult(result)
             setPreviewData(null)
             setSelectedFile(null)
+            setImportChoices(NO_IMPORT_CHOICES)
             clearClientCache("/api/fuel/")
-            setDataVersion((n) => n + 1)
-            loadImportHistory()
             loadEfficiencyData()
-            loadWasteData()
             loadRankingsData()
+            loadIdleWasters()
         } catch (err) {
             console.error("Import execution failed:", err)
             setImportError(err.message || "An error occurred while importing fuel statement.")
-            loadImportHistory()
         } finally {
             setImporting(false)
         }
     }
 
     const hasNoData = !loadingEfficiency && efficiency?.excluded_scope?.all_transaction_count === 0
+    const scope = efficiency?.excluded_scope
+    const today = getUAETodayStr()
+    const monthMode = period === "month"
+    const summaryRows = Number(scope?.monthly_summary_rows) || 0
+    // "View Daily Transactions" is offered only when /analytics/daily reports dated (transaction-level) rows for the month
+    // (see datedDailyAvailability); it is checked only for a month with dated rows in the KPI scope
+    const checkDaily = monthMode && !loadingEfficiency && (datedTransactionCount(scope) || 0) > 0
+    const dailyKey = checkDaily ? new URLSearchParams(queryParams).toString() : null
+    const [dailyCheck, setDailyCheck] = useState({ key: null, available: false })
+    useEffect(() => {
+        if (!dailyKey) return undefined
+        let active = true
+        getFuelDaily(queryParams)
+            .then((res) => { if (active) setDailyCheck({ key: dailyKey, available: datedDailyAvailability(res).available }) })
+            .catch(() => { if (active) setDailyCheck({ key: dailyKey, available: false }) })
+        return () => { active = false }
+    }, [dailyKey, queryParams])
+    const dailyEligible = checkDaily && dailyCheck.key === dailyKey && dailyCheck.available
+
+    // When the selected month is empty, find the latest month with matched fuel data (fuel-only monthly trend; no
+    // Wialon reports). Months whose rows are all unmatched are not offered: their KPIs would be empty too.
+    const lookupLatest = hasNoData && monthMode
+    useEffect(() => {
+        if (!lookupLatest) return undefined
+        let active = true
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- the lookup shows its loading state while it runs
+        setLatestMonth({ status: "loading", month: null })
+        getFuelTrend({ group_by: "month", ...(vehicle ? { vehicle_identifier: vehicle } : {}), ...(fuelType ? { fuel_type: fuelType } : {}) })
+            .then((res) => {
+                if (!active) return
+                const month = latestMonthWithData(res?.data, getUAETodayStr())
+                setLatestMonth({ status: month ? "found" : "none", month })
+            })
+            .catch(() => {
+                if (active) setLatestMonth({ status: "error", month: null })
+            })
+        return () => { active = false }
+    }, [lookupLatest, vehicle, fuelType])
+
+    // Concise data notices, most relevant first
+    const notices = []
+    if (monthMode && isCurrentMonth(selectedMonth, today)) {
+        notices.push({ key: "mtd", tone: "info", text: `${monthLabel(selectedMonth)} is in progress: month-to-date figures.` })
+    }
+    if (summaryRows > 0) {
+        notices.push({ key: "summary", tone: "info", text: `Includes ${summaryRows} monthly-summary row(s): statement totals, not dated refuels.` })
+    }
+    const summaryRangeWarnings = (Array.isArray(scope?.warnings) ? scope.warnings : []).filter((w) => /monthly-summary/i.test(w))
+    summaryRangeWarnings.forEach((w, i) => notices.push({ key: `range-${i}`, tone: "warn", text: w }))
+    const partialSummaries = excludedSummary(scope)?.partialSummaries || 0
+    if (partialSummaries > 0 && summaryRangeWarnings.length === 0) {
+        notices.push({ key: "partial", tone: "warn", text: `${partialSummaries} monthly-summary row(s) excluded: the range does not cover their whole month.` })
+    }
+    // Unit-months with both a monthly summary and dated rows (no confirmed full-month coverage): excluded, never summed
+    const overlapConflicts = (Array.isArray(scope?.overlap_conflicts) ? scope.overlap_conflicts : [])
+        .filter((c) => c?.resolution === "excluded_coverage_unconfirmed")
+    if (overlapConflicts.length > 0) {
+        notices.push({
+            key: "overlap",
+            tone: "warn",
+            text: `${overlapConflicts.length} vehicle-month(s) excluded: monthly-summary and dated rows overlap without confirmed full-month coverage.`,
+            title: overlapConflicts.map((c) => `${c.wialon_unit_name || c.wialon_unit_id} ${c.month}`).join("\n"),
+        })
+    }
+    const telematicsWarnings = Array.isArray(efficiency?.data_warnings) ? efficiency.data_warnings : []
+    // "unavailable": Wialon reports failed or did not answer in time; fuel figures are shown, telematics values are "—"
+    if (efficiency?.telematics_status === "partial" || efficiency?.telematics_status === "unavailable") {
+        notices.push({
+            key: "telematics",
+            tone: "warn",
+            text: telematicsPending
+                ? "Wialon reports are still running. Distance, driving and idle values will appear automatically."
+                : `Wialon telematics ${efficiency.telematics_status === "unavailable" ? "unavailable" : "incomplete"}${telematicsWarnings[0] ? `: ${telematicsWarnings[0]}` : "."}`,
+            title: telematicsWarnings.join("\n"),
+        })
+    }
 
     return (
         <AppShell>
-            {/* ─── 1. COMPACT TOOLBAR HEADER ───────────────────────────── */}
             <FuelHeader
-                title="Fuel & Performance"
+                title="Fuel Performance"
                 subtitle={periodLabel}
                 showFilters={true}
                 idleRate={idleRate}
                 setIdleRate={setIdleRate}
-                onOpenImport={() => openImportModal("upload")}
-                onOpenHistory={() => openImportModal("history")}
+                onOpenImport={openImportModal}
+                actions={dailyEligible ? (
+                    <Link
+                        to={`/fuel/daily?${dailySearch(selectedMonth, vehicle)}`}
+                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-brand/40 bg-white px-2.5 text-xs font-medium text-brand transition-colors hover:bg-brand-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                    >
+                        <CalendarRange className="h-3.5 w-3.5" />
+                        View Daily Transactions
+                    </Link>
+                ) : null}
             />
 
-            {/* ─── 2. THREE MAIN TABS NAVIGATION ────────────────────────── */}
-            <div className="flex items-center gap-6 border-b border-slate-200 mb-5">
-                <button
-                    type="button"
-                    role="tab"
-                    id="fuel-tab-overview"
-                    aria-controls="panel-overview"
-                    aria-selected={activeTab === "overview"}
-                    onClick={() => setActiveTab("overview")}
-                    className={`-mb-px flex items-center gap-2 border-b-2 py-3 text-xs font-semibold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                        activeTab === "overview"
-                            ? "border-brand text-slate-900 font-bold"
-                            : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
-                    }`}
-                >
-                    <BarChart3 className="h-4 w-4" />
-                    <span>Overview</span>
-                </button>
+            <div className="space-y-5">
+                {overviewError && (
+                    <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} />
+                )}
 
-                <button
-                    type="button"
-                    role="tab"
-                    id="fuel-tab-vehicles"
-                    aria-controls="panel-vehicles"
-                    aria-selected={activeTab === "vehicles"}
-                    onClick={() => setActiveTab("vehicles")}
-                    className={`-mb-px flex items-center gap-2 border-b-2 py-3 text-xs font-semibold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                        activeTab === "vehicles"
-                            ? "border-brand text-slate-900 font-bold"
-                            : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
-                    }`}
-                >
-                    <Truck className="h-4 w-4" />
-                    <span>Vehicle Performance</span>
-                    {vehiclesData?.total > 0 && (
-                        <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600 tabular-nums">
-                            {vehiclesData.total}
-                        </span>
-                    )}
-                </button>
+                {notices.length > 0 && (
+                    <ul role="status" className="space-y-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-xs">
+                        {notices.map((n) => (
+                            <li key={n.key} className={`flex items-start gap-2 ${n.tone === "warn" ? "text-amber-900" : "text-slate-600"}`} title={n.title}>
+                                {n.tone === "warn"
+                                    ? <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600" />
+                                    : <Info className="mt-px h-3.5 w-3.5 shrink-0 text-slate-400" />}
+                                <span className="min-w-0">{n.text}</span>
+                            </li>
+                        ))}
+                    </ul>
+                )}
 
-                <button
-                    type="button"
-                    role="tab"
-                    id="fuel-tab-waste"
-                    aria-controls="panel-waste"
-                    aria-selected={activeTab === "waste"}
-                    onClick={() => setActiveTab("waste")}
-                    className={`-mb-px flex items-center gap-2 border-b-2 py-3 text-xs font-semibold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                        activeTab === "waste"
-                            ? "border-brand text-slate-900 font-bold"
-                            : "border-transparent text-slate-500 hover:border-slate-300 hover:text-slate-800"
-                    }`}
-                >
-                    <Flame className="h-4 w-4 text-amber-600" />
-                    <span>Waste & Audits</span>
-                    {wasteData?.total_anomalies_count !== undefined && wasteData?.total_anomalies_count > 0 && (
-                        <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900 tabular-nums">
-                            {wasteData.total_anomalies_count}
-                        </span>
-                    )}
-                </button>
+                {hasNoData ? (
+                    <EmptyState
+                        icon={CalendarDays}
+                        title={`No fuel data for ${periodLabel}`}
+                        message={vehicle || fuelType ? `Filters: ${[vehicle, fuelType].filter(Boolean).join(" · ")}` : undefined}
+                        action={monthMode ? (
+                            latestMonth.status === "loading" ? (
+                                <span className="text-xs text-slate-400">Finding the latest month with data…</span>
+                            ) : latestMonth.status === "found" && latestMonth.month !== selectedMonth ? (
+                                <button
+                                    type="button"
+                                    onClick={() => setMonth(latestMonth.month)}
+                                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+                                >
+                                    Jump to latest month with data ({monthLabel(latestMonth.month)})
+                                </button>
+                            ) : latestMonth.status === "error" ? (
+                                <span className="text-xs text-slate-500">The latest month with data could not be determined.</span>
+                            ) : latestMonth.status === "none" ? (
+                                <span className="text-xs text-slate-500">No matched fuel data for these filters.</span>
+                            ) : null
+                        ) : null}
+                    />
+                ) : (
+                    <>
+                        {/* Monthly overview: 8 KPI categories */}
+                        <KpiCards
+                            efficiencyData={efficiency}
+                            loading={loadingEfficiency}
+                            idleRate={idleRate}
+                        />
+
+                        {/* Driving vs idling, beside the fleet-wide idle fuel ranking */}
+                        <DrivingVsIdlingChart
+                            efficiencyData={efficiency}
+                            loading={loadingEfficiency}
+                            idleRate={idleRate}
+                            idleWasters={idleWasters}
+                            wastersLoading={loadingIdleWasters}
+                            wastersError={idleWastersError}
+                            onRetryWasters={loadIdleWasters}
+                            onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                        />
+
+                        <VehicleLeaderboard
+                            vehiclesData={vehiclesData}
+                            loading={loadingRankings}
+                            error={rankingsError}
+                            onRetry={loadRankingsData}
+                            sortBy={sortBy}
+                            setSortBy={setSortBy}
+                            sortOrder={sortOrder}
+                            setSortOrder={setSortOrder}
+                            searchQuery={searchQuery}
+                            setSearchQuery={setSearchQuery}
+                            statusFilter={statusFilter}
+                            setStatusFilter={setStatusFilter}
+                            page={page}
+                            setPage={setPage}
+                            pageSize={pageSize}
+                            onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
+                            monthlySummaryRows={summaryRows}
+                        />
+                    </>
+                )}
             </div>
 
-            {/* Error Message */}
-            {overviewError && (
-                <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} className="mb-4" />
-            )}
-
-            {/* Empty state when the period has no records */}
-            {hasNoData && (
-                <div className="mb-4 flex flex-col gap-3 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-3 sm:flex-row sm:items-center sm:justify-between shadow-xs">
-                    <div className="flex items-start gap-2.5">
-                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                        <div>
-                            <h4 className="text-xs font-semibold text-amber-950">
-                                No fuel transactions for {periodLabel}
-                            </h4>
-                            <p className="mt-0.5 text-xs text-amber-800">
-                                Choose all historical data or a custom date range.
-                            </p>
-                        </div>
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => setPeriod("all")}
-                        className="inline-flex h-8 items-center gap-1.5 self-start rounded-md border border-amber-300 bg-white px-3 text-xs font-medium text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer sm:self-auto"
-                    >
-                        View all data
-                    </button>
-                </div>
-            )}
-
-            {/* ═══════════════════════════════════════════════════════════════
-                TAB 1: OVERVIEW
-            ═══════════════════════════════════════════════════════════════ */}
-            {activeTab === "overview" && (
-                <div id="panel-overview" role="tabpanel" aria-labelledby="fuel-tab-overview" className="space-y-4">
-                    {/* Telemetry coverage alert (if partial telematics) */}
-                    {efficiency?.telemetry_status === "partial" && Array.isArray(efficiency?.data_warnings) && efficiency.data_warnings.length > 0 && (
-                        <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-900 shadow-xs" role="status">
-                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-                            <div className="space-y-0.5">
-                                <span className="font-semibold block">Telematics Coverage Notice</span>
-                                {efficiency.data_warnings.slice(0, 3).map((w, idx) => (
-                                    <span key={idx} className="block text-[11px] text-amber-800">{w}</span>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* 8 Compact KPI Cards with transparent calculation modals */}
-                    <KpiCards
-                        efficiencyData={efficiency}
-                        loading={loadingEfficiency}
-                        idleRate={idleRate}
-                    />
-
-                    {/* Driving vs. Idling Visual Analysis & Top 5 Idle Wasters */}
-                    <DrivingVsIdlingChart
-                        efficiencyData={efficiency}
-                        vehicles={vehiclesData.data}
-                        vehiclesUnavailable={Boolean(rankingsError)}
-                        loading={loadingEfficiency || loadingRankings}
-                        idleRate={idleRate}
-                        onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
-                    />
-
-                    {/* Fleet Fuel & Distance Trend Chart */}
-                    <FuelTrendChart key={`trend-${dataVersion}`} />
-                </div>
-            )}
-
-            {/* ═══════════════════════════════════════════════════════════════
-                TAB 2: VEHICLE PERFORMANCE
-            ═══════════════════════════════════════════════════════════════ */}
-            {activeTab === "vehicles" && (
-                <div id="panel-vehicles" role="tabpanel" aria-labelledby="fuel-tab-vehicles" className="space-y-4">
-                    {/* Compact Vehicle Performance Leaderboard */}
-                    <VehicleLeaderboard
-                        vehiclesData={vehiclesData}
-                        loading={loadingRankings}
-                        error={rankingsError}
-                        onRetry={loadRankingsData}
-                        sortBy={sortBy}
-                        setSortBy={setSortBy}
-                        sortOrder={sortOrder}
-                        setSortOrder={setSortOrder}
-                        searchQuery={searchQuery}
-                        setSearchQuery={setSearchQuery}
-                        statusFilter={statusFilter}
-                        setStatusFilter={setStatusFilter}
-                        page={page}
-                        setPage={setPage}
-                        pageSize={pageSize}
-                        onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
-                    />
-                </div>
-            )}
-
-            {/* ═══════════════════════════════════════════════════════════════
-                TAB 3: WASTE & AUDITS
-            ═══════════════════════════════════════════════════════════════ */}
-            {activeTab === "waste" && (
-                <div id="panel-waste" role="tabpanel" aria-labelledby="fuel-tab-waste" className="space-y-4">
-                    {/* Transaction Matching & Excluded Fuel Audit Panel */}
-                    <ExcludedFuelPanel key={`excluded-${dataVersion}`} />
-
-                    {/* Operational Anomaly & Fuel Waste Intelligence */}
-                    <FuelWasteIntelligence
-                        wasteData={wasteData}
-                        loading={loadingWaste}
-                        error={wasteError}
-                        onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
-                        idleThreshold={idleThreshold}
-                        onIdleThresholdChange={setIdleThreshold}
-                    />
-                </div>
-            )}
-
-            {/* ─── IMPORT & HISTORY DIALOG ─────────────────────────────────── */}
+            {/* ─── IMPORT DIALOG ─────────────────────────────────── */}
             {isImportModalOpen && createPortal(
                 <div
                     className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4"
@@ -543,7 +505,7 @@ export default function FuelPerformance() {
                                     Fuel Data Management
                                 </h3>
                                 <p className="text-xs text-slate-500">
-                                    Import fuel statement (.xlsx) and review past reconciliation batches
+                                    Import fuel statement (.xlsx)
                                 </p>
                             </div>
 
@@ -562,50 +524,7 @@ export default function FuelPerformance() {
                             </button>
                         </div>
 
-                        {/* Modal Tabs: Upload Statement vs Recent Imports */}
-                        <div className="flex items-center gap-4 border-b border-slate-100 my-3 text-xs font-medium">
-                            <button
-                                type="button"
-                                onClick={() => setImportModalTab("upload")}
-                                className={`pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer ${
-                                    importModalTab === "upload"
-                                        ? "border-brand text-slate-900 font-semibold"
-                                        : "border-transparent text-slate-500 hover:text-slate-800"
-                                }`}
-                            >
-                                <span className="flex items-center gap-1.5">
-                                    <UploadCloud className="h-3.5 w-3.5" />
-                                    <span>Upload Statement</span>
-                                </span>
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setImportModalTab("history")
-                                    loadImportHistory()
-                                }}
-                                className={`pb-2.5 -mb-px border-b-2 transition-colors cursor-pointer ${
-                                    importModalTab === "history"
-                                        ? "border-brand text-slate-900 font-semibold"
-                                        : "border-transparent text-slate-500 hover:text-slate-800"
-                                }`}
-                            >
-                                <span className="flex items-center gap-1.5">
-                                    <History className="h-3.5 w-3.5" />
-                                    <span>Import History</span>
-                                    {history.length > 0 && (
-                                        <span className="rounded-full bg-slate-100 px-1.5 py-0.2 text-[10px] text-slate-600">
-                                            {history.length}
-                                        </span>
-                                    )}
-                                </span>
-                            </button>
-                        </div>
-
-                        {/* Tab 1: Upload Statement */}
-                        {importModalTab === "upload" && (
-                            <div>
+                        <div>
                                 {/* Upload Result Alert */}
                                 {importResult && (
                                     <div className={`my-3 rounded-lg border p-4 text-xs ${
@@ -632,7 +551,14 @@ export default function FuelPerformance() {
                                             {importResult.rows_unverified > 0 && ` • ${importResult.rows_unverified} unverified`}
                                             {importResult.rows_not_processed > 0 && ` • ${importResult.rows_not_processed} not processed`}
                                             {skippedRowsLabel(importResult) && ` • ${skippedRowsLabel(importResult)}`}
+                                            {importResult.committed && importResult.rows_replaced > 0 && ` • ${importResult.rows_replaced} older row(s) replaced`}
+                                            {importResult.rows_unchanged > 0 && ` • ${importResult.rows_unchanged} already stored unchanged`}
                                         </p>
+                                        {importResult.import_mode === "monthly_summary" && (
+                                            <p className="mt-1 text-slate-600">
+                                                Monthly summary {importResult.reporting_month}: rows dated {importResult.assigned_transaction_date} as the reporting date, not a refuelling date.
+                                            </p>
+                                        )}
                                         {importResult.error_message && (
                                             <p className="mt-1 text-rose-700">{importResult.error_message}</p>
                                         )}
@@ -752,7 +678,20 @@ export default function FuelPerformance() {
                                             </div>
                                         )}
 
-                                        {previewData.missing_required_fields?.length > 0 && (
+                                        <FuelImportControls
+                                            preview={previewData}
+                                            disabled={importing || previewLoading}
+                                            maxMonth={getUAETodayStr().slice(0, 7)}
+                                            reportingMonth={importChoices.reportingMonth}
+                                            mappingConfirmed={importChoices.mappingConfirmed}
+                                            extendToFullMonths={importChoices.extendToFullMonths}
+                                            onMappingChange={handleMappingChange}
+                                            onConfirmMapping={(checked) => updateImportChoices({ mapping: previewData.active_mapping, mappingConfirmed: checked })}
+                                            onMonthChange={(month) => updateImportChoices({ reportingMonth: month }, month === "" || isReportingMonth(month))}
+                                            onExtendChange={(checked) => updateImportChoices({ extendToFullMonths: checked })}
+                                        />
+
+                                        {previewData.missing_required_fields?.length > 0 && !showColumnChoices(previewData) && (
                                             <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
                                                 Required columns not recognised: {previewData.missing_required_fields.join(", ")}. Rename these headers in the statement and upload it again.
                                             </p>
@@ -769,7 +708,7 @@ export default function FuelPerformance() {
                                             </button>
                                             <button
                                                 type="button"
-                                                disabled={importing || previewData.missing_required_fields?.length > 0}
+                                                disabled={previewLoading || !canConfirmImport(previewData, importing, importChoices.reportingMonth)}
                                                 onClick={handleConfirmImport}
                                                 className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
                                             >
@@ -788,74 +727,7 @@ export default function FuelPerformance() {
                                         </div>
                                     </div>
                                 )}
-                            </div>
-                        )}
-
-                        {/* Tab 2: Import History Table */}
-                        {importModalTab === "history" && (
-                            <div className="py-2">
-                                <div className="flex items-center justify-between mb-2">
-                                    <h4 className="flex items-center gap-1.5 text-xs font-medium text-slate-600">
-                                        <History className="h-3.5 w-3.5 text-slate-400" />
-                                        Statement Import Batches
-                                    </h4>
-                                    <button
-                                        type="button"
-                                        onClick={loadImportHistory}
-                                        className="rounded p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
-                                        aria-label="Reload import history"
-                                    >
-                                        <RefreshCw className="h-3 w-3" />
-                                    </button>
-                                </div>
-
-                                {reconcileError && (
-                                    <div role="alert" className="mb-2 text-xs text-rose-600">{reconcileError}</div>
-                                )}
-                                <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 text-xs">
-                                    {loadingHistory ? (
-                                        <div className="py-8 text-center text-slate-400">Loading history…</div>
-                                    ) : historyError ? (
-                                        <div role="alert" className="py-8 text-center text-rose-600">{historyError}</div>
-                                    ) : history.length === 0 ? (
-                                        <div className="py-8 text-center text-slate-400">No import records found.</div>
-                                    ) : (
-                                        history.map((h) => (
-                                            <div key={h.id} className="flex items-center justify-between gap-3 py-2.5">
-                                                <div className="min-w-0">
-                                                    <span className="block truncate font-semibold text-slate-800">{h.file_name}</span>
-                                                    <span className="text-[11px] text-slate-500 block">
-                                                        {formatUAEDateTime(h.created_at)}
-                                                    </span>
-                                                </div>
-                                                <div className="shrink-0 text-right">
-                                                    <span className="font-semibold text-emerald-700">
-                                                        {h.rows_imported} imported
-                                                    </span>
-                                                    <span className="text-[11px] text-slate-500 block">
-                                                        {h.status}
-                                                    </span>
-                                                    {skippedRowsLabel(h) && (
-                                                        <span className="text-[11px] text-slate-400 block">{skippedRowsLabel(h)}</span>
-                                                    )}
-                                                    {h.status !== "completed" && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => handleReconcile(h.id)}
-                                                            disabled={reconcilingId !== null}
-                                                            title="Recount this import from the transactions stored in the database"
-                                                            className="text-[11px] font-medium text-brand hover:underline disabled:opacity-50 cursor-pointer"
-                                                        >
-                                                            {reconcilingId === h.id ? "Reconciling…" : "Reconcile"}
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ))
-                                    )}
-                                </div>
-                            </div>
-                        )}
+                        </div>
                     </div>
                 </div>,
                 document.body

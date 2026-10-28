@@ -128,7 +128,7 @@ def test_single_flight():
     print("[PASS] Four concurrent cold requests share one Wialon fetch (single-flight).")
 
 
-def test_whole_report_failure_retries_then_502_and_is_not_cached():
+def test_whole_report_failure_retries_is_not_cached_and_route_degrades():
     with Env(engine=FakeReportEngine(fail_exec={TEMPLATE_GROUP_ENGINE})) as env:
         for _ in range(2):
             try:
@@ -149,8 +149,12 @@ def test_whole_report_failure_retries_then_502_and_is_not_cached():
              patch("app.fuel.routes.login", return_value="s"), \
              patch("app.fuel.routes.get_all_vehicles", return_value=UNITS):
             r = client.get(f"/api/fuel/analytics/efficiency?date_from={CLOSED_FROM}&date_to={CLOSED_TO}", headers=AUTH)
-        assert r.status_code == 502, r.text
-    print("[PASS] A report failing after one forced re-login gives 502 and is never cached.")
+        # The route keeps the recorded fuel figures and marks telematics unavailable (null, never 0) instead of a 502
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total_litres"] == 50.0 and body["telematics_status"] == "unavailable", body
+        assert body["total_distance_km"] is None and body["total_idle_hours"] is None, body
+    print("[PASS] A report failing after one forced re-login is never cached; the route answers with fuel data and telematics unavailable.")
 
 
 def test_empty_engine_report_is_partial_not_zero():
@@ -540,7 +544,7 @@ TESTS = [
     test_closed_range_cached,
     test_today_range_refreshes,
     test_single_flight,
-    test_whole_report_failure_retries_then_502_and_is_not_cached,
+    test_whole_report_failure_retries_is_not_cached_and_route_degrades,
     test_empty_engine_report_is_partial_not_zero,
     test_paging_reads_past_old_caps,
     test_short_page_raises,

@@ -22,7 +22,10 @@ from app.performance_diagnostics import log_cache_state, log_data_window, map_wi
 from collections import Counter, defaultdict
 from typing import Dict, List, Any, Optional
 
-from app.wialon import WialonAPIError, login, get_vehicle_history, get_vehicle_groups, history_truncated
+from app.wialon import (
+    WIALON_LIMIT_MSGS_ACTIVITY, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, history_truncated,
+    seconds_since_limit_hit, wialon_error_code,
+)
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
@@ -1063,6 +1066,10 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         # A harsh-driving source: a configured harsh sensor, or the io_253 parameter in the unit's messages
         has_source = bool(accel_sid or brake_sid or corner_sid)
 
+        if limit_hit.is_set():
+            # Wialon already answered 1004 (LIMIT msgs_activity) in this scan: the remaining units are unknown, not
+            # loaded one by one into the same limit
+            return {"vehicle": v_record, "events": [], "failed": True, "truncated": False, "has_source": has_source}
         try:
             raw_msgs = get_vehicle_history(sid, vid, hours=hours)
             raw_msgs_sorted = sorted(raw_msgs, key=lambda m: m.get("t", 0))
@@ -1125,8 +1132,11 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         except Exception as exc:
             # One unit's history failure leaves that unit's events unknown; the fleet result is partial, not failed
             logging.warning("Wialon safety data failed for vehicle %s; its events are unknown: %s", vid, exc)
+            if wialon_error_code(exc) == WIALON_LIMIT_MSGS_ACTIVITY:
+                limit_hit.set()
             return {"vehicle": v_record, "events": [], "failed": True, "truncated": False, "has_source": has_source}
 
+    limit_hit = threading.Event()
     with ThreadPoolExecutor(max_workers=3) as executor:
         per_vehicle = list(map_with_request_context(executor, _fetch_safety_events, fleet))
 
@@ -1207,6 +1217,8 @@ _ALERTS_CACHE_KEY = "fleet_alerts_analytics"
 _ALERTS_TTL_SECONDS = 180
 _ALERTS_REFRESH_AHEAD_SECONDS = 120
 _ALERTS_REFRESH_RETRY_SECONDS = 30
+# No background rebuild for this long after any Wialon 1004 (LIMIT msgs_activity) reply
+_ALERTS_LIMIT_BACKOFF_SECONDS = 300
 # A build whose safety scan was partial is served for at most this long (see _build_fleet_alerts)
 _ALERTS_PARTIAL_TTL_SECONDS = 30
 _alerts_build_lock = threading.Lock()
@@ -1257,8 +1269,14 @@ def prewarm_fleet_alerts() -> bool:
 
 
 def _start_alerts_background_refresh() -> bool:
-    """Start one background rebuild unless a build is running or the last refresh failed recently."""
+    """Start one background rebuild unless a build is running, the last refresh failed recently, or Wialon recently
+    answered 1004 (LIMIT msgs_activity) to any caller: the scan loads 24 h of messages for every unit, so it waits
+    rather than competing with the reports that hit the limit. Foreground (cold) loads are not affected."""
     if time.monotonic() - _alerts_refresh_failed_at < _ALERTS_REFRESH_RETRY_SECONDS:
+        return False
+    since_limit = seconds_since_limit_hit()
+    if since_limit is not None and since_limit < _ALERTS_LIMIT_BACKOFF_SECONDS:
+        logging.info("Fleet alerts background refresh skipped: Wialon message limit (1004) hit %.0f s ago", since_limit)
         return False
     if not _alerts_build_lock.acquire(blocking=False):
         return False

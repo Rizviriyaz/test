@@ -526,14 +526,15 @@ def test_import_summary_rows_and_date_order():
     assert dt is None and "both DD/MM and MM/DD" in warn
     assert importer.parse_date_value("25/05/2026", "conflict") == ("2026-05-25", None), "unambiguous rows still parse"
 
-    cols = {"transaction_date": 0, "vehicle_identifier": 1, "litres": 2}
-    rows = [["05/25/2026", "7-AUH-1", 40], ["03/05/2026", "7-AUH-1", 41]]
+    # A total cost column is included because a dated row needs a unit price or a total cost
+    cols = {"transaction_date": 0, "vehicle_identifier": 1, "litres": 2, "total_cost": 3}
+    rows = [["05/25/2026", "7-AUH-1", 40, 124], ["03/05/2026", "7-AUH-1", 41, 127.1]]
     order = importer.statement_date_order(rows, cols)
-    out = [importer.classify_statement_row(r, cols, i, 3, order) for i, r in enumerate(rows, start=2)]
+    out = [importer.classify_statement_row(r, cols, i, 4, order) for i, r in enumerate(rows, start=2)]
     assert order == "mdy" and [o["candidate"]["fields"]["transaction_date"] for o in out] == ["2026-05-25", "2026-03-05"]
-    rows.append(["13/05/2026", "7-AUH-1", 42])
+    rows.append(["13/05/2026", "7-AUH-1", 42, 130.2])
     order = importer.statement_date_order(rows, cols)
-    out = importer.classify_statement_row(rows[1], cols, 3, 3, order)
+    out = importer.classify_statement_row(rows[1], cols, 3, 4, order)
     assert order == "conflict" and out["kind"] == "failed" and "both DD/MM and MM/DD" in out["reason"], out
     print("[PASS] A7: summary labels only (TotalEnergies/Total Al Quoz kept); day/month order decided per column.")
 

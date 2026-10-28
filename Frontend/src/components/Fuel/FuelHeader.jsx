@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from "react"
 import {
-    Calendar,
+    CalendarRange,
     ChevronDown,
     Check,
     X,
@@ -9,7 +9,6 @@ import {
     Search,
     Truck,
     UploadCloud,
-    History,
 } from "lucide-react"
 import { useFuelFilters } from "../../context/useFuelFilters"
 import { useAuth } from "../../context/useAuth"
@@ -17,15 +16,9 @@ import { useAuth } from "../../context/useAuth"
 // Roles the backend accepts for fuel import (FUEL_IMPORT_ROLES in Backend/app/fuel/routes.py); it stays the authority
 const FUEL_IMPORT_ROLES = new Set(["admin", "manager", "fleet_manager"])
 import PageHeader from "../Common/PageHeader"
-
-const PERIOD_OPTIONS = [
-    { id: "today", label: "Today" },
-    { id: "yesterday", label: "Yesterday" },
-    { id: "7d", label: "Last 7 Days" },
-    { id: "30d", label: "Last 30 Days" },
-    { id: "custom", label: "Custom Range…" },
-    { id: "all", label: "All Time", dividerBefore: true },
-]
+import MonthNavigator from "./MonthNavigator"
+import { lastCompleteMonth } from "./fuelPeriod"
+import { getUAETodayStr } from "../../utils/datetime"
 
 const IDLE_PRESETS = [
     { label: "1.5", val: 1.5 },
@@ -40,20 +33,23 @@ const controlState = (active) => active
     : "border-slate-200 bg-white text-slate-800 hover:border-slate-300"
 
 export default function FuelHeader({
-    title = "Fuel & Performance",
+    title = "Fuel Performance",
     subtitle,
     showFilters = true,
+    // The daily dashboard is month-based: it hides the custom range
+    allowCustomRange = true,
     actions,
     idleRate = 2.0,
     setIdleRate,
     onOpenImport,
-    onOpenHistory,
 }) {
     const { profile } = useAuth()
     const canImport = FUEL_IMPORT_ROLES.has(profile?.role)
     const {
         period,
         setPeriod,
+        selectedMonth,
+        setMonth,
         dateFrom,
         dateTo,
         periodLabel,
@@ -67,7 +63,6 @@ export default function FuelHeader({
         resetFilters,
     } = useFuelFilters()
 
-    const [isPeriodOpen, setIsPeriodOpen] = useState(false)
     const [isCustomModalOpen, setIsCustomModalOpen] = useState(false)
     const [isVehicleOpen, setIsVehicleOpen] = useState(false)
     const [vehicleSearch, setVehicleSearch] = useState("")
@@ -77,7 +72,6 @@ export default function FuelHeader({
     const [tempEnd, setTempEnd] = useState(dateTo || "")
     const [rangeError, setRangeError] = useState(null)
 
-    const periodRef = useRef(null)
     const vehicleRef = useRef(null)
     const advancedRef = useRef(null)
     const vehicleSearchInputRef = useRef(null)
@@ -99,9 +93,6 @@ export default function FuelHeader({
     // Close dropdowns on click outside
     useEffect(() => {
         function handleClickOutside(e) {
-            if (periodRef.current && !periodRef.current.contains(e.target)) {
-                setIsPeriodOpen(false)
-            }
             if (vehicleRef.current && !vehicleRef.current.contains(e.target)) {
                 setIsVehicleOpen(false)
             }
@@ -115,27 +106,23 @@ export default function FuelHeader({
 
     // Escape closes open dropdowns or modals
     useEffect(() => {
-        if (!isPeriodOpen && !isCustomModalOpen && !isVehicleOpen && !isAdvancedOpen) return undefined
+        if (!isCustomModalOpen && !isVehicleOpen && !isAdvancedOpen) return undefined
         function handleKey(e) {
             if (e.key !== "Escape") return
-            setIsPeriodOpen(false)
             setIsCustomModalOpen(false)
             setIsVehicleOpen(false)
             setIsAdvancedOpen(false)
         }
         document.addEventListener("keydown", handleKey)
         return () => document.removeEventListener("keydown", handleKey)
-    }, [isPeriodOpen, isCustomModalOpen, isVehicleOpen, isAdvancedOpen])
+    }, [isCustomModalOpen, isVehicleOpen, isAdvancedOpen])
 
-    const handleSelectPeriod = (p) => {
-        if (p === "custom") {
-            setRangeError(null)
-            setIsCustomModalOpen(true)
-            setIsPeriodOpen(false)
-            return
-        }
-        setPeriod(p)
-        setIsPeriodOpen(false)
+    const openCustomRange = () => {
+        setTempStart(dateFrom || "")
+        setTempEnd(dateTo || "")
+        setRangeError(null)
+        setIsAdvancedOpen(false)
+        setIsCustomModalOpen(true)
     }
 
     const handleApplyCustom = (e) => {
@@ -149,8 +136,9 @@ export default function FuelHeader({
         setIsCustomModalOpen(false)
     }
 
-    const hasAdvancedActive = Boolean(fuelType || (idleRate && idleRate !== 2.0))
-    const hasActiveFilters = Boolean(vehicle || fuelType || period !== "all" || (idleRate && idleRate !== 2.0))
+    const hasAdvancedActive = Boolean(fuelType || period === "custom" || (idleRate && idleRate !== 2.0))
+    const isDefaultPeriod = period === "month" && selectedMonth === lastCompleteMonth(getUAETodayStr())
+    const hasActiveFilters = Boolean(vehicle || fuelType || !isDefaultPeriod || (idleRate && idleRate !== 2.0))
 
     const handleResetAll = () => {
         resetFilters()
@@ -165,47 +153,13 @@ export default function FuelHeader({
             >
                 {showFilters && (
                     <div className="flex flex-wrap items-center gap-2">
-                        {/* 1. Date Range Selector */}
-                        <div className="relative" ref={periodRef}>
-                            <button
-                                type="button"
-                                onClick={() => setIsPeriodOpen(!isPeriodOpen)}
-                                aria-haspopup="listbox"
-                                aria-expanded={isPeriodOpen}
-                                className={`${controlBase} ${controlState(period !== "all")} inline-flex items-center gap-1.5 px-2.5`}
-                            >
-                                <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                                <span>{periodLabel}</span>
-                                <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
-                            </button>
-
-                            {isPeriodOpen && (
-                                <div role="listbox" className="absolute left-0 top-full z-40 mt-1 w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-pop sm:left-auto sm:right-0">
-                                    <div className="px-2 py-1.5 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
-                                        Date Range
-                                    </div>
-                                    {PERIOD_OPTIONS.map((opt) => (
-                                        <div key={opt.id}>
-                                            {opt.dividerBefore && <div className="my-1 border-t border-slate-100" />}
-                                            <button
-                                                type="button"
-                                                onClick={() => handleSelectPeriod(opt.id)}
-                                                role="option"
-                                                aria-selected={period === opt.id}
-                                                className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors cursor-pointer ${
-                                                    period === opt.id
-                                                        ? "font-semibold text-slate-900 bg-slate-50"
-                                                        : "text-slate-700 hover:bg-slate-50"
-                                                }`}
-                                            >
-                                                <span>{opt.label}</span>
-                                                {period === opt.id && <Check className="h-3.5 w-3.5 text-brand" />}
-                                            </button>
-                                        </div>
-                                    ))}
-                                </div>
-                            )}
-                        </div>
+                        {/* 1. Month navigation (a custom range is shown in its place) */}
+                        <MonthNavigator
+                            month={selectedMonth}
+                            onChange={setMonth}
+                            customLabel={period === "custom" ? periodLabel : null}
+                            onClearCustom={() => setPeriod("month")}
+                        />
 
                         {/* 2. Searchable Vehicle Selector */}
                         <div className="relative" ref={vehicleRef}>
@@ -312,10 +266,10 @@ export default function FuelHeader({
                                 aria-haspopup="dialog"
                                 aria-expanded={isAdvancedOpen}
                                 className={`${controlBase} ${controlState(hasAdvancedActive)} inline-flex items-center gap-1.5 px-2.5`}
-                                title="Advanced filters (Fuel type, Idle burn rate, Reset)"
+                                title="Custom range, fuel type, idle rate"
                             >
                                 <Sliders className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                                <span>Advanced Filters</span>
+                                <span>Advanced</span>
                                 {hasAdvancedActive && (
                                     <span className="h-1.5 w-1.5 rounded-full bg-brand" />
                                 )}
@@ -330,7 +284,7 @@ export default function FuelHeader({
                                 >
                                     <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2">
                                         <span className="text-xs font-semibold text-slate-900">
-                                            Advanced Filters
+                                            Advanced
                                         </span>
                                         {hasActiveFilters && (
                                             <button
@@ -343,6 +297,21 @@ export default function FuelHeader({
                                             </button>
                                         )}
                                     </div>
+
+                                    {/* Custom date range */}
+                                    {allowCustomRange && (
+                                        <div className="mb-3.5">
+                                            <span className="mb-1 block text-[11px] font-medium text-slate-600">Date range</span>
+                                            <button
+                                                type="button"
+                                                onClick={openCustomRange}
+                                                className={`${controlBase} ${controlState(period === "custom")} inline-flex w-full items-center gap-1.5 px-2.5`}
+                                            >
+                                                <CalendarRange className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                                                <span className="truncate">{period === "custom" ? periodLabel : "Custom range…"}</span>
+                                            </button>
+                                        </div>
+                                    )}
 
                                     {/* Fuel Type */}
                                     <div className="mb-3.5">
@@ -372,15 +341,12 @@ export default function FuelHeader({
                                         <div className="space-y-2 border-t border-slate-100 pt-3">
                                             <div className="flex items-center justify-between">
                                                 <span className="text-[11px] font-medium text-slate-600">
-                                                    Idle Burn Rate
+                                                    Idle fuel rate (estimate)
                                                 </span>
                                                 <span className="font-mono text-xs font-bold text-brand">
                                                     {idleRate.toFixed(1)} L/h
                                                 </span>
                                             </div>
-                                            <p className="text-[10px] leading-relaxed text-slate-400">
-                                                Assumption for stationary idle consumption and waste costs.
-                                            </p>
 
                                             {/* Presets */}
                                             <div className="flex items-center justify-between gap-1">
@@ -439,20 +405,8 @@ export default function FuelHeader({
                     </div>
                 )}
 
-                {/* Import Fuel & Import History Actions */}
+                {/* Import Fuel Action */}
                 <div className="flex items-center gap-2">
-                    {onOpenHistory && (
-                        <button
-                            type="button"
-                            onClick={onOpenHistory}
-                            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-xs font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
-                            title="View recent fuel statement imports and audit batches"
-                        >
-                            <History className="h-3.5 w-3.5 text-slate-500" />
-                            <span>Import History</span>
-                        </button>
-                    )}
-
                     {onOpenImport && (
                         <button
                             type="button"

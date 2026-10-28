@@ -20,6 +20,9 @@ import openpyxl
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# These tests cover the import with FUEL_IMPORT_REPLACE off (the replacement path has its own suites); a local
+# .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
+os.environ["FUEL_IMPORT_REPLACE"] = ""
 
 from offline_guard import OfflineGuard  # noqa: E402
 
@@ -455,38 +458,39 @@ def test_import_refused_when_duplicate_check_unavailable():
 
 # ─── 4. Refunds, sign rules, warnings, derived values ──────────────────────────
 
-def test_refunds_and_sign_rules():
+def test_litres_and_price_sign_rules():
+    # Rule: litres must be >= 0 (statements carry no refunds); a present price must be numeric and >= 0. Zero is kept.
     fake = FakePostgrest("timestamp")
     res, _ = run_import(fake, [
         ["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, "INV-1", None],    # purchase
-        ["2026-03-05 18:00:00", "AUH 44120", -15, None, None, "INV-1R", None],  # refund, no cost
-        ["2026-03-06 09:00:00", "AUH 44120", -10, 3.0, None, None, None],     # refund, cost derived -30
-        ["2026-03-06 10:00:00", "AUH 44120", -15, None, 50, None, None],      # sign mismatch
-        ["2026-03-06 11:00:00", "AUH 44120", 50, None, -100, None, None],     # sign mismatch
-        ["2026-03-06 12:00:00", "AUH 44120", 0, None, None, None, None],      # zero litres
+        ["2026-03-05 18:00:00", "AUH 44120", -15, None, None, "INV-1R", None],  # negative litres
+        ["2026-03-06 09:00:00", "AUH 44120", -10, 3.0, None, None, None],     # negative litres
+        ["2026-03-06 10:00:00", "AUH 44120", 15, None, -50, None, None],      # negative cost
+        ["2026-03-06 11:00:00", "AUH 44120", 50, 0, None, None, None],        # zero unit price
+        ["2026-03-06 12:00:00", "AUH 44120", 0, 3.0, None, None, None],       # zero litres
     ])
-    assert res.rows_imported == 3 and res.rows_refund == 2 and res.rows_failed == 3, res
+    assert res.rows_imported == 3 and res.rows_refund == 0 and res.rows_failed == 3, res
     reasons = [d["reason"] for d in res.failed_row_details]
-    assert sum("Sign mismatch" in r for r in reasons) == 2 and any("zero fuel litres" in r for r in reasons), reasons
-    refund = next(r for r in fake.rows if r["litres"] == -10)
-    assert refund["total_cost"] == -30.0
-    assert res.rows_cost_derived == 1
+    assert sum("cannot be negative" in r for r in reasons) == 2, reasons
+    assert any("Negative total cost" in r for r in reasons), reasons
+    stored = sorted((r["litres"], r["unit_price"], r["total_cost"]) for r in fake.rows)
+    assert stored == [(0.0, 3.0, 0.0), (50.0, 0.0, 0.0), (80.0, 3.0, 240.0)], stored
     assert build_fingerprint("V", "2026-03-05", 15, 45) != build_fingerprint("V", "2026-03-05", -15, -45)
-    print("[PASS] Refunds stored as signed adjustments; sign mismatches and zero litres rejected; refund fingerprint keeps sign.")
+    print("[PASS] Negative litres and negative cost rejected with named reasons; zero litres and zero price stored as 0.")
 
 
-def test_refund_batch_isolated_when_db_rejects_negative():
+def test_negative_litres_never_reach_the_database():
     fake = FakePostgrest("timestamp", reject_negative_litres=True)
     res, _ = run_import(fake, [
         ["2026-03-05 09:00:00", "AUH 44120", 80, 3.0, 240, None, None],
         ["2026-03-05 18:00:00", "AUH 44120", -15, 3.0, -45, None, None],
     ])
     assert res.rows_imported == 1 and res.rows_refund == 0 and res.rows_failed == 1, res
-    assert "rejected refund adjustment" in res.failed_row_details[0]["reason"]
-    assert res.status == "completed_with_errors" and "Refund adjustments" in (res.error_message or "")
+    assert "cannot be negative" in res.failed_row_details[0]["reason"]
+    assert res.status == "completed_with_errors" and "Refund adjustments" not in (res.error_message or "")
     assert [r["litres"] for r in fake.rows] == [80]
 
-    # The 20-entry detail cap must not hide refund rejections behind parse failures
+    # Failed-row details stay capped at 20
     fake2 = FakePostgrest("timestamp", reject_negative_litres=True)
     bad_rows = [[f"bad-{i}", "AUH 44120", 10, 3.0, 30, None, None] for i in range(25)]
     res2, _ = run_import(fake2, bad_rows + [
@@ -494,8 +498,7 @@ def test_refund_batch_isolated_when_db_rejects_negative():
         ["2026-03-05 18:00:00", "AUH 44120", -15, 3.0, -45, None, None],
     ])
     assert res2.rows_failed == 26 and len(res2.failed_row_details) == 20
-    assert "rejected refund adjustment" in res2.failed_row_details[0]["reason"]
-    print("[PASS] A database rejection of negative litres fails only the refund rows; purchases kept; reason never capped away.")
+    print("[PASS] Negative litres are rejected during validation and never sent; purchases kept; details capped at 20.")
 
 
 def test_negative_net_litres_never_yield_negative_efficiency():
@@ -519,25 +522,30 @@ def test_warnings_and_derived_counts():
     fake = FakePostgrest("timestamp")
     res, _ = run_import(fake, [
         ["03/04/2026", "DXB 10293", 50, 3.1, None, None, None],          # ambiguous date; cost derived
-        ["2026-04-05 09:00:00", "DXB 10293", 40, None, 124, None, None],  # unit price derived
-        ["2026-04-06 09:00:00", "DXB 10293", 30, None, "AED12.5", None, None],  # unparseable cost
+        ["2026-04-05 09:00:00", "DXB 10293", 40, None, 124, None, "12x"],  # unit price derived; bad odometer
+        ["2026-04-06 09:00:00", "DXB 10293", 30, None, "AED12.5", None, None],  # unparseable cost -> rejected
     ])
-    assert res.rows_imported == 3, res
+    assert res.rows_imported == 2 and res.rows_failed == 1, res
+    assert res.failed_row_details[0]["reason"].startswith("Invalid total cost"), res.failed_row_details
     assert res.rows_date_ambiguous == 1 and any("Ambiguous date" in w for w in res.warnings), res.warnings
     assert res.rows_cost_derived == 1 and res.rows_unit_price_derived == 1
-    assert res.rows_optional_parse_failed == 1 and any("could not parse total_cost" in w for w in res.warnings)
+    assert res.rows_optional_parse_failed == 1 and any("could not parse odometer_km" in w for w in res.warnings)
     assert res.file_sha256 and len(res.file_sha256) == 64
-    assert res.duplicate_check_scope["date_from"] == "2026-04-02" and res.duplicate_check_scope["date_to"] == "2026-04-07"
-    print("[PASS] Ambiguous dates, unparseable optional cells and derived price/cost are reported, not silent.")
+    assert res.duplicate_check_scope["date_from"] == "2026-04-02" and res.duplicate_check_scope["date_to"] == "2026-04-06"
+    print("[PASS] Ambiguous dates, derived price/cost and unparseable optional cells are reported; an invalid price is rejected.")
 
 
 def test_in_file_duplicate_details():
     fake = FakePostgrest("timestamp")
     row = ["2026-03-07 09:00:00", "DXB 10293", 50, 3.1, 155, "INV-7", 1000]
     res, _ = run_import(fake, [row, list(row)])
-    assert res.rows_imported == 1 and res.rows_duplicate == 1
-    assert res.duplicate_row_details == [{"source_row": 3, "reason": "Duplicate of an earlier row in this file"}]
-    print("[PASS] In-file duplicates reported with source row and reason.")
+    # Approved rule: identical rows of one file are repeated refuels, all imported and reported as a warning
+    assert res.rows_imported == 2 and res.rows_duplicate == 0 and res.rows_identical_in_file == 1, res
+    assert any("identical to another row" in w for w in res.warnings), res.warnings
+    # Re-importing the same file stores nothing new: both copies match the stored rows
+    res2, _ = run_import(fake, [row, list(row)])
+    assert res2.rows_imported == 0 and res2.rows_duplicate == 2, res2
+    print("[PASS] Identical rows in one file are kept as repeated refuels; a re-import of the file adds nothing.")
 
 
 # ─── 5. Fail-loud reads ────────────────────────────────────────────────────────
@@ -638,8 +646,8 @@ TESTS = [
     test_full_table_reads_use_service_role_when_configured,
     test_fingerprint_fetch_raises_on_failure,
     test_import_refused_when_duplicate_check_unavailable,
-    test_refunds_and_sign_rules,
-    test_refund_batch_isolated_when_db_rejects_negative,
+    test_litres_and_price_sign_rules,
+    test_negative_litres_never_reach_the_database,
     test_negative_net_litres_never_yield_negative_efficiency,
     test_warnings_and_derived_counts,
     test_in_file_duplicate_details,

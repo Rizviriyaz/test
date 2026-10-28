@@ -45,7 +45,7 @@ function CustomTooltip({ active, payload }) {
                 {point?.cumulative_efficiency !== null && point?.cumulative_efficiency !== undefined &&
                     row("Cumulative", `${point.cumulative_efficiency} L/100 km`)}
             </div>
-            <p className="pt-0.5 text-[11px] text-slate-400">{point?.transaction_count || 0} refuel transactions</p>
+            <p className="pt-0.5 text-[11px] text-slate-400">{point?.transaction_count || 0} transactions</p>
         </div>
     )
 }

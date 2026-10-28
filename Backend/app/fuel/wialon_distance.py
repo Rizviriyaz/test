@@ -20,7 +20,10 @@ from app.utils.config import get_env_int
 from app.utils.datetime_helpers import get_uae_now, now_timestamp, parse_date_to_uae_bounds
 from app.utils.ttl_cache import TTLCache
 from app.vehicles import extract_registration_plate, get_all_vehicles
-from app.wialon import FUEL_ENGINE_SESSION, FUEL_SESSION, FUEL_TRIPS_SESSION, WialonAPIError, current_sid, login, session_name
+from app.wialon import (
+    FUEL_ENGINE_SESSION, FUEL_SESSION, FUEL_TRIPS_SESSION, WIALON_LIMIT_MSGS_ACTIVITY, WialonAPIError, current_sid, login,
+    session_name, wialon_error_code as _wialon_error_code,
+)
 from app.wialon_reports import (
     GROUP_ID_ALL_UNITS,
     _report_lock_for,
@@ -191,10 +194,13 @@ def match_fuel_vehicle_to_wialon(
 # ─── Report execution helpers ──────────────────────────────────────────────────
 
 def _run_report_with_retry(report_fn: Callable[..., Any], sid: str, *args, **kwargs) -> Tuple[Any, str]:
-    """Run a report; on WialonAPIError re-login once and retry. A second failure propagates (HTTP 502)."""
+    """Run a report; on WialonAPIError re-login once and retry. A second failure propagates (HTTP 502).
+    Wialon error 1004 (LIMIT msgs_activity) propagates at once: a new session would load the same messages again."""
     try:
         return report_fn(sid, *args, **kwargs), sid
-    except WialonAPIError:
+    except WialonAPIError as exc:
+        if _wialon_error_code(exc) == WIALON_LIMIT_MSGS_ACTIVITY:
+            raise
         # Re-login (the same named session, or the shared one) while holding that session's report lock so
         # no other thread's in-flight report (which reads its result rows from the session) has it replaced mid-report.
         with _report_lock_for(sid):
@@ -459,7 +465,7 @@ def fleet_trips_enabled() -> bool:
 
 
 def get_fleet_trips(date_from: str, date_to: str) -> Optional[Dict[str, Any]]:
-    """The cached fleet trips report for the range, or None when disabled or it failed (callers fall back per unit)."""
+    """The cached fleet trips report for the range, or None when disabled (callers report per unit) or it failed."""
     if not fleet_trips_enabled():
         return None
     try:
@@ -469,7 +475,7 @@ def get_fleet_trips(date_from: str, date_to: str) -> Optional[Dict[str, Any]]:
             lambda r: _ttl_for_bundle(date_to, {}),
         )
     except WialonAPIError as exc:
-        logger.warning("Fleet trips report failed for %s..%s; falling back to per-unit trips reports: %s",
+        logger.warning("Fleet trips report failed for %s..%s; trip distance unavailable (no per-unit reports): %s",
                        date_from, date_to, exc)
         return None
 
@@ -497,13 +503,16 @@ def get_units_trips_for_range(
     reuse the same reports. A unit whose report fails is returned as status 'failed' - callers must not count it as 0 km.
 
     With `units` (the Wialon unit list, for id -> name), every unit is first taken from one fleet trips report
-    (get_fleet_trips); a unit it cannot cover with certainty, or every unit when it failed, gets its own trips
+    (get_fleet_trips); a unit it cannot cover with certainty, or every unit when it is disabled, gets its own trips
     report exactly as without `units`. Per-unit reports run serially under the shared report lock, each on the
     gateway's current session, so a session refreshed mid-batch (Wialon error 1 or a forced re-login) is picked
     up by the remaining units instead of each of their calls first failing on the stale one.
+    When the fleet trips report itself failed, no per-unit reports run for the range (one per unit would pile onto
+    whatever stopped it): uncovered units are returned as 'failed' (not cached), so the next request retries.
     """
     wanted = sorted({int(u) for u in unit_ids})
     fleet = get_fleet_trips(date_from, date_to) if units is not None and wanted else None
+    fleet_failed = fleet is None and units is not None and bool(wanted) and fleet_trips_enabled()
     names = {int(u["id"]): str(u.get("nm", "")).strip() for u in units or [] if u.get("id") is not None}
     name_counts = Counter(names.values())
     out: Dict[int, Dict[str, Any]] = {}
@@ -511,7 +520,9 @@ def get_units_trips_for_range(
     for uid in wanted:
         name = names.get(uid)
         res = _fleet_unit_trips(fleet, uid, name if name and name_counts[name] == 1 else None)
-        if res is None:
+        if res is None and fleet_failed:
+            res = {"status": "failed", "trips": [], "error": "fleet trips report failed"}
+        elif res is None:
             per_unit += 1
             res = _UNIT_TRIPS_CACHE.get_or_compute(
                 (uid, date_from, date_to),
@@ -615,6 +626,13 @@ def get_vehicle_telematics_detail(
       includes stops and is never used as driving time.
     - Idle / engine hours: engine report (None if unreadable).
     A report that still fails after one re-login propagates WialonAPIError (HTTP 502).
+
+    Source difference (documented, not a defect): this is the per-unit Engine Hours report, while the fleet KPI, the
+    vehicle rankings and the waste report use the GROUP Engine & Idling report (get_fleet_telematics_bundle). Wialon
+    can report slightly different idle/driving totals for one unit in the two reports, so the vehicle-detail idle
+    estimate may differ a little from that vehicle's ranking row. The raw durations are returned in seconds as well
+    (driving_seconds / idle_seconds / engine_hours_seconds) so the detail estimate is computed from seconds like the
+    ranking, not from the hours rounded to 0.01 h here.
     """
     from_ts, to_ts = parse_date_to_uae_bounds(date_from, date_to)
     current_sid = sid or login()
@@ -671,6 +689,9 @@ def get_vehicle_telematics_detail(
         "idle_duration_hours": _hours(total_idle_seconds),
         "engine_hours": _hours(total_engine_seconds),
         "stopped_hours": _hours(stopped_seconds),
+        "driving_seconds": in_motion_seconds,
+        "idle_seconds": total_idle_seconds,
+        "engine_hours_seconds": total_engine_seconds,
         "idle_events_count": len(idle_events) if idle_events_complete else None,
         "idle_events_complete": idle_events_complete,
         "idle_events": idle_events,

@@ -529,7 +529,8 @@ def execute_wialon_unit_trips_report(
                 logging.warning(
                     f"Wialon report exec failed for vehicle {vehicle_id}: {res}"
                 )
-                raise WialonAPIError(f"Wialon trips report failed for vehicle {vehicle_id}")
+                raise WialonAPIError(f"Wialon trips report failed for vehicle {vehicle_id}",
+                                     code=res.get("error") if isinstance(res, dict) else None)
 
             report_executed = True
             rr = res["reportResult"]
@@ -671,7 +672,8 @@ def execute_wialon_unit_engine_report(
                 logging.warning(
                     f"Wialon unit engine report exec failed for vehicle {vehicle_id}: {res}"
                 )
-                raise WialonAPIError(f"Wialon engine report failed for vehicle {vehicle_id}")
+                raise WialonAPIError(f"Wialon engine report failed for vehicle {vehicle_id}",
+                                     code=res.get("error") if isinstance(res, dict) else None)
 
             report_executed = True
             rr = res["reportResult"]
@@ -834,7 +836,8 @@ def execute_wialon_group_trips_report(
                 logging.warning(
                     f"Wialon group report exec failed for group {group_id}: {res}"
                 )
-                raise WialonAPIError(f"Wialon group trips report failed for group {group_id}")
+                raise WialonAPIError(f"Wialon group trips report failed for group {group_id}",
+                                     code=res.get("error") if isinstance(res, dict) else None)
 
             report_executed = True
             rr = res["reportResult"]
@@ -967,7 +970,8 @@ def execute_wialon_group_engine_idle_report(
                 logging.warning(
                     f"Wialon group engine report exec failed for group {group_id}: {res}"
                 )
-                raise WialonAPIError(f"Wialon group engine report failed for group {group_id}")
+                raise WialonAPIError(f"Wialon group engine report failed for group {group_id}",
+                                     code=res.get("error") if isinstance(res, dict) else None)
 
             report_executed = True
             rr = res["reportResult"]

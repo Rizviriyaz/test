@@ -646,11 +646,14 @@ def dispatch_tool(name: str, args: dict) -> str:
             result = tool_get_fuel_summary(
                 date_from=args.get("date_from"),
                 date_to=args.get("date_to"),
+                fuel_type=args.get("fuel_type"),
             )
         elif name == "get_fleet_fuel_efficiency":
             result = tool_get_fleet_fuel_efficiency(
                 date_from=args.get("date_from"),
                 date_to=args.get("date_to"),
+                fuel_type=args.get("fuel_type"),
+                idle_rate_lph=args.get("idle_rate_lph"),
             )
         elif name == "get_vehicle_fuel_ranking":
             result = tool_get_vehicle_fuel_ranking(
@@ -659,12 +662,16 @@ def dispatch_tool(name: str, args: dict) -> str:
                 limit=_int_arg(args, "limit", 5),
                 date_from=args.get("date_from"),
                 date_to=args.get("date_to"),
+                fuel_type=args.get("fuel_type"),
+                idle_rate_lph=args.get("idle_rate_lph"),
             )
         elif name == "get_vehicle_fuel_performance":
             result = tool_get_vehicle_fuel_performance(
                 vehicle_identifier=str(args.get("vehicle_identifier", "")),
                 date_from=args.get("date_from"),
                 date_to=args.get("date_to"),
+                fuel_type=args.get("fuel_type"),
+                idle_rate_lph=args.get("idle_rate_lph"),
             )
         else:
             result = {"error": f"Unknown tool: {name}"}
@@ -699,17 +706,58 @@ def _check_date(value, name):
         raise ToolInputError(f"{name} must be YYYY-MM-DD, got {value!r}") from None
 
 
-def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: str = None):
-    from app.fuel.db import fetch_fuel_transactions_for_analytics, get_fuel_vehicle_identifiers
+def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: str = None, fuel_type: str = None):
+    from app.fuel.db import fetch_fuel_transactions_for_analytics, fetch_import_coverage, get_fuel_vehicle_identifiers
     from app.fuel.scope import build_scope
 
     date_from, date_to = _check_date(date_from, "date_from"), _check_date(date_to, "date_to")
     if date_from and date_to and date_from > date_to:
         raise ToolInputError("date_from must be on or before date_to")
+    fuel_type = _fuel_type_arg(fuel_type)
 
-    filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier}
+    # Same scope as the /api/fuel endpoints, including the fuel-type filter and the summary/dated overlap rule
+    filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier, "fuel_type": fuel_type}
     return build_scope(filters, fetch_fuel_transactions_for_analytics, lambda: login(), lambda sid: get_all_vehicles(sid),
-                       get_fuel_vehicle_identifiers)
+                       get_fuel_vehicle_identifiers, fetch_import_coverage)
+
+
+DEFAULT_IDLE_RATE_LPH = 2.0
+
+
+def _fuel_type_arg(value):
+    """The effective fuel-type filter (trimmed), or None for no filter."""
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
+def _idle_rate(value) -> float:
+    """The dashboard's idle coefficient rule: 0.1-20 L/h, default 2.0 (the routes' idle_rate_lph)."""
+    if value is None or value == "":
+        return DEFAULT_IDLE_RATE_LPH
+    if isinstance(value, bool):
+        raise ToolInputError(f"idle_rate_lph must be a number, got {value!r}")
+    try:
+        rate = float(value)
+    except (TypeError, ValueError):
+        raise ToolInputError(f"idle_rate_lph must be a number, got {value!r}") from None
+    if not 0.1 <= rate <= 20.0:
+        raise ToolInputError(f"idle_rate_lph must be between 0.1 and 20 L/h, got {rate}")
+    return rate
+
+
+def _counts(rows) -> dict:
+    """Row counts of the KPI scope; refunds and monthly summaries are never counted as refuels."""
+    from app.fuel.reporting_period import is_monthly_summary
+
+    summaries = sum(1 for r in rows if is_monthly_summary(r))
+    refunds = sum(1 for r in rows if not is_monthly_summary(r) and float(r.get("litres") or 0) < 0)
+    purchases = sum(1 for r in rows if not is_monthly_summary(r) and float(r.get("litres") or 0) > 0)
+    return {"transaction_count": len(rows), "dated_purchase_count": purchases, "refund_count": refunds,
+            "monthly_summary_rows": summaries,
+            "count_note": "transaction_count = all source rows; refuels are dated_purchase_count only"}
+
+
+def _period(dates):
+    return {"date_from": dates[0], "date_to": dates[1]} if dates else None
 
 
 def _excluded_brief(scope) -> dict:
@@ -721,6 +769,11 @@ def _excluded_brief(scope) -> dict:
         "unmatched_identifiers": ex["unmatched"]["identifier_count"],
         "ambiguous_identifiers": ex["ambiguous"]["identifier_count"],
         "suspected_duplicates": ex["suspected_duplicates"]["transaction_count"],
+        "partial_month_summaries_excluded": ex.get("partial_period_summary", {}).get("transaction_count", 0),
+        "summary_dated_overlap_rows_excluded": ex.get("summary_dated_overlap", {}).get("transaction_count", 0),
+        "monthly_summary_rows_in_scope": ex.get("monthly_summary_rows", 0),
+        "monthly_summary_note": ("monthly_summary rows are monthly fuel totals dated on the month's last day as a "
+                                 "reporting date; they are not refuelling events and carry no refuel date or time"),
         "all_transactions": ex["all_transaction_count"],
         "warnings": ex["warnings"],
     }
@@ -742,53 +795,78 @@ def _fuel_tool(fn):
     return wrapper
 
 
-def _telematics_for(scope, date_from, date_to):
-    """(bundle, (from, to)) for the scope, or (None, None) when there is nothing to measure."""
+TELEMATICS_UNAVAILABLE_NOTE = ("Wialon telematics unavailable for this answer (failed or did not respond in time); "
+                               "distance, hours, efficiency and idle estimates are unknown, not zero.")
+
+
+def _telematics_for(scope, date_from, date_to, warnings: list = None):
+    """
+    (bundle, (from, to)) for the scope. (None, None) when there is nothing to measure; (None, dates) when Wialon
+    failed or exceeded FUEL_TELEMATICS_WAIT_S (the routes' bound), with a note appended to `warnings`.
+    """
+    from concurrent.futures import TimeoutError as FutureTimeout
+    from app.fuel import wialon_distance
+    from app.fuel.routes import run_wialon_bounded_sync
     from app.fuel.scope import resolve_effective_dates
-    from app.fuel.wialon_distance import get_fleet_telematics_bundle
 
     dates = resolve_effective_dates(scope.matched, date_from, date_to)
     if scope.is_empty or dates is None:
         return None, None
-    return get_fleet_telematics_bundle(dates[0], dates[1], scope.sid), dates
+    try:
+        # Looked up at call time, so the gateway the routes use (and test patches of it) applies here too
+        return run_wialon_bounded_sync(wialon_distance.get_fleet_telematics_bundle, dates[0], dates[1], scope.sid), dates
+    except (FutureTimeout, WialonAPIError) as exc:
+        logging.getLogger(__name__).warning("AI fuel telematics %s..%s unavailable: %s", dates[0], dates[1], exc)
+        if warnings is not None:
+            warnings.append(TELEMATICS_UNAVAILABLE_NOTE)
+        return None, dates
 
 
 @_fuel_tool
-def tool_get_fuel_summary(date_from: str = None, date_to: str = None) -> dict:
-    """Return fleet fuel purchased (net of refunds), expenditure and refuel counts for matched Wialon units."""
+def tool_get_fuel_summary(date_from: str = None, date_to: str = None, fuel_type: str = None) -> dict:
+    """Return fleet fuel purchased (net of refunds), expenditure and row counts for matched Wialon units."""
     from app.fuel.analytics import calculate_fuel_summary
 
-    scope = _fuel_scope(date_from, date_to)
+    fuel_type = _fuel_type_arg(fuel_type)
+    scope = _fuel_scope(date_from, date_to, fuel_type=fuel_type)
     s = calculate_fuel_summary(scope.matched)
     return {
         "total_litres": round(s.total_litres, 1),
         "total_cost_aed": round(s.total_cost, 2),
-        "transaction_count": s.transaction_count,
+        **_counts(scope.matched),
         "unique_vehicles": s.vehicle_count,
         "average_unit_price": round(s.average_unit_price, 2),
-        "refund_count": s.refund_count,
+        "parameters": {"date_from": date_from, "date_to": date_to, "fuel_type": fuel_type},
         "basis": "fuel purchased (recorded statements), not measured consumption",
         "excluded_scope": _excluded_brief(scope),
     }
 
 
 @_fuel_tool
-def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None) -> dict:
-    """Return purchase-based fleet efficiency (L/100 km), cost per km, Wialon distance and coverage."""
+def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None, fuel_type: str = None,
+                                   idle_rate_lph: float = None) -> dict:
+    """Return purchase-based fleet efficiency (L/100 km), cost per km, Wialon distance, idle estimates and coverage."""
     from app.fuel.efficiency import calculate_fleet_efficiency
 
-    scope = _fuel_scope(date_from, date_to)
-    bundle, dates = _telematics_for(scope, date_from, date_to)
-    if bundle is None:
-        eff = calculate_fleet_efficiency([], {}, [])
+    rate = _idle_rate(idle_rate_lph)
+    fuel_type = _fuel_type_arg(fuel_type)
+    scope = _fuel_scope(date_from, date_to, fuel_type=fuel_type)
+    notes: list = []
+    bundle, dates = _telematics_for(scope, date_from, date_to, notes)
+    if dates is None:
+        eff = calculate_fleet_efficiency([], {}, [], rate)
     else:
+        # Without telematics only Wialon-based values are unknown (None), as in /analytics/efficiency
         eff = calculate_fleet_efficiency(
-            scope.matched, bundle["by_name"], scope.units,
-            telematics_status=bundle["status"], data_warnings=list(bundle.get("warnings") or []),
-            duplicate_names=bundle["duplicate_names"],
+            scope.matched, bundle["by_name"] if bundle else {}, scope.units, rate,
+            telematics_status=bundle["status"] if bundle else "unavailable",
+            data_warnings=list((bundle or {}).get("warnings") or []) + notes,
+            duplicate_names=bundle["duplicate_names"] if bundle else None,
+            mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
         )
     return {
-        "period": {"date_from": dates[0], "date_to": dates[1]} if dates else None,
+        "parameters": {"period": _period(dates), "fuel_type": fuel_type, "idle_rate_lph": rate},
+        "period": _period(dates),
         "fuel_efficiency_l_per_100km": eff.fuel_efficiency_l_per_100km,
         "fuel_cost_per_km_aed": eff.fuel_cost_per_km,
         "efficiency_basis": "purchase_based (fuel purchased / Wialon distance; derived, not measured)",
@@ -796,10 +874,18 @@ def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None) -
         "total_distance_km": round(eff.total_distance_km, 1) if eff.total_distance_km is not None else None,
         "total_litres": round(eff.total_litres, 1),
         "total_cost_aed": round(eff.total_cost, 2),
+        "transaction_count": eff.transaction_count,
+        "dated_purchase_count": eff.dated_purchase_count,
+        "refund_count": eff.refund_count,
+        "monthly_summary_rows": eff.monthly_summary_rows,
         "tracked_vehicles": eff.vehicles_with_distance,
         "vehicles_in_scope": eff.vehicle_count,
         "total_idle_hours": eff.total_idle_hours,
         "estimated_idle_fuel_litres": eff.estimated_idle_fuel_litres,
+        "estimated_idle_cost_aed": eff.estimated_idle_cost,
+        "estimated_idle_percentage": eff.estimated_idle_percentage,
+        "vehicles_idle_estimated": eff.vehicles_idle_estimated,
+        "idle_basis": "sum of per-vehicle Wialon idle hours x idle_rate_lph (estimated)",
         "telematics_status": eff.telematics_status,
         "data_warnings": eff.data_warnings,
         "excluded_scope": _excluded_brief(scope),
@@ -808,19 +894,25 @@ def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None) -
 
 @_fuel_tool
 def tool_get_vehicle_fuel_ranking(sort_by: str = "litres", sort_order: str = "desc", limit: int = 5,
-                                  date_from: str = None, date_to: str = None) -> dict:
-    """Return vehicles ranked by fuel, cost, distance, purchase-based efficiency (L/100km) or cost/km."""
+                                  date_from: str = None, date_to: str = None, fuel_type: str = None,
+                                  idle_rate_lph: float = None) -> dict:
+    """Return vehicles ranked by fuel, cost, distance, purchase-based efficiency (L/100km), cost/km or idle fuel."""
     from app.fuel.efficiency import calculate_vehicle_efficiency_records, paginate_and_sort_vehicle_efficiency
 
-    scope = _fuel_scope(date_from, date_to)
-    bundle, dates = _telematics_for(scope, date_from, date_to)
-    records = [] if bundle is None else calculate_vehicle_efficiency_records(
-        scope.matched, bundle["by_name"], scope.units, duplicate_names=bundle["duplicate_names"])
+    rate = _idle_rate(idle_rate_lph)
+    fuel_type = _fuel_type_arg(fuel_type)
+    scope = _fuel_scope(date_from, date_to, fuel_type=fuel_type)
+    notes: list = []
+    bundle, dates = _telematics_for(scope, date_from, date_to, notes)
+    records = [] if dates is None else calculate_vehicle_efficiency_records(
+        scope.matched, bundle["by_name"] if bundle else {}, scope.units, rate,
+        duplicate_names=bundle["duplicate_names"] if bundle else None, mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids)
     paged = paginate_and_sort_vehicle_efficiency(records, 1, min(50, max(1, int(limit))), sort_by, sort_order)
     return {
         "sort_by": sort_by,
         "sort_order": sort_order,
-        "period": {"date_from": dates[0], "date_to": dates[1]} if dates else None,
+        "parameters": {"period": _period(dates), "fuel_type": fuel_type, "idle_rate_lph": rate},
+        "period": _period(dates),
         "vehicles": [
             {
                 "vehicle": v.vehicle_identifier,
@@ -832,36 +924,50 @@ def tool_get_vehicle_fuel_ranking(sort_by: str = "litres", sort_order: str = "de
                 "fuel_efficiency_l_per_100km": round(v.fuel_efficiency_l_per_100km, 2) if v.fuel_efficiency_l_per_100km is not None else None,
                 "cost_per_km_aed": round(v.fuel_cost_per_km, 2) if v.fuel_cost_per_km is not None else None,
                 "efficiency_suppressed_reason": v.efficiency_suppressed_reason,
+                "idle_hours": v.idle_duration_hours,
+                "estimated_idle_fuel_litres": v.estimated_idle_fuel_litres,
+                "estimated_idle_cost_aed": v.estimated_idle_cost,
                 "status": v.status,
             }
             for v in paged.data
         ],
-        "telematics_status": bundle["status"] if bundle else None,
+        "telematics_status": bundle["status"] if bundle else ("unavailable" if dates else None),
+        "data_warnings": notes,
         "excluded_scope": _excluded_brief(scope),
     }
 
 
 @_fuel_tool
-def tool_get_vehicle_fuel_performance(vehicle_identifier: str, date_from: str = None, date_to: str = None) -> dict:
-    """Get one vehicle's fuel purchased, Wialon distance and purchase-based efficiency (exact match)."""
+def tool_get_vehicle_fuel_performance(vehicle_identifier: str, date_from: str = None, date_to: str = None,
+                                      fuel_type: str = None, idle_rate_lph: float = None) -> dict:
+    """Get one vehicle's fuel purchased, Wialon distance, purchase-based efficiency and idle estimate (exact match)."""
     from app.fuel.efficiency import calculate_vehicle_efficiency_records
 
-    scope = _fuel_scope(date_from, date_to, vehicle_identifier)
+    rate = _idle_rate(idle_rate_lph)
+    fuel_type = _fuel_type_arg(fuel_type)
+    scope = _fuel_scope(date_from, date_to, vehicle_identifier, fuel_type)
     if scope.is_empty:
         ex = scope.excluded_scope
         reason = "no transactions" if not ex["all_transaction_count"] else "identifier not attributable to exactly one Wialon unit"
         return {"error": f"No KPI-scope fuel data for '{vehicle_identifier}' ({reason}).", "excluded_scope": _excluded_brief(scope)}
-    bundle, dates = _telematics_for(scope, date_from, date_to)
+    notes: list = []
+    bundle, dates = _telematics_for(scope, date_from, date_to, notes)
+    if dates is None:
+        return {"error": f"The period for '{vehicle_identifier}' cannot be determined (no readable transaction dates); "
+                         "pass date_from and date_to.", "excluded_scope": _excluded_brief(scope)}
     records = calculate_vehicle_efficiency_records(
-        scope.matched, bundle["by_name"], scope.units, duplicate_names=bundle["duplicate_names"])
+        scope.matched, bundle["by_name"] if bundle else {}, scope.units, rate,
+        duplicate_names=bundle["duplicate_names"] if bundle else None, mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids)
     v = records[0] if len(records) == 1 else None
     if v is None:
         return {"error": f"'{vehicle_identifier}' resolves to {len(records)} records; refine the identifier."}
+    counts = _counts(scope.matched)
     return {
         "vehicle": v.vehicle_identifier,
         "wialon_unit": v.wialon_unit_name,
         "merged_identifiers": v.merged_identifiers,
-        "period": {"date_from": dates[0], "date_to": dates[1]},
+        "parameters": {"period": _period(dates), "fuel_type": fuel_type, "idle_rate_lph": rate},
+        "period": _period(dates),
         "litres": round(v.litres, 1),
         "cost_aed": round(v.total_cost, 2),
         "distance_km": round(v.distance_km, 1) if v.distance_km is not None else None,
@@ -869,9 +975,15 @@ def tool_get_vehicle_fuel_performance(vehicle_identifier: str, date_from: str = 
         "cost_per_km_aed": round(v.fuel_cost_per_km, 2) if v.fuel_cost_per_km is not None else None,
         "efficiency_suppressed_reason": v.efficiency_suppressed_reason,
         "idle_hours": v.idle_duration_hours,
-        "refuel_transactions": v.transaction_count,
+        "estimated_idle_fuel_litres": v.estimated_idle_fuel_litres,
+        "estimated_idle_cost_aed": v.estimated_idle_cost,
+        "refuel_transactions": counts["dated_purchase_count"],
+        "refund_adjustments": counts["refund_count"],
+        "monthly_summary_rows": counts["monthly_summary_rows"],
+        "transaction_count": counts["transaction_count"],
         "status": v.status,
-        "telemetry_status": v.telemetry_status,
+        "telemetry_status": v.telemetry_status if bundle else "unavailable",
+        "data_warnings": notes,
         "excluded_scope": _excluded_brief(scope),
     }
 
@@ -880,6 +992,9 @@ _DATE_PARAMS = {
     "date_from": {"type": ["string", "null"], "description": "Start date (YYYY-MM-DD). Optional; defaults to the data's own range."},
     "date_to": {"type": ["string", "null"], "description": "End date (YYYY-MM-DD). Optional; defaults to the data's own range."},
 }
+_FUEL_TYPE_PARAM = {"type": ["string", "null"], "description": "Fuel product filter, e.g. DIESEL, SUPER, SPECIAL. Optional."}
+_IDLE_RATE_PARAM = {"type": ["number", "null"],
+                    "description": "Idle consumption coefficient in L/h (0.1-20). Optional; default 2.0, as on the dashboard."}
 
 
 # Append fuel tools to TOOL_DEFINITIONS
@@ -888,12 +1003,13 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "get_fuel_summary",
-            "description": "Get fleet fuel consumption summary: total litres, expenditure in AED, transaction count, and average fuel price.",
+            "description": "Get fleet fuel purchase summary: total litres, expenditure in AED, refuel (dated purchase), refund and monthly-summary row counts, and average fuel price.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date_from": {"type": ["string", "null"], "description": "Start date (YYYY-MM-DD). Optional."},
                     "date_to": {"type": ["string", "null"], "description": "End date (YYYY-MM-DD). Optional."},
+                    "fuel_type": _FUEL_TYPE_PARAM,
                 },
                 "required": [],
             },
@@ -903,12 +1019,14 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "get_fleet_fuel_efficiency",
-            "description": "Get weighted fleet fuel efficiency in L/100 km, cost per km (AED/km), total GPS distance, and tracked coverage.",
+            "description": "Get weighted fleet fuel efficiency in L/100 km, cost per km (AED/km), total GPS distance, estimated idle fuel and cost, and tracked coverage.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date_from": {"type": ["string", "null"], "description": "Start date (YYYY-MM-DD). Optional."},
                     "date_to": {"type": ["string", "null"], "description": "End date (YYYY-MM-DD). Optional."},
+                    "fuel_type": _FUEL_TYPE_PARAM,
+                    "idle_rate_lph": _IDLE_RATE_PARAM,
                 },
                 "required": [],
             },
@@ -922,11 +1040,13 @@ TOOL_DEFINITIONS.extend([
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "sort_by": {"type": "string", "enum": ["litres", "cost", "distance", "efficiency", "cost_per_km"], "description": "Metric to rank vehicles by."},
+                    "sort_by": {"type": "string", "enum": ["litres", "cost", "distance", "efficiency", "cost_per_km", "estimated_idle_fuel"], "description": "Metric to rank vehicles by."},
                     "sort_order": {"type": "string", "enum": ["asc", "desc"], "description": "Sort order: 'desc' for highest, 'asc' for lowest."},
                     "limit": {"type": "integer", "description": "Number of vehicles to return (default 5)."},
                     "date_from": _DATE_PARAMS["date_from"],
                     "date_to": _DATE_PARAMS["date_to"],
+                    "fuel_type": _FUEL_TYPE_PARAM,
+                    "idle_rate_lph": _IDLE_RATE_PARAM,
                 },
                 "required": [],
             },
@@ -943,6 +1063,8 @@ TOOL_DEFINITIONS.extend([
                     "vehicle_identifier": {"type": "string", "description": "Vehicle registration or plate number (exact)."},
                     "date_from": _DATE_PARAMS["date_from"],
                     "date_to": _DATE_PARAMS["date_to"],
+                    "fuel_type": _FUEL_TYPE_PARAM,
+                    "idle_rate_lph": _IDLE_RATE_PARAM,
                 },
                 "required": ["vehicle_identifier"],
             },

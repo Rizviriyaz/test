@@ -54,10 +54,36 @@ _login_lock = threading.RLock()
 
 
 class WialonAPIError(RuntimeError):
-    """An upstream Wialon request failed rather than returning empty data."""
+    """An upstream Wialon request failed rather than returning empty data. `code` is Wialon's error code when known."""
+
+    def __init__(self, message="", code=None):
+        super().__init__(message)
+        self.code = code
+
+
+# Wialon error 1004 (LIMIT msgs_activity): a message-loading limit was reached. It is never retried; background work
+# checks seconds_since_limit_hit() and stays idle for a while instead of adding load.
+WIALON_LIMIT_MSGS_ACTIVITY = 1004
+_limit_hit_at = None  # time.monotonic() of the last 1004 reply
+
+
+def wialon_error_code(exc):
+    """Wialon's error code carried by a WialonAPIError or the one it was raised from, if any."""
+    while exc is not None:
+        if isinstance(exc, WialonAPIError) and exc.code is not None:
+            return exc.code
+        exc = exc.__cause__
+    return None
+
+
+def seconds_since_limit_hit():
+    """Seconds since Wialon last answered 1004 (LIMIT msgs_activity) in this process, or None if it never did."""
+    hit = _limit_hit_at
+    return None if hit is None else time.monotonic() - hit
+
 
 def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout=30):
-    global SID
+    global SID, _limit_hit_at
 
     current_sid = sid or SID
 
@@ -99,6 +125,9 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
             "PERF wialon end request_id=%s service=%s duration_ms=%.1f attempt=%s outcome=%s",
             request_trace_id.get(), svc, (time.perf_counter() - request_started) * 1000, attempt + 1, outcome,
         )
+
+        if error_code == WIALON_LIMIT_MSGS_ACTIVITY:
+            _limit_hit_at = time.monotonic()
 
         # Handle Wialon Error 1003 (LIMIT api_concurrent) with backoff
         if isinstance(res_json, dict) and res_json.get("error") == 1003:
@@ -343,7 +372,8 @@ def _load_history_page(sid, vehicle_id, time_from, time_to, load_count):
 
     if isinstance(message_data, dict) and "error" in message_data:
         reason = message_data.get("reason", message_data.get("error"))
-        raise WialonAPIError(f"Wialon history request failed for vehicle {vehicle_id}: {reason}")
+        raise WialonAPIError(f"Wialon history request failed for vehicle {vehicle_id}: {reason}",
+                             code=message_data.get("error"))
 
     if not isinstance(message_data, dict):
         return []

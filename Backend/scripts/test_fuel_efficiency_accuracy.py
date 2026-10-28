@@ -132,7 +132,22 @@ def test_envelope_stability():
     print("[PASS] Response envelopes: every pre-existing key is still present (additive changes only).")
 
 
+def test_driving_idle_hour_coverage_is_explicit():
+    units = UNITS + [{"id": 3, "nm": "C"}]
+    tele = {"A": {"mileage_km": 500.0, "driving_seconds": 36000, "idle_seconds": 3600, "engine_hours_seconds": 39600},
+            "B": {"mileage_km": 300.0},                                                   # hours not reported
+            "C": {"mileage_km": 200.0, "driving_seconds": 7200, "engine_hours_seconds": 9000}}  # idle missing
+    s = calculate_fleet_efficiency([t("A", 50.0), t("B", 30.0), t("C", 20.0)], tele, units)
+    assert (s.vehicles_hours_known, s.vehicles_hours_unknown) == (1, 2), (s.vehicles_hours_known, s.vehicles_hours_unknown)
+    assert s.total_idle_hours == 1.0 and s.total_driving_hours == 12.0  # unknown hours are left out, never 0
+    assert s.telematics_status == "partial" and any("hours unavailable for 2 vehicle(s)" in w for w in s.data_warnings)
+    empty = calculate_fleet_efficiency([t("A", 50.0)], {}, UNITS[:1])
+    assert (empty.vehicles_hours_known, empty.vehicles_hours_unknown) == (0, 1) and empty.total_idle_hours is None
+    print("[PASS] Hour coverage: 1 of 3 vehicles with all hours known, 2 unknown (left out, not 0 h); reported explicitly.")
+
+
 TESTS = [
+    test_driving_idle_hour_coverage_is_explicit,
     test_engine_only_vehicle_not_in_distance_ratio,
     test_minimum_distance_suppresses,
     test_non_positive_net_fuel,

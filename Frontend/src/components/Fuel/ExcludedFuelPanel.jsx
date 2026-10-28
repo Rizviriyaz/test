@@ -13,11 +13,19 @@ const REASON_EXPLANATIONS = {
     unmatched: "No matching Wialon GPS telematics unit found for this vehicle identifier.",
     ambiguous: "Identifier corresponds to multiple distinct Wialon telematics units.",
     suspected_duplicate: "Identified as a duplicate or re-imported fuel transaction.",
+    partial_period_summary: "Monthly total whose reporting month is only partly inside the selected range; select whole months to include it.",
+    summary_dated_overlap: "This vehicle-month has both a monthly-summary total and dated transactions, and no import confirms full-month dated coverage; all its rows are excluded to avoid double counting.",
+    summary_superseded_by_dated: "Monthly total for a vehicle-month that a full-month dated statement covers; the dated transactions are used instead.",
 }
 
 const AMBIGUITY_EXPLANATIONS = {
     plate_code_conflict: "Matches this Wialon unit by registration number only, and other plate codes share that number; not attributed.",
 }
+
+// A filter tab can cover several reasons: "Overlaps" lists unresolved conflicts and resolved (superseded) summaries,
+// which keep their own label, colour and explanation
+const TAB_REASONS = { overlaps: ["summary_dated_overlap", "summary_superseded_by_dated"] }
+const matchesTab = (tab, reason) => tab === "all" || (TAB_REASONS[tab] || [tab]).includes(reason)
 
 const explanationOf = (g) => AMBIGUITY_EXPLANATIONS[g.ambiguity_reason] || REASON_EXPLANATIONS[g.reason]
 
@@ -53,7 +61,7 @@ export default function ExcludedFuelPanel() {
 
     const filteredGroups = useMemo(() => {
         return allGroups.filter((g) => {
-            const matchesReason = selectedReason === "all" || g.reason === selectedReason
+            const matchesReason = matchesTab(selectedReason, g.reason)
             const query = searchQuery.trim().toLowerCase()
             const matchesSearch = !query ||
                 (g.vehicle_identifier && g.vehicle_identifier.toLowerCase().includes(query)) ||
@@ -194,6 +202,7 @@ export default function ExcludedFuelPanel() {
                                     { id: "unmatched", label: "No Wialon Unit" },
                                     { id: "ambiguous", label: "Multiple Units" },
                                     { id: "suspected_duplicate", label: "Duplicates" },
+                                    { id: "overlaps", label: "Overlaps" },
                                 ].map((tab) => (
                                     <button
                                         key={tab.id}
@@ -248,7 +257,9 @@ export default function ExcludedFuelPanel() {
                                                         ? "bg-slate-100 text-slate-700"
                                                         : g.reason === "ambiguous"
                                                             ? "bg-amber-100 text-amber-800"
-                                                            : "bg-rose-100 text-rose-800"
+                                                            : g.reason === "summary_superseded_by_dated"
+                                                                ? "bg-emerald-50 text-emerald-800"
+                                                                : "bg-rose-100 text-rose-800"
                                                 }`}>
                                                     {EXCLUDED_REASON_LABELS[g.reason] || g.reason}
                                                 </span>

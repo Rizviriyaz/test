@@ -8,29 +8,57 @@ import re
 import threading
 import time
 import zipfile
+from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 
 from app.fuel.db import (
+    FuelCommitError,
     FuelDataFetchError,
     build_fingerprint,
+    clear_vehicle_identifier_cache,
+    commit_fuel_import,
     create_fuel_import_record,
     fetch_existing_transaction_fingerprints,
     fetch_import_rows,
     fetch_running_imports,
+    fetch_visible_rows_in_range,
     find_import_by_sha256,
     get_fuel_import_record,
     ignored_counts_enabled,
     insert_fuel_transactions_batch,
     insert_fuel_transactions_ignore_duplicates,
+    dated_replace_enabled,
+    replace_enabled,
     schema_v2_enabled,
     update_fuel_import_record,
     weak_fingerprint_key,
 )
-from app.fuel.mapper import CANONICAL_FIELDS, REQUIRED_FIELDS, map_headers, normalize_header
+from app.fuel.mapper import (
+    CANONICAL_FIELDS,
+    PRICE_FIELDS,
+    REQUIRED_FIELDS,
+    ambiguous_mapping_fields,
+    repeated_header_fields,
+    date_header_candidates,
+    map_headers,
+    normalize_header,
+)
+from app.fuel.reporting_period import (
+    DATE_BASIS_MONTH_END,
+    DATE_BASIS_TRANSACTION,
+    IMPORT_MODE_DATED,
+    IMPORT_MODE_MONTHLY,
+    is_monthly_summary,
+    is_partial_month,
+    month_bounds,
+    parse_reporting_month,
+    tx_day,
+)
 from app.fuel.schemas import FuelImportPreviewResponse, FuelImportResultResponse, HeaderMappingItem
 from app.utils.config import get_env_int
 
@@ -423,20 +451,56 @@ def column_indexes(raw_headers: List[str], mapping: Dict[str, Optional[str]]) ->
     return result
 
 
+# Total cost and litres x unit price may differ by VAT, discounts or rounding: beyond this the row is accepted with
+# a warning (the statement's total is kept; KPIs use total_cost), never rejected.
+PRICE_MISMATCH_ABS_AED = 0.05
+PRICE_MISMATCH_REL = 0.01
+
+
+def _price_mismatch(litres: float, unit_price: float, total_cost: float) -> bool:
+    return abs(total_cost - litres * unit_price) > max(PRICE_MISMATCH_ABS_AED, PRICE_MISMATCH_REL * abs(total_cost))
+
+
+def _parse_price(row_slice: List[Any], canonical_to_col_idx: Dict[str, int], key: str,
+                 label: str) -> Tuple[Optional[float], Optional[str]]:
+    """
+    (value, rejection reason) of a pricing cell. A missing cell (column unmapped, blank, '-', 'n/a') is (None, None);
+    text or a negative value is a rejection. A literal zero is a genuine price (e.g. a free or fully discounted
+    fill) and is kept as 0, never turned into missing.
+    """
+    if key not in canonical_to_col_idx:
+        return None, None
+    raw = row_slice[canonical_to_col_idx[key]]
+    value, warn = parse_numeric_value(raw)
+    if value is None:
+        return None, (f"Invalid {label} ('{raw}')" if warn else None)
+    if value < 0:
+        return None, f"Negative {label} ('{raw}')"
+    return value, None
+
+
 def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_idx: int,
-                           total_cols: int, date_order: Optional[str] = None) -> Dict[str, Any]:
+                           total_cols: int, date_order: Optional[str] = None,
+                           assigned_date: Optional[str] = None) -> Dict[str, Any]:
     """
     Classify and validate one statement row. The single rule set shared by the import preview and the import, so
     both count the same rows the same way. Returns a dict:
       kind                  'ignored' (blank/summary), 'non_fuel' (payment/charge/fee without litres),
                             'failed' (invalid fuel row) or 'fuel' (valid fuel transaction)
       reason                why the row was skipped or failed ('' for 'fuel')
-      warnings              row-level warnings (ambiguous date, unparseable optional cells)
-      date_ambiguous, optional_parse_failed
-      candidate             for 'fuel': fingerprint, derived flags and the transaction fields
+      warnings              row-level warnings (ambiguous date, unparseable optional cells, price mismatch)
+      date_ambiguous, optional_parse_failed, price_mismatch
+      candidate             for 'fuel': fingerprint, derived flags, date_basis and the transaction fields
+
+    `assigned_date` (YYYY-MM-DD, the reporting month's last day) makes the row a monthly-summary row: the caller
+    passes it only when no date column is mapped, so a blank or invalid cell of a mapped date column always fails.
+    Dated rows need a unit price or a total cost (each derives the other); monthly-summary rows need the total cost.
+    Litres must be numeric and >= 0, and a price that is present must be numeric and >= 0: zero is a genuine value,
+    stored as 0. Negative and non-numeric values are rejected.
     """
     res: Dict[str, Any] = {"kind": "fuel", "reason": "", "warnings": [], "date_ambiguous": False,
-                           "optional_parse_failed": False, "candidate": None}
+                           "optional_parse_failed": False, "price_mismatch": False, "candidate": None}
+    monthly_summary = assigned_date is not None
 
     def done(kind: str, reason: str) -> Dict[str, Any]:
         res.update(kind=kind, reason=reason)
@@ -461,7 +525,10 @@ def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_i
         return done("non_fuel", f"Non-fuel entry (type '{str(raw_type).strip()}', no litres)")
 
     # Validate required fields
-    parsed_dt, date_err = parse_date_value(raw_date, date_order)
+    if monthly_summary:
+        parsed_dt, date_err = assigned_date, None
+    else:
+        parsed_dt, date_err = parse_date_value(raw_date, date_order)
     if not parsed_dt:
         return done("failed", date_err or f"Invalid or missing transaction date ('{raw_date}')")
     if date_err:
@@ -472,10 +539,11 @@ def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_i
         return done("failed", "Missing vehicle identifier")
     clean_vehicle = str(raw_vehicle).strip()
 
-    # Negative litres are kept as signed refund/reversal adjustments; zero is meaningless.
     parsed_litres, _ = parse_numeric_value(raw_litres)
-    if parsed_litres is None or parsed_litres == 0:
-        return done("failed", f"Invalid or zero fuel litres ('{raw_litres}')")
+    if parsed_litres is None:
+        return done("failed", f"Missing or invalid fuel litres ('{raw_litres}')")
+    if parsed_litres < 0:
+        return done("failed", f"Fuel litres cannot be negative ('{raw_litres}')")
 
     # Parse optional fields; a non-empty cell that cannot be parsed is left empty and reported
     row_parse_failures: List[str] = []
@@ -495,28 +563,38 @@ def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_i
             return str(raw_s).strip() if raw_s is not None and str(raw_s).strip() else None
         return None
 
-    unit_price = get_opt_numeric("unit_price")
-    total_cost = get_opt_numeric("total_cost")
+    unit_price, price_err = _parse_price(row_slice, canonical_to_col_idx, "unit_price", "unit price")
+    if price_err:
+        return done("failed", price_err)
+    total_cost, cost_err = _parse_price(row_slice, canonical_to_col_idx, "total_cost", "total cost")
+    if cost_err:
+        return done("failed", cost_err)
+    if monthly_summary and total_cost is None:
+        return done("failed", "Missing total cost (AED): a monthly summary needs the total cost; unit price alone is not enough")
+    if unit_price is None and total_cost is None:
+        return done("failed", "Missing unit price per litre (and no total cost to derive it from)")
     odometer_km = get_opt_numeric("odometer_km")
 
     if row_parse_failures:
         res["optional_parse_failed"] = True
         res["warnings"].append(f"Row {row_idx}: could not parse {', '.join(row_parse_failures)}; left empty")
 
-    # Auto-compute total_cost or unit_price if one is missing but the other is present (derived, not recorded)
+    # Derive the missing one of total_cost / unit_price from the other (derived, not recorded). With 0 litres a unit
+    # price cannot be derived from the total: it stays empty (unknown), never invented.
     cost_derived = False
     unit_price_derived = False
-    if total_cost is None and unit_price is not None:
+    if total_cost is None:
         total_cost = round(unit_price * parsed_litres, 2)
         cost_derived = True
-    elif unit_price is None and total_cost is not None:
-        unit_price = round(total_cost / parsed_litres, 4)
-        unit_price_derived = True
-
-    # Litres and cost must carry the same sign (a refund reverses both)
-    if total_cost is not None and total_cost != 0 and (total_cost > 0) != (parsed_litres > 0):
-        kind = "negative litres (refund) with positive cost" if parsed_litres < 0 else "positive litres with negative cost"
-        return done("failed", f"Sign mismatch: {kind} ({parsed_litres} L, {total_cost})")
+    elif unit_price is None:
+        if parsed_litres > 0:
+            unit_price = round(total_cost / parsed_litres, 4)
+            unit_price_derived = True
+    elif _price_mismatch(parsed_litres, unit_price, total_cost):
+        res["price_mismatch"] = True
+        res["warnings"].append(f"Row {row_idx}: total cost {total_cost} differs from litres x unit price "
+                               f"({parsed_litres} x {unit_price} = {round(parsed_litres * unit_price, 2)}); "
+                               "the statement's total cost is kept")
 
     invoice_number = get_opt_str("invoice_number")
     fp = build_fingerprint(
@@ -534,6 +612,7 @@ def classify_statement_row(row: Any, canonical_to_col_idx: Dict[str, int], row_i
         "fingerprint": fp,
         "cost_derived": cost_derived,
         "unit_price_derived": unit_price_derived,
+        "date_basis": DATE_BASIS_MONTH_END if monthly_summary else DATE_BASIS_TRANSACTION,
         "fields": {
             "vehicle_id": None,
             "transaction_date": parsed_dt,
@@ -602,27 +681,44 @@ def detect_header_row(sheet: openpyxl.worksheet.worksheet.Worksheet, max_scan_ro
     if best_score <= 0 or not best_headers:
         raise FuelImportError("Could not detect a valid header row with column titles in the Excel sheet.", status_code=422)
 
-    return best_row_idx, best_headers
+    return best_row_idx, label_repeated_headers(best_headers)
 
 
-def validate_confirmed_mapping(raw_headers: List[str], confirmed_mapping: Dict[str, str]) -> Dict[str, str]:
+def label_repeated_headers(headers: List[str]) -> List[str]:
+    """
+    A header text that appears more than once (repeated column groups, e.g. 'Quantity | Amount' per product) gets
+    its column letter on every occurrence: 'Amount (col F)', 'Amount (col J)'. Each column then has its own label, so
+    a mapping names exactly one column and no value is read from another column of the same name.
+    """
+    counts = Counter(h.strip().lower() for h in headers if h)
+    return [f"{h} (col {get_column_letter(i + 1)})" if h and counts[h.strip().lower()] > 1 else h
+            for i, h in enumerate(headers)]
+
+
+def validate_confirmed_mapping(raw_headers: List[str], confirmed_mapping: Dict[str, str],
+                               date_assigned: bool = False, require_fields: bool = True) -> Dict[str, str]:
     """
     Validate that:
-    1. Required fields are present.
+    1. Required fields are present (skipped with require_fields=False; transaction_date is not required when the
+       date is assigned from a reporting month).
     2. Mapped Excel headers actually exist in raw_headers.
     3. No Excel header is assigned to multiple incompatible canonical fields.
     """
-    if not isinstance(confirmed_mapping, dict) or not confirmed_mapping:
+    if not isinstance(confirmed_mapping, dict) or (require_fields and not confirmed_mapping):
         raise FuelImportError("A valid mapping object must be provided.", status_code=400)
 
     # Clean mapping
     clean_mapping: Dict[str, str] = {}
     for canonical, excel_hdr in confirmed_mapping.items():
+        if canonical not in CANONICAL_FIELDS:
+            raise FuelImportError(f"Unknown mapping field '{canonical}'.", status_code=422)
         if excel_hdr and str(excel_hdr).strip():
             clean_mapping[canonical] = str(excel_hdr).strip()
 
     # 1. Required fields check
-    for req in REQUIRED_FIELDS:
+    for req in REQUIRED_FIELDS if require_fields else []:
+        if date_assigned and req == "transaction_date":
+            continue
         if req not in clean_mapping or not clean_mapping[req]:
             raise FuelImportError(
                 f"Missing required mapping for '{req}'. Required fields: {', '.join(REQUIRED_FIELDS)}",
@@ -651,6 +747,270 @@ def validate_confirmed_mapping(raw_headers: List[str], confirmed_mapping: Dict[s
         seen_excel_headers[hdr_key] = canonical
 
     return clean_mapping
+
+
+MONTHLY_SUMMARY_DISABLED_MESSAGE = (
+    "Statements without a transaction date column (monthly summaries) cannot be imported on this server yet: "
+    "the database migration for monthly-summary imports has not been enabled."
+)
+
+
+def resolve_import_mode(mapping: Dict[str, Optional[str]], reporting_month: Optional[str],
+                        today: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Import format from the mapping and the reporting month:
+      dated            a date column is mapped; each row is a refuel with its own date (no reporting month allowed)
+      monthly_summary  no date column and a valid reporting month; every row gets the month's last day
+      None             no date column and no reporting month yet (the user must select one)
+    Raises FuelImportError (422) for a reporting month sent with a date column, a malformed or future month, or a
+    monthly summary while FUEL_IMPORT_REPLACE is off (such rows could not be marked as summaries).
+    """
+    info: Dict[str, Any] = {"mode": None, "assigned_date": None, "reporting_month": None,
+                            "month_from": None, "month_to": None, "partial_month": False}
+    month_given = bool(str(reporting_month or "").strip())
+    if mapping.get("transaction_date"):
+        if month_given:
+            raise FuelImportError("This statement has a transaction date column, so a reporting month is not used. "
+                                  "Clear the reporting month, or set the date column to 'No date column'.", status_code=422)
+        info["mode"] = IMPORT_MODE_DATED
+        return info
+    if not month_given:
+        return info
+    if not replace_enabled():
+        raise FuelImportError(MONTHLY_SUMMARY_DISABLED_MESSAGE, status_code=422)
+    try:
+        first, last = parse_reporting_month(reporting_month, today)
+    except ValueError as exc:
+        raise FuelImportError(str(exc), status_code=422) from None
+    info.update(mode=IMPORT_MODE_MONTHLY, assigned_date=last.isoformat(), reporting_month=first.strftime("%Y-%m"),
+                month_from=first, month_to=last, partial_month=is_partial_month(last, today))
+    return info
+
+
+def missing_price_fields(mapping: Dict[str, Optional[str]]) -> List[str]:
+    """Pricing columns the format needs: dated -> unit price or total cost; no date column -> total cost."""
+    if not mapping.get("transaction_date"):
+        return [] if mapping.get("total_cost") else ["total_cost"]
+    return [] if mapping.get("unit_price") or mapping.get("total_cost") else ["unit_price"]
+
+
+def _prices_consistent(rows: List[Any], canonical_to_col_idx: Dict[str, int], total_cols: int) -> bool:
+    """True when unit price and total cost are both mapped and every data row has total = litres x unit price."""
+    keys = ("litres", "unit_price", "total_cost")
+    if any(k not in canonical_to_col_idx for k in keys):
+        return False
+    checked = 0
+    for row in rows:
+        cells = list(row[:total_cols]) if row else []
+        cells += [None] * (total_cols - len(cells))
+        if is_summary_or_blank_row(cells, total_cols)[0]:
+            continue
+        vals = [parse_numeric_value(cells[canonical_to_col_idx[k]])[0] for k in keys]
+        if any(v is None or v <= 0 for v in vals):
+            continue
+        if _price_mismatch(*vals):
+            return False
+        checked += 1
+    return checked > 0
+
+
+def mapping_confirmation_fields(raw_headers: List[str], mapping: Dict[str, Optional[str]],
+                                mapping_details: List[HeaderMappingItem], rows: List[Any],
+                                canonical_to_col_idx: Dict[str, int]) -> List[str]:
+    """
+    ambiguous_mapping_fields, except price columns whose values prove which is which (see _prices_consistent), plus
+    every field mapped to a column whose title is repeated: consistent prices cannot tell which group is meant.
+    """
+    need = ambiguous_mapping_fields(raw_headers, mapping, mapping_details)
+    if any(f in need for f in PRICE_FIELDS) and _prices_consistent(rows, canonical_to_col_idx, len(raw_headers)):
+        need = [f for f in need if f not in PRICE_FIELDS]
+    return need + [f for f in repeated_header_fields(raw_headers, mapping) if f not in need]
+
+
+# ─── Latest import wins: replacement scope ─────────────────────────────────────
+
+def replacement_vehicle_key(value: Any) -> str:
+    """Vehicle identity for the replacement scope: letters and digits only, lowercase ('A-12345' == 'a 12345')."""
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def replacement_period(candidates: List[Dict[str, Any]], mode_info: Dict[str, Any],
+                       extend_to_full_months: bool = False) -> Optional[Tuple[date, date]]:
+    """
+    Period a new import replaces: the reporting month for a monthly summary; for a dated statement the first to the
+    last transaction day of the file, widened to whole calendar months when the user confirms the statement covers
+    them (extend_to_full_months). None when there are no valid rows.
+    """
+    if mode_info.get("mode") == IMPORT_MODE_MONTHLY:
+        return mode_info["month_from"], mode_info["month_to"]
+    days = [date.fromisoformat(c["fields"]["transaction_date"][:10]) for c in candidates]
+    if not days:
+        return None
+    lo, hi = min(days), max(days)
+    if extend_to_full_months:
+        lo, hi = month_bounds(lo)[0], month_bounds(hi)[1]
+    return lo, hi
+
+
+def replacement_fetch_window(period: Tuple[date, date]) -> Tuple[str, str]:
+    """Stored rows to read: the period, extended to the end of its last month to see monthly summaries it overlaps."""
+    return period[0].isoformat(), month_bounds(period[1])[1].isoformat()
+
+
+# Why a stored row blocks an import (daily transactions and a monthly summary never mix for one vehicle-month)
+CONFLICT_DAILY_EXISTS = "daily transactions exist for this vehicle and month"
+CONFLICT_SUMMARY_EXISTS = "monthly summary exists for this vehicle and month"
+
+
+def plan_replacement(candidates: List[Dict[str, Any]], period: Tuple[date, date],
+                     visible_rows: List[Dict[str, Any]], whole_period: bool = False) -> Dict[str, Any]:
+    """
+    Which visible rows a new import replaces. Pure: `visible_rows` comes from fetch_visible_rows_in_range over
+    replacement_fetch_window(period). In scope are rows of the vehicles in the new file (replacement_vehicle_key)
+    only, whatever import or provider they came from:
+      - dated import: stored dated rows on a day the new file has rows for that vehicle (a corrected statement
+        replaces the vehicle-days it contains); with whole_period (the user confirmed the file covers whole months),
+        every row of the vehicle in those months, monthly summaries included;
+      - monthly-summary import: the earlier monthly summary of the same vehicle and month.
+    Daily transactions and a monthly summary never mix for one vehicle-month, so these are conflicts that refuse the
+    import (nothing is written):
+      - a monthly summary for a vehicle-month that already has dated transactions;
+      - dated rows for a vehicle-month that has a monthly summary, until the user confirms the statement covers whole
+        months (whole_period), which replaces the summary as a whole.
+    A row whose stored date cannot be read is a conflict too. Rows of other vehicles, and dates outside the period,
+    are never touched.
+
+    An in-scope row identical to a new row (same fingerprint and date basis) is paired with it one-to-one and kept as
+    is: the new copy is not inserted. Repeated identical refuels pair one each, so none is lost or doubled.
+    Returns {"in_scope", "supersede", "retained_for" (candidate index -> kept row id), "conflicts", "vehicles"}.
+    """
+    lo, hi = period
+    vehicles = {replacement_vehicle_key(c["fields"]["vehicle_identifier"]) for c in candidates}
+    monthly_import = any(c["date_basis"] == DATE_BASIS_MONTH_END for c in candidates)
+    vehicle_days = {(replacement_vehicle_key(c["fields"]["vehicle_identifier"]), tx_day(c["fields"])) for c in candidates}
+    in_scope: List[Dict[str, Any]] = []
+    conflicts: List[Dict[str, Any]] = []
+    for r in sorted(visible_rows, key=lambda r: int(r["id"])):
+        if replacement_vehicle_key(r.get("vehicle_identifier")) not in vehicles:
+            continue
+        day = tx_day(r)
+        if day is None:
+            conflicts.append({**r, "_conflict": "unreadable stored date"})
+            continue
+        if is_monthly_summary(r):
+            first, last = month_bounds(day)
+            if last < lo or first > hi:
+                continue
+            if (monthly_import or whole_period) and lo <= first and last <= hi:
+                in_scope.append(r)
+            else:
+                conflicts.append({**r, "_conflict": CONFLICT_SUMMARY_EXISTS})
+        elif lo <= day <= hi:
+            if monthly_import:
+                conflicts.append({**r, "_conflict": CONFLICT_DAILY_EXISTS})
+            elif whole_period or (replacement_vehicle_key(r.get("vehicle_identifier")), day) in vehicle_days:
+                in_scope.append(r)
+
+    available: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in in_scope:
+        fp = build_fingerprint(r.get("vehicle_identifier"), r.get("transaction_date"), r.get("litres"),
+                               r.get("total_cost"), r.get("invoice_number"), r.get("odometer_km"))
+        available[(fp, r.get("date_basis") or DATE_BASIS_TRANSACTION)].append(r)
+    retained_for: Dict[int, int] = {}
+    for i, cand in enumerate(candidates):
+        same = available.get((cand["fingerprint"], cand["date_basis"]))
+        if same:
+            retained_for[i] = int(same.pop(0)["id"])
+    kept = set(retained_for.values())
+    return {
+        "in_scope": in_scope,
+        "supersede": [r for r in in_scope if int(r["id"]) not in kept],
+        "retained_for": retained_for,
+        "conflicts": conflicts,
+        "vehicles": vehicles,
+    }
+
+
+MAX_REPLACEMENT_RECORDS = 200
+
+
+def describe_replacement(plan: Dict[str, Any], period: Tuple[date, date], extended: bool) -> Dict[str, Any]:
+    """Preview of a replacement plan: the exact rows that would be superseded (capped), per-vehicle totals, conflicts."""
+    by_vehicle: Dict[str, Dict[str, Any]] = {}
+    for r in plan["supersede"]:
+        ident = str(r.get("vehicle_identifier") or "").strip()
+        g = by_vehicle.setdefault(ident, {"vehicle_identifier": ident, "rows": 0, "monthly_summary_rows": 0,
+                                          "litres": 0.0, "cost": 0.0, "first_date": None, "last_date": None})
+        g["rows"] += 1
+        g["monthly_summary_rows"] += int(is_monthly_summary(r))
+        g["litres"] += float(r.get("litres") or 0)
+        g["cost"] += float(r.get("total_cost") or 0)
+        day = (tx_day(r) or date.min).isoformat()
+        g["first_date"] = min(filter(None, [g["first_date"], day]))
+        g["last_date"] = max(filter(None, [g["last_date"], day]))
+    for g in by_vehicle.values():
+        g["litres"], g["cost"] = round(g["litres"], 2), round(g["cost"], 2)
+
+    def record(r: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: r.get(k) for k in ("id", "import_id", "vehicle_identifier", "transaction_date", "litres",
+                                      "total_cost", "invoice_number")} | {
+            "date_basis": r.get("date_basis") or DATE_BASIS_TRANSACTION}
+
+    conflicts = [{"vehicle_identifier": r.get("vehicle_identifier"), "transaction_date": r.get("transaction_date"),
+                  "import_id": r.get("import_id"), "reason": r["_conflict"]} for r in plan["conflicts"]]
+    return {
+        "period_from": period[0].isoformat(),
+        "period_to": period[1].isoformat(),
+        "extended_to_full_months": extended,
+        "vehicles_in_file": len(plan["vehicles"]),
+        "rows_to_replace": len(plan["supersede"]),
+        "rows_unchanged": len(plan["retained_for"]),
+        "litres_to_replace": round(sum(float(r.get("litres") or 0) for r in plan["supersede"]), 2),
+        "cost_to_replace": round(sum(float(r.get("total_cost") or 0) for r in plan["supersede"]), 2),
+        "by_vehicle": sorted(by_vehicle.values(), key=lambda g: g["vehicle_identifier"]),
+        "records": [record(r) for r in plan["supersede"][:MAX_REPLACEMENT_RECORDS]],
+        "records_truncated": len(plan["supersede"]) > MAX_REPLACEMENT_RECORDS,
+        "partial_month_conflicts": conflicts[:MAX_DETAIL_ROWS],
+        "expected_replace_count": len(plan["supersede"]),
+    }
+
+
+def replacement_conflict_message(plan: Dict[str, Any]) -> str:
+    kinds = {r["_conflict"] for r in plan["conflicts"]}
+    pairs = sorted({f"{r.get('vehicle_identifier')} {str(r.get('transaction_date'))[:7]}" for r in plan["conflicts"]})
+    shown = ", ".join(pairs[:8]) + (f" and {len(pairs) - 8} more" if len(pairs) > 8 else "")
+    parts = []
+    if CONFLICT_DAILY_EXISTS in kinds:
+        parts.append(f"Daily transactions already exist for {shown}: a monthly summary cannot be imported for a "
+                     "vehicle and month that has dated transactions. Remove those vehicles from the summary file.")
+    if CONFLICT_SUMMARY_EXISTS in kinds:
+        parts.append(f"A monthly summary already exists for {shown}: daily transactions cannot be added to that "
+                     "vehicle and month. To replace the summary, confirm that this statement covers whole calendar "
+                     "months; otherwise remove those vehicles or months from the file.")
+    if "unreadable stored date" in kinds:
+        parts.append(f"A stored row for {shown} has an unreadable date, so its period cannot be checked.")
+    return " ".join(parts) + " Nothing was imported."
+
+
+def _monthly_summary_warnings(mode_info: Dict[str, Any]) -> List[str]:
+    if mode_info.get("mode") != IMPORT_MODE_MONTHLY:
+        return []
+    month_label = mode_info["month_from"].strftime("%B %Y")
+    out = [f"Monthly summary for {month_label}: every accepted row is dated {mode_info['assigned_date']} as the "
+           "reporting date. That is not when the vehicle refuelled; these rows are monthly totals and are never shown "
+           "as daily refuelling."]
+    if mode_info.get("partial_month"):
+        out.append(f"{month_label} has not ended yet, so these totals may be incomplete. Importing the final "
+                   "statement for the month later replaces them.")
+    return out
+
+
+def _identical_rows(candidates: List[Dict[str, Any]]) -> int:
+    """Rows identical to an earlier row of the same file (same fingerprint); all of them are imported."""
+    seen: Dict[str, int] = defaultdict(int)
+    for c in candidates:
+        seen[c["fingerprint"]] += 1
+    return sum(n - 1 for n in seen.values())
 
 
 def resolve_fleet_vehicles() -> Dict[str, int]:
@@ -705,8 +1065,24 @@ def resolve_fleet_vehicles() -> Dict[str, int]:
         return {}
 
 
-def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPreviewResponse:
-    """Parse an uploaded Excel workbook, detect structure, map headers, and generate a safe preview."""
+def generate_fuel_preview(
+    file_bytes: bytes,
+    file_name: str,
+    mapping: Optional[Dict[str, Optional[str]]] = None,
+    reporting_month: Optional[str] = None,
+    mapping_confirmed: bool = False,
+    extend_to_full_months: bool = False,
+    bearer_token: Optional[str] = None,
+    today: Optional[date] = None,
+) -> FuelImportPreviewResponse:
+    """
+    Parse an uploaded Excel workbook, detect structure, map headers, and generate a safe preview.
+
+    `mapping` (the user's column choices; default: the suggested mapping) and `reporting_month` (statements without
+    a date column) are applied exactly as the import applies them, so the counts match. With FUEL_IMPORT_REPLACE the
+    preview also reads (never writes) the rows the import would supersede. ready_to_import is False, with
+    blocking_reasons, whenever the import would be refused.
+    """
     lower_name = file_name.lower()
     if not (lower_name.endswith(".xlsx") or lower_name.endswith(".xlsm") or lower_name.endswith(".xltx")):
         raise FuelImportError("Unsupported file type. Please upload a modern Excel file (.xlsx).", status_code=400)
@@ -720,10 +1096,30 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
     worksheet_name = sheet.title
 
     header_row_idx, raw_headers = detect_header_row(sheet)
-    suggested_mapping, mapping_details, unmapped_columns, missing_required_fields = map_headers(raw_headers)
+    suggested_mapping, mapping_details, unmapped_columns, _ = map_headers(raw_headers)
+    if mapping is not None:
+        chosen = validate_confirmed_mapping(raw_headers, mapping, require_fields=False)
+        active_mapping: Dict[str, Optional[str]] = {k: chosen.get(k) for k in CANONICAL_FIELDS}
+        used = {h.strip().lower() for h in chosen.values()}
+        unmapped_columns = [h for h in raw_headers if h and h.strip() and h.strip().lower() not in used]
+    else:
+        active_mapping = dict(suggested_mapping)
 
-    # The import receives this suggested mapping, so classifying with it gives the counts the import will report
-    canonical_to_col_idx = column_indexes(raw_headers, suggested_mapping)
+    blocking_reasons: List[str] = []
+    try:
+        mode_info = resolve_import_mode(active_mapping, reporting_month, today)
+    except FuelImportError as exc:
+        mode_info = {"mode": None}
+        blocking_reasons.append(exc.message)
+    monthly = mode_info.get("mode") == IMPORT_MODE_MONTHLY
+    assigned_date = mode_info.get("assigned_date") if monthly else None
+
+    missing_required_fields = [f for f in REQUIRED_FIELDS
+                               if not active_mapping.get(f) and not (f == "transaction_date" and monthly)]
+    missing_required_fields += missing_price_fields(active_mapping)
+
+    # The import receives this mapping, so classifying with it gives the counts the import will report
+    canonical_to_col_idx = column_indexes(raw_headers, active_mapping)
     col_idx_to_canonical: Dict[int, str] = {idx: canonical for canonical, idx in canonical_to_col_idx.items()}
 
     rows_found = 0
@@ -734,8 +1130,10 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
     rows_invalid = 0
     invalid_row_details: List[Dict[str, Any]] = []
     non_fuel_row_details: List[Dict[str, Any]] = []
-    validation_warnings: List[str] = []
+    validation_warnings: List[str] = _monthly_summary_warnings(mode_info)
     sample_rows: List[Dict[str, Any]] = []
+    candidates: List[Dict[str, Any]] = []
+    rows_price_mismatch = 0
 
     all_rows = read_table_rows(sheet, header_row_idx)
     date_order = statement_date_order(all_rows, canonical_to_col_idx)
@@ -746,7 +1144,10 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
     for offset, row in enumerate(all_rows, start=1):
         row_idx = header_row_idx + offset
         rows_found += 1
-        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order)
+        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order, assigned_date)
+        if res["kind"] == "fuel":
+            candidates.append(res["candidate"])
+            rows_price_mismatch += int(res["price_mismatch"])
         if res["kind"] == "ignored":
             rows_ignored += 1
             continue
@@ -794,6 +1195,9 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
                 else:
                     sample_record[canonical] = str(cell_value).strip() if cell_value is not None else None
 
+            if monthly:
+                sample_record["transaction_date"] = assigned_date
+                sample_record["date_basis"] = DATE_BASIS_MONTH_END
             sample_rows.append(sample_record)
 
     if missing_required_fields:
@@ -804,6 +1208,45 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
 
     if rows_candidate == 0:
         validation_warnings.append("No transaction data rows were found below the header row.")
+
+    identical = _identical_rows(candidates)
+    if identical:
+        validation_warnings.append(f"{identical} row(s) are identical to another row of this file (same vehicle, date, "
+                                   "litres, cost, invoice and odometer). They are kept as separate refuels.")
+    if rows_price_mismatch:
+        validation_warnings.append(f"{rows_price_mismatch} row(s) have a total cost that differs from litres x unit "
+                                   "price; the statement's total cost is kept.")
+
+    confirmation_fields = mapping_confirmation_fields(raw_headers, active_mapping, mapping_details, all_rows,
+                                                      canonical_to_col_idx)
+    pending_confirmation = [] if mapping_confirmed else confirmation_fields
+
+    # Without a date column the date comes from the reporting month, so ask for that instead of a column
+    month_needed = not active_mapping.get("transaction_date") and mode_info.get("mode") is None
+    missing_columns = [f for f in missing_required_fields if not (month_needed and f == "transaction_date")]
+    if missing_columns:
+        blocking_reasons.append(f"Required columns not mapped: {', '.join(missing_columns)}.")
+    if month_needed and not str(reporting_month or "").strip():
+        blocking_reasons.append("This statement has no transaction date column: select the reporting month."
+                                if replace_enabled() else MONTHLY_SUMMARY_DISABLED_MESSAGE)
+    if pending_confirmation:
+        blocking_reasons.append(f"Confirm the column mapping for: {', '.join(pending_confirmation)}.")
+    if not missing_required_fields and not candidates:
+        blocking_reasons.append("No valid fuel rows to import.")
+
+    replacement: Optional[Dict[str, Any]] = None
+    if (replace_enabled() and mode_info.get("mode") and (monthly or dated_replace_enabled()) and candidates
+            and not missing_required_fields):
+        period = replacement_period(candidates, mode_info, extend_to_full_months)
+        try:
+            plan = plan_replacement(candidates, period, fetch_visible_rows_in_range(
+                *replacement_fetch_window(period), bearer_token=bearer_token), whole_period=extend_to_full_months)
+        except FuelDataFetchError:
+            blocking_reasons.append("The rows this import would replace could not be read; please retry the preview.")
+        else:
+            replacement = describe_replacement(plan, period, extend_to_full_months and not monthly)
+            if plan["conflicts"]:
+                blocking_reasons.append(replacement_conflict_message(plan))
 
     return FuelImportPreviewResponse(
         file_name=file_name,
@@ -825,11 +1268,32 @@ def generate_fuel_preview(file_bytes: bytes, file_name: str) -> FuelImportPrevie
         missing_required_fields=missing_required_fields,
         validation_warnings=validation_warnings,
         sample_rows=sample_rows,
+        active_mapping=active_mapping,
+        import_mode=mode_info.get("mode"),
+        reporting_month=mode_info.get("reporting_month"),
+        assigned_transaction_date=assigned_date,
+        partial_month=bool(mode_info.get("partial_month")),
+        monthly_summary_enabled=replace_enabled(),
+        date_column_candidates=date_header_candidates(raw_headers),
+        mapping_confirmation_required=confirmation_fields,
+        mapping_confirmed=bool(mapping_confirmed),
+        rows_identical_in_file=identical,
+        rows_price_mismatch=rows_price_mismatch,
+        rows_cost_derived=sum(int(c["cost_derived"]) for c in candidates),
+        rows_unit_price_derived=sum(int(c["unit_price_derived"]) for c in candidates),
+        replacement=replacement,
+        ready_to_import=not blocking_reasons,
+        blocking_reasons=blocking_reasons,
     )
 
 
-def _summarize_stored_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Distinct source rows stored under one import, extra copies of any source row, and their date range."""
+def _summarize_stored_rows(rows: List[Dict[str, Any]], include_staged: bool = True) -> Dict[str, Any]:
+    """
+    Distinct source rows stored under one import, extra copies of any source row, and their date range.
+    include_staged=False counts only visible rows (staged rows of an uncommitted import are stored but not shown).
+    """
+    if not include_staged:
+        rows = [r for r in rows if r.get("staged") is not True]
     copies: Dict[Any, int] = {}
     for r in rows:
         copies[r.get("source_row_number")] = copies.get(r.get("source_row_number"), 0) + 1
@@ -872,7 +1336,8 @@ def _finalize_interrupted_import(import_id: int, bearer_token: Optional[str],
     """
     try:
         stored: Optional[Dict[str, Any]] = _summarize_stored_rows(fetch_import_rows(
-            import_id, bearer_token=bearer_token, deadline=deadlines.recount if deadlines else None))
+            import_id, bearer_token=bearer_token, deadline=deadlines.recount if deadlines else None),
+            include_staged=False)
     except Exception as exc:
         logger.error("Could not count rows stored by interrupted import #%s: %s", import_id, exc)
         stored = None
@@ -969,7 +1434,7 @@ def reconcile_fuel_import(import_id: int, bearer_token: Optional[str] = None) ->
             raise FuelImportError(f"Import #{import_id} may still be running; retry in a few minutes.", status_code=409)
 
     try:
-        stored = _summarize_stored_rows(fetch_import_rows(import_id, bearer_token=bearer_token))
+        stored = _summarize_stored_rows(fetch_import_rows(import_id, bearer_token=bearer_token), include_staged=False)
     except FuelDataFetchError:
         raise FuelImportError("Stored transactions could not be read completely; nothing was changed. Please retry.",
                               status_code=503) from None
@@ -1028,6 +1493,36 @@ def reconcile_fuel_import(import_id: int, bearer_token: Optional[str] = None) ->
     return {**record, **updates}
 
 
+def _commit_replacement(import_id: int, supersede_ids: List[int], expected_rows: int,
+                        bearer_token: Optional[str], deadlines: ImportDeadlines) -> Tuple[str, int, Optional[str]]:
+    """
+    Run commit_fuel_import. Returns (state, rows superseded, note): 'committed', 'not_committed' (refused: nothing
+    changed, the new rows stay hidden) or 'unknown' (sent, no answer, and reading the import back could not settle
+    it). An unknown outcome is settled from the import's own rows: the commit is one transaction, so they are either
+    all still staged or all visible.
+    """
+    unchanged = ("the new rows stay hidden and the dashboard still shows the previously imported data. "
+                 "Preview and import the file again.")
+    try:
+        result = commit_fuel_import(import_id, supersede_ids, expected_rows, bearer_token, deadline=deadlines.recount)
+    except FuelCommitError as exc:
+        return "not_committed", 0, f"Not committed ({exc}): {unchanged}"
+    if result is not None:
+        return "committed", result["superseded"], None
+    if expected_rows:
+        try:
+            rows = fetch_import_rows(import_id, bearer_token=bearer_token, deadline=deadlines.recount)
+        except FuelDataFetchError:
+            rows = None
+        if rows is not None and len(rows) == expected_rows:
+            if not any(r.get("staged") is True for r in rows):
+                return "committed", len(supersede_ids), "Commit outcome verified by reading the import back."
+            if all(r.get("staged") is True for r in rows):
+                return "not_committed", 0, f"Not committed (no answer from the database): {unchanged}"
+    return "unknown", 0, (f"{INCOMPLETE_MARKER} the commit outcome is unknown; the import is either fully visible or "
+                          "fully hidden. Use Reconcile in import history to find out.")
+
+
 def execute_fuel_import(
     file_bytes: bytes,
     file_name: str,
@@ -1035,6 +1530,10 @@ def execute_fuel_import(
     imported_by: str,
     bearer_token: Optional[str] = None,
     request_started: Optional[float] = None,
+    reporting_month: Optional[str] = None,
+    mapping_confirmed: bool = False,
+    extend_to_full_months: bool = False,
+    expected_replace_count: Optional[int] = None,
 ) -> FuelImportResultResponse:
     """
     Run one import at a time, so a concurrent import of the same rows sees the first one's inserts.
@@ -1046,7 +1545,10 @@ def execute_fuel_import(
         raise FuelImportError("Another fuel import is still running; nothing was imported. Please retry.", status_code=409)
     try:
         return _execute_fuel_import_locked(file_bytes, file_name, confirmed_mapping, imported_by, bearer_token,
-                                           deadlines=deadlines)
+                                           deadlines=deadlines, reporting_month=reporting_month,
+                                           mapping_confirmed=mapping_confirmed,
+                                           extend_to_full_months=extend_to_full_months,
+                                           expected_replace_count=expected_replace_count)
     finally:
         _IMPORT_LOCK.release()
 
@@ -1058,18 +1560,26 @@ def _execute_fuel_import_locked(
     imported_by: str,
     bearer_token: Optional[str] = None,
     deadlines: Optional[ImportDeadlines] = None,
+    reporting_month: Optional[str] = None,
+    mapping_confirmed: bool = False,
+    extend_to_full_months: bool = False,
+    expected_replace_count: Optional[int] = None,
 ) -> FuelImportResultResponse:
     """
     Execute full fuel import:
     1. Parse workbook & detect headers.
-    2. Validate confirmed mapping against actual headers.
+    2. Validate confirmed mapping against actual headers, and the format (dated / monthly summary).
     3. Validate candidate rows and parse values.
     4. Create initial 'processing' record in fuel_imports and claim the import (see _claim_import).
-    5. Deduplicate against in-file records and existing database transactions.
-    6. Batch insert valid records into fuel_transactions.
-    7. Update fuel_imports with final statistics and status.
+    5. Without FUEL_IMPORT_REPLACE: skip rows already stored (duplicate check against the database).
+       With it: plan the replacement (plan_replacement) - the visible rows of the file's vehicles in its period.
+    6. Batch insert valid records into fuel_transactions (staged, i.e. hidden, with FUEL_IMPORT_REPLACE).
+    7. With FUEL_IMPORT_REPLACE, only when every new row is stored: commit_fuel_import makes them visible and
+       supersedes the replaced rows in one database transaction. Otherwise nothing visible changes.
+    8. Update fuel_imports with final statistics and status.
     Once the record exists, every exit leaves it in a terminal status (see _finalize_interrupted_import).
     Every database call is bounded by `deadlines` (see ImportDeadlines).
+    Identical rows of one file are all imported (repeated refuels); they are never collapsed.
     """
     deadlines = deadlines or ImportDeadlines(time.perf_counter())
     # 1. Load Excel
@@ -1085,14 +1595,33 @@ def _execute_fuel_import_locked(
     sheet = wb.active or wb[wb.sheetnames[0]]
     header_row_idx, raw_headers = detect_header_row(sheet)
 
-    # 2. Validate confirmed mapping
-    valid_mapping = validate_confirmed_mapping(raw_headers, confirmed_mapping)
+    # 2. Validate confirmed mapping and the import format
+    month_given = bool(str(reporting_month or "").strip())
+    valid_mapping = validate_confirmed_mapping(raw_headers, confirmed_mapping, date_assigned=month_given)
+    mode_info = resolve_import_mode(valid_mapping, reporting_month)
+    missing_prices = missing_price_fields(valid_mapping)
+    if missing_prices:
+        raise FuelImportError(
+            "Missing required mapping for 'total_cost': a statement without a transaction date column needs the total "
+            "cost (AED)." if missing_prices == ["total_cost"] else
+            "Missing required mapping for 'unit_price': a dated statement needs the unit price per litre or the "
+            "total cost.", status_code=422)
+    monthly = mode_info["mode"] == IMPORT_MODE_MONTHLY
+    assigned_date = mode_info["assigned_date"] if monthly else None
+    # Monthly summaries always replace (staged, then committed); dated statements only with FUEL_IMPORT_REPLACE_DATED
+    replace = replace_enabled() and (monthly or dated_replace_enabled())
 
     # Map column index -> canonical field
     canonical_to_col_idx = column_indexes(raw_headers, valid_mapping)
 
     # 3. Read table rows
     all_rows = read_table_rows(sheet, header_row_idx)
+    full_mapping = {k: valid_mapping.get(k) for k in CANONICAL_FIELDS}
+    unconfirmed = mapping_confirmation_fields(raw_headers, full_mapping, map_headers(raw_headers)[1], all_rows,
+                                              canonical_to_col_idx)
+    if unconfirmed and not mapping_confirmed:
+        raise FuelImportError(f"The column mapping for {', '.join(unconfirmed)} is ambiguous and must be confirmed in "
+                              "the preview before importing; nothing was imported.", status_code=422)
     date_order = statement_date_order(all_rows, canonical_to_col_idx)
 
     total_rows_found = len(all_rows)
@@ -1104,6 +1633,7 @@ def _execute_fuel_import_locked(
     rows_failed = 0
     rows_date_ambiguous = 0
     rows_optional_parse_failed = 0
+    rows_price_mismatch = 0
     candidates: List[Dict[str, Any]] = []
     failed_row_details: List[Dict[str, Any]] = []
     ignored_row_details: List[Dict[str, Any]] = []
@@ -1123,7 +1653,7 @@ def _execute_fuel_import_locked(
 
     for offset, row in enumerate(all_rows, start=1):
         row_idx = header_row_idx + offset
-        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order)
+        res = classify_statement_row(row, canonical_to_col_idx, row_idx, total_cols, date_order, assigned_date)
         kind = res["kind"]
         if kind == "ignored":
             rows_ignored += 1
@@ -1141,7 +1671,15 @@ def _execute_fuel_import_locked(
         if kind == "failed":
             fail_row(row_idx, res["reason"])
             continue
+        rows_price_mismatch += int(res["price_mismatch"])
         candidates.append(res["candidate"])
+
+    for message in _monthly_summary_warnings(mode_info):
+        add_warning(message)
+    identical = _identical_rows(candidates)
+    if identical:
+        add_warning(f"{identical} row(s) are identical to another row of this file; all were kept as separate refuels.")
+    period = replacement_period(candidates, mode_info, extend_to_full_months) if replace and candidates else None
 
     file_sha256 = hashlib.sha256(file_bytes).hexdigest()
     v2 = schema_v2_enabled()
@@ -1165,6 +1703,13 @@ def _execute_fuel_import_locked(
         deadline=deadlines.writes,
         **({"file_sha256": file_sha256} if v2 else {}),
         **({"rows_ignored": rows_ignored, "rows_non_fuel": rows_non_fuel} if ignored_counts_enabled() else {}),
+        replace_fields={
+            "import_mode": mode_info["mode"],
+            "reporting_month": mode_info["month_from"].isoformat() if monthly else None,
+            "replace_scope": ({"period_from": period[0].isoformat(), "period_to": period[1].isoformat(),
+                               "extended_to_full_months": bool(extend_to_full_months and not monthly)}
+                              if period else None),
+        },
     )
 
     # 6. Claim the import across instances, then fetch existing fingerprints for the file's date window (±1 day).
@@ -1173,9 +1718,26 @@ def _execute_fuel_import_locked(
     check_from: Optional[str] = None
     check_to: Optional[str] = None
     existing_fingerprints: Set[str] = set()
+    plan: Optional[Dict[str, Any]] = None
     try:
         _claim_import(import_id, bearer_token, deadlines)
-        if candidates:
+        if replace and period:
+            # Latest import wins: read every visible row of the file's vehicles in its period, after the claim
+            try:
+                plan = plan_replacement(candidates, period, fetch_visible_rows_in_range(
+                    *replacement_fetch_window(period), bearer_token=bearer_token, deadline=deadlines.writes),
+                    whole_period=extend_to_full_months)
+            except FuelDataFetchError:
+                raise FuelImportError("The rows this import replaces could not be read completely; nothing was "
+                                      "imported. Please retry.", status_code=503) from None
+            if plan["conflicts"]:
+                raise FuelImportError(replacement_conflict_message(plan), status_code=409)
+            if expected_replace_count is not None and int(expected_replace_count) != len(plan["supersede"]):
+                raise FuelImportError(
+                    f"The stored data changed since the preview ({len(plan['supersede'])} row(s) would now be "
+                    f"replaced, the preview showed {int(expected_replace_count)}). Nothing was imported; preview the "
+                    "file again.", status_code=409)
+        elif candidates and not replace:
             candidate_days = [c["fields"]["transaction_date"][:10] for c in candidates]
             check_from = (date.fromisoformat(min(candidate_days)) - timedelta(days=1)).isoformat()
             check_to = (date.fromisoformat(max(candidate_days)) + timedelta(days=1)).isoformat()
@@ -1206,10 +1768,13 @@ def _execute_fuel_import_locked(
         )
 
     try:
-        # 7. Pass 2: deduplicate against the database and earlier rows of this file
+        # 7. Pass 2: rows already stored are not stored again - an identical visible row in the replacement scope
+        # (FUEL_IMPORT_REPLACE), else a fingerprint match in the database. Identical rows within the file are all
+        # kept: they are repeated refuels, and re-import protection comes from the database side.
         existing_weak = _build_weak_index(existing_fingerprints)
-        file_strong: Set[str] = set()
-        file_weak: Dict[str, Set[str]] = {}
+        retained_for: Dict[int, int] = plan["retained_for"] if plan else {}
+        file_copies: Dict[str, int] = defaultdict(int)
+        rows_unchanged = 0
         rows_duplicate = 0
         rows_cost_derived = 0
         rows_unit_price_derived = 0
@@ -1218,13 +1783,14 @@ def _execute_fuel_import_locked(
         refunds: List[Dict[str, Any]] = []
         parsed_dates: List[str] = []
 
-        for cand in candidates:
+        for i, cand in enumerate(candidates):
             fp = cand["fingerprint"]
             source_row = cand["fields"]["source_row_number"]
-            if _is_duplicate(fp, existing_fingerprints, existing_weak):
+            if i in retained_for:
+                dup_reason = f"Identical to stored transaction #{retained_for[i]}, which is kept as is"
+                rows_unchanged += 1
+            elif not replace and _is_duplicate(fp, existing_fingerprints, existing_weak):
                 dup_reason = "Matches an existing transaction"
-            elif _is_duplicate(fp, file_strong, file_weak):
-                dup_reason = "Duplicate of an earlier row in this file"
             else:
                 dup_reason = None
             if dup_reason:
@@ -1233,16 +1799,23 @@ def _execute_fuel_import_locked(
                     duplicate_row_details.append({"source_row": source_row, "reason": dup_reason})
                 continue
 
-            file_strong.add(fp)
-            _add_to_weak_index(file_weak, fp)
+            file_copies[fp] += 1
             rows_cost_derived += int(cand["cost_derived"])
             rows_unit_price_derived += int(cand["unit_price_derived"])
             parsed_dates.append(cand["fields"]["transaction_date"][:10])
 
             tx = {"import_id": import_id, **cand["fields"]}
+            if replace:
+                tx.update({"date_basis": cand["date_basis"], "staged": True})
             if v2:
+                # The unique fingerprint index must accept repeated refuels (n-th copy suffixed) and, with
+                # replacement, rows equal to ones a later import superseded (suffixed with this import's row).
+                if replace:
+                    stored_fp = f"{fp}|imp:{import_id}:{source_row}"
+                else:
+                    stored_fp = fp if file_copies[fp] == 1 else f"{fp}|rep:{file_copies[fp]}"
                 tx.update({
-                    "fingerprint": fp,
+                    "fingerprint": stored_fp,
                     "transaction_kind": "refund_adjustment" if tx["litres"] < 0 else "purchase",
                     "cost_derived": bool(cand["cost_derived"]),
                     "unit_price_derived": bool(cand["unit_price_derived"]),
@@ -1266,7 +1839,7 @@ def _execute_fuel_import_locked(
                 continue
             part: Dict[str, Any] = {}
             batch_size = len(group) if is_refund else 100
-            if v2:
+            if v2 and not replace:
                 # The unique fingerprint index skips rows already stored, including by a concurrent import.
                 inserted, ignored, errs = insert_fuel_transactions_ignore_duplicates(
                     group, batch_size=batch_size, bearer_token=bearer_token, deadline=deadlines.writes, outcome=part,
@@ -1333,6 +1906,37 @@ def _execute_fuel_import_locked(
                     batch_errors.append(f"Verified against the database: {stored['stored']} row(s) of this import are stored.")
                 if stored["extra_copies"]:
                     batch_errors.append(_extra_copies_message(stored))
+
+        # 8c. Latest import wins: commit only when every new row is stored. The commit makes them visible and
+        # supersedes the replaced rows in one transaction, so the visible data is either the old set or the new one.
+        rows_replaced = 0
+        commit_state: Optional[str] = None
+        if replace:
+            to_store = len(purchases) + len(refunds)
+            supersede_ids = [int(r["id"]) for r in (plan or {}).get("supersede", [])]
+            if rows_imported != to_store or rows_unverified or rows_not_processed:
+                commit_state = "not_committed"
+                batch_errors.insert(0, "Not committed: not every new row was stored, so the new rows stay hidden and "
+                                       "the dashboard still shows the previously imported data. Import the file again.")
+            elif to_store or supersede_ids:
+                commit_state, rows_replaced, note = _commit_replacement(import_id, supersede_ids, to_store,
+                                                                        bearer_token, deadlines)
+                if note:
+                    batch_errors.insert(0, note)
+            elif rows_unchanged:
+                commit_state = "committed"  # every valid row is already stored unchanged: nothing to change
+            if commit_state is None:
+                pass  # no valid rows: nothing was written
+            elif commit_state == "unknown":
+                rows_unverified += rows_imported
+                rows_imported = 0
+            elif commit_state != "committed":
+                # Stored but hidden (staged): nothing of this import is visible
+                rows_failed += rows_imported + rows_unverified
+                rows_imported = rows_unverified = 0
+                parsed_dates = []
+            else:
+                clear_vehicle_identifier_cache()
     except Exception as exc:
         logger.error("Fuel import #%s stopped after an internal error: %s", import_id, exc, exc_info=True)
         raise FuelImportError(_finalize_interrupted_import(import_id, bearer_token, deadlines), status_code=500) from None
@@ -1363,11 +1967,11 @@ def _execute_fuel_import_locked(
     if batch_errors:
         error_message = "; ".join(batch_errors)
 
-    if rows_imported == 0 and not rows_unverified and total_rows_found > 0:
+    if rows_imported == 0 and not rows_unverified and total_rows_found > 0 and commit_state != "committed":
         final_status = "failed"
         if not error_message:
             error_message = "No valid transactions were imported."
-    elif rows_failed > 0 or rows_duplicate > 0 or batch_errors:
+    elif rows_failed > 0 or rows_duplicate - rows_unchanged > 0 or batch_errors:
         final_status = "completed_with_errors"
     else:
         final_status = "completed"
@@ -1386,6 +1990,7 @@ def _execute_fuel_import_locked(
             "date_to": date_to,
             "error_message": error_message,
             "completed_at": completed_at,
+            **({"rows_replaced": rows_replaced, "rows_unchanged": rows_unchanged} if replace else {}),
         },
         bearer_token=bearer_token,
         deadline=deadlines.status,
@@ -1426,4 +2031,15 @@ def _execute_fuel_import_locked(
             "stored_value_shapes": stored_value_shapes,
             "timestamp_note": TIMESTAMP_COMPARISON_NOTE,
         },
+        import_mode=mode_info["mode"],
+        reporting_month=mode_info["reporting_month"],
+        assigned_transaction_date=assigned_date,
+        rows_price_mismatch=rows_price_mismatch,
+        rows_identical_in_file=identical,
+        replacement_enabled=replace,
+        committed=(commit_state == "committed") if replace else None,
+        rows_replaced=rows_replaced,
+        rows_unchanged=rows_unchanged,
+        replacement_period=({"period_from": period[0].isoformat(), "period_to": period[1].isoformat()}
+                            if period else None),
     )

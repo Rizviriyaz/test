@@ -19,6 +19,8 @@ from app.fuel.schemas import (
     EfficiencyTrendResponse,
 )
 from app.fuel.scope import REASON_AMBIGUOUS, UnitResolver, tx_local_date, unit_key
+from app.fuel.analytics import MONTHLY_SUMMARY_TREND_WARNING, monthly_summary_excluded
+from app.fuel.reporting_period import is_monthly_summary
 from app.utils.datetime_helpers import UAE_TZ
 from app.fuel.wialon_distance import match_fuel_vehicle_to_wialon
 from app.vehicles import extract_registration_plate
@@ -183,7 +185,8 @@ def _group_fuel_by_unit(
             g = by_unit.get(key)
             if g is None:
                 unit = units_by_id.get(key) or {"id": key, "nm": tx.get("_unit_name") or resolver.resolve(vid).get("unit_name")}
-                g = by_unit[key] = {"unit": unit, "litres": Decimal(0), "cost": Decimal(0), "count": 0, "identifiers": Counter()}
+                g = by_unit[key] = {"unit": unit, "litres": Decimal(0), "cost": Decimal(0), "count": 0, "identifiers": Counter(),
+                                    "purchases": 0, "refunds": 0, "summaries": 0}
         else:
             if not vid:
                 continue
@@ -196,6 +199,12 @@ def _group_fuel_by_unit(
         g["count"] += 1
         if kind == "unit":
             g["identifiers"][vid] += 1
+            if is_monthly_summary(tx):
+                g["summaries"] += 1
+            elif l < 0:
+                g["refunds"] += 1
+            elif l > 0:
+                g["purchases"] += 1
     return by_unit, others
 
 
@@ -241,6 +250,58 @@ def _suppression_reason(distance_km: float, litres: Decimal, min_km: float, mixe
     return None
 
 
+MIXED_IDLE_WARNING = ("Vehicle bought more than one fuel type in this period; its idle hours cannot be attributed to the "
+                      "filtered fuel type, so no idle fuel is estimated.")
+
+
+def estimate_unit_idle(
+    idle_seconds: Optional[int], litres: Decimal, cost: Decimal, idle_rate_lph: float, mixed: bool = False,
+    active: bool = True,
+) -> Dict[str, Any]:
+    """
+    The one idle-fuel estimate used by the fleet KPI, the vehicle rankings and the waste report (all [estimated]):
+        idle litres = idle seconds / 3600 x idle_rate_lph      idle cost = idle litres x the unit's net price (cost / litres)
+    computed in Decimal and rounded to 0.01 only here, at the per-vehicle output boundary; fleet totals are sums of
+    these values. Eligible: idle time known and, under a fuel-type filter, not mixed-fuel. Distance is not needed.
+    Unknown stays None (never 0): idle litres when idle time is unknown or the unit is mixed-fuel, idle cost when the
+    unit has no positive net purchases (no price). A recorded 0 idle gives no idle litres, as before; for a unit with
+    no recorded activity at all (active False: 0 km, 0 engine hours, 0 idle) no split is estimated either.
+    """
+    out: Dict[str, Any] = {"eligible": False, "idle_litres": None, "idle_cost": None, "driving_litres": None,
+                           "idle_pct": None, "driving_pct": None, "status": "unavailable", "warning": None}
+    if idle_seconds is None:
+        out["warning"] = "Wialon idle hours unavailable for this unit; idle/driving fuel split not estimated."
+        return out
+    if mixed:
+        out["warning"] = MIXED_IDLE_WARNING
+        return out
+    if idle_seconds <= 0 and not active:
+        return out
+    out["eligible"] = True
+    out["status"] = "estimated"
+    if idle_seconds <= 0:
+        if litres > 0:
+            out.update(driving_litres=_round2(litres), idle_pct=0.0, driving_pct=100.0)
+        return out
+    idle_l = Decimal(int(idle_seconds)) / Decimal(3600) * Decimal(str(idle_rate_lph))
+    out["idle_litres"] = _round2(idle_l)
+    if litres > 0:
+        out["idle_cost"] = _round2(idle_l * cost / litres)
+        if litres >= idle_l:
+            driving_l = litres - idle_l
+            out["driving_litres"] = _round2(driving_l)
+            out["idle_pct"] = float((idle_l / litres * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+            out["driving_pct"] = float((driving_l / litres * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+        else:
+            out["status"] = "provisional"
+            out["warning"] = (f"Estimated idle fuel ({float(idle_l):.1f} L) exceeds recorded purchases "
+                              f"({float(litres):.1f} L) for period. Driving split withheld.")
+    else:
+        out["status"] = "provisional"
+        out["warning"] = "No positive net fuel purchases in this period; idle fuel cost and driving split not estimated."
+    return out
+
+
 def calculate_fleet_efficiency(
     transactions: List[Dict[str, Any]],
     telematics_map: Dict[str, Any],
@@ -279,11 +340,20 @@ def calculate_fleet_efficiency(
     vehicles_with_distance = vehicles_without_distance = 0
     vehicles_engine_only = vehicles_mixed = vehicles_non_positive = 0
     tracked_litres = tracked_cost = total_distance_km = Decimal(0)
-    telemetry_litres = telemetry_cost = engine_only_litres = mixed_litres = Decimal(0)
+    telemetry_litres = engine_only_litres = mixed_litres = Decimal(0)
     total_driving_sec = total_idle_sec = total_engine_sec = 0
     # How many included units reported each duration: a recorded 0 total stays 0.0, while a total with no
     # known contributors is None (unknown).
     driving_known = idle_known = engine_known = 0
+    # Idle estimates: the same per-unit estimate_unit_idle values as the vehicle rankings and the waste report
+    idle_litres_sum = idle_cost_sum = idle_basis_litres = Decimal(0)
+    idle_estimated = idle_cost_unknown = idle_mixed = 0
+    # Driving/idle coverage over every unit in the KPI scope: known = driving, idle and engine hours all reported
+    hours_known_units = 0
+    # Units eligible for the distance set (positive net fuel, not mixed-fuel) whose Wialon distance is known: with
+    # none, the fleet distance is unknown (None); with some, it is their sum, and a recorded 0 km stays 0.0. The
+    # monthly trend applies the same rule per month (calculate_efficiency_trend).
+    distance_known_eligible = 0
 
     for uid, g in fuel_by_unit.items():
         t_data, _ = _telematics_for_unit(g["unit"], tele_by_id, ambiguous_names)
@@ -294,6 +364,8 @@ def calculate_fleet_efficiency(
 
         if dist_km is None:
             vehicles_telemetry_unknown += 1
+        elif g["litres"] > 0 and uid not in mixed:
+            distance_known_eligible += 1
         has_distance = dist_km is not None and dist_km > 0
         if has_distance and uid in mixed:
             vehicles_mixed += 1
@@ -311,7 +383,6 @@ def calculate_fleet_efficiency(
 
         if has_distance or (engine_sec or 0) > 0:
             telemetry_litres += g["litres"]
-            telemetry_cost += g["cost"]
             if not has_distance:
                 vehicles_engine_only += 1
                 engine_only_litres += g["litres"]
@@ -320,12 +391,27 @@ def calculate_fleet_efficiency(
             if driving_sec is not None:
                 total_driving_sec += driving_sec
                 driving_known += 1
-            if idle_sec is not None:
-                total_idle_sec += idle_sec
-                idle_known += 1
             if engine_sec is not None:
                 total_engine_sec += engine_sec
                 engine_known += 1
+
+        active = bool(t_data["has_telemetry"]) or has_distance or (engine_sec or 0) > 0
+        idle = estimate_unit_idle(idle_sec, g["litres"], g["cost"], idle_rate_lph, uid in mixed, active)
+        if driving_sec is not None and idle_sec is not None and engine_sec is not None:
+            hours_known_units += 1
+        if idle_sec is not None and uid in mixed:
+            idle_mixed += 1
+        if idle["eligible"]:
+            total_idle_sec += idle_sec
+            idle_known += 1
+            idle_basis_litres += g["litres"]
+            if idle["idle_litres"] is not None:
+                idle_estimated += 1
+                idle_litres_sum += Decimal(str(idle["idle_litres"]))
+                if idle["idle_cost"] is not None:
+                    idle_cost_sum += Decimal(str(idle["idle_cost"]))
+                else:
+                    idle_cost_unknown += 1
 
     unmatched_tx_count = sum(g["count"] for g in excluded_groups.values())
     unmatched_litres_dec = sum((g["litres"] for g in excluded_groups.values()), Decimal(0))
@@ -346,18 +432,23 @@ def calculate_fleet_efficiency(
     total_idle_hours = round(total_idle_sec / 3600.0, 1) if idle_known else None
     total_engine_hours = round(total_engine_sec / 3600.0, 1) if engine_known else None
 
+    # Fleet idle fuel and cost are the sums of the per-vehicle estimates (each rounded to 0.01 L / AED), so the
+    # rankings and the waste report add up to them; the split is against the litres of those same vehicles.
     est_idle_fuel = est_idle_cost = est_driving_fuel = est_idle_pct = est_driving_pct = None
-    if total_idle_hours is not None and total_idle_hours > 0:
-        idle_l = total_idle_hours * idle_rate_lph
-        est_idle_fuel = round(idle_l, 1)
-        tel_l = float(telemetry_litres)
-        tel_c = float(telemetry_cost)
-        avg_price = (tel_c / tel_l) if tel_l > 0 else 0.0
-        est_idle_cost = round(idle_l * avg_price, 2)
-        if tel_l >= idle_l and tel_l > 0:
-            est_driving_fuel = round(tel_l - idle_l, 1)
-            est_idle_pct = round((idle_l / tel_l) * 100.0, 1)
-            est_driving_pct = round((est_driving_fuel / tel_l) * 100.0, 1)
+    if idle_estimated:
+        est_idle_fuel = float(idle_litres_sum.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+        est_idle_cost = _round2(idle_cost_sum) if idle_estimated > idle_cost_unknown else None
+        if idle_basis_litres > 0 and idle_basis_litres >= idle_litres_sum:
+            driving_l = idle_basis_litres - idle_litres_sum
+            est_driving_fuel = float(driving_l.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+            est_idle_pct = float((idle_litres_sum / idle_basis_litres * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+            est_driving_pct = float((driving_l / idle_basis_litres * 100).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
+    if idle_cost_unknown and est_idle_cost is not None:
+        warnings_out.append(f"Estimated idle cost excludes {idle_cost_unknown} vehicle(s) with no positive net fuel "
+                            "purchases (no price to apply).")
+    if idle_mixed:
+        warnings_out.append(f"{idle_mixed} mixed-fuel vehicle(s) are excluded from idle hours and idle fuel estimates "
+                            "under the fuel-type filter.")
 
     if vehicles_telemetry_unknown:
         warnings_out.append(
@@ -386,6 +477,9 @@ def calculate_fleet_efficiency(
         total_litres=float(_round2(total_litres) or 0.0),
         total_cost=float(_round2(total_cost) or 0.0),
         transaction_count=tx_count,
+        dated_purchase_count=sum(g["purchases"] for g in fuel_by_unit.values()),
+        refund_count=sum(g["refunds"] for g in fuel_by_unit.values()),
+        monthly_summary_rows=sum(g["summaries"] for g in fuel_by_unit.values()),
         vehicle_count=len(fuel_by_unit),
         matched_vehicle_count=len(fuel_by_unit),
         unmatched_vehicle_count=len(excluded_groups),
@@ -393,7 +487,7 @@ def calculate_fleet_efficiency(
         vehicles_without_distance=vehicles_without_distance,
         tracked_litres=float(_round2(tracked_litres) or 0.0),
         tracked_cost=float(_round2(tracked_cost) or 0.0),
-        total_distance_km=_round2(total_distance_km) if total_distance_km > 0 else None,
+        total_distance_km=_round2(total_distance_km) if distance_known_eligible else None,
         total_driving_hours=total_driving_hours,
         total_idle_hours=total_idle_hours,
         total_engine_hours=total_engine_hours,
@@ -412,6 +506,10 @@ def calculate_fleet_efficiency(
         data_warnings=warnings_out,
         vehicles_telemetry_unknown=vehicles_telemetry_unknown,
         telemetry_litres=float(_round2(telemetry_litres) or 0.0),
+        idle_basis_litres=float(_round2(idle_basis_litres) or 0.0),
+        vehicles_hours_known=hours_known_units,
+        vehicles_hours_unknown=len(fuel_by_unit) - hours_known_units,
+        vehicles_idle_estimated=idle_estimated,
         vehicles_engine_hours_only=vehicles_engine_only,
         engine_only_litres=float(_round2(engine_only_litres) or 0.0),
         vehicles_fuel_type_mixed=vehicles_mixed,
@@ -456,7 +554,6 @@ def calculate_vehicle_efficiency_records(
         v_litres = float(_round2(f_data["litres"]) or 0.0)
         v_cost = float(_round2(f_data["cost"]) or 0.0)
         v_count = f_data["count"]
-        avg_price = (v_cost / v_litres) if v_litres > 0 else 0.0
 
         if not matched:
             results.append(
@@ -525,6 +622,19 @@ def calculate_vehicle_efficiency_records(
         eng_hrs = t_data["engine_hours"]
         has_tel = t_data["has_telemetry"]
         tele_status = _telemetry_status(t_data)
+        # Same estimate as the fleet KPI and the waste report; distance is not needed for it
+        active = bool(has_tel) or (dist_km or 0) > 0 or (t_data["engine_hours_seconds"] or 0) > 0
+        idle = estimate_unit_idle(t_data["idle_seconds"], f_data["litres"], f_data["cost"], idle_rate_lph, w_id in mixed,
+                                  active)
+        idle_fields = dict(
+            estimated_idle_fuel_litres=idle["idle_litres"],
+            estimated_idle_cost=idle["idle_cost"],
+            estimated_driving_fuel_litres=idle["driving_litres"],
+            estimated_idle_percentage=idle["idle_pct"],
+            estimated_driving_percentage=idle["driving_pct"],
+            estimation_status=idle["status"],
+        )
+        idle_warnings = [idle["warning"]] if idle["warning"] else []
 
         if dist_km is None:
             # Distance unknown (not reported, unreadable or withheld): never shown as 0 km
@@ -542,16 +652,12 @@ def calculate_vehicle_efficiency_records(
                     idle_duration_hours=idle_hrs,
                     engine_hours=eng_hrs,
                     idle_rate_lph=idle_rate_lph,
-                    estimated_idle_fuel_litres=None,
-                    estimated_idle_cost=None,
-                    estimated_driving_fuel_litres=None,
-                    estimated_idle_percentage=None,
-                    estimated_driving_percentage=None,
+                    **idle_fields,
                     fuel_efficiency_l_per_100km=None,
                     fuel_cost_per_km=None,
                     status="no_distance_data",
-                    estimation_status="unavailable",
-                    quality_warnings=[tele_warning or "Wialon distance for this unit could not be read; distance unavailable."],
+                    quality_warnings=[tele_warning or "Wialon distance for this unit could not be read; distance unavailable."]
+                    + idle_warnings,
                     distance_source="unavailable",
                     telemetry_status=tele_status,
                 )
@@ -571,16 +677,11 @@ def calculate_vehicle_efficiency_records(
                     idle_duration_hours=idle_hrs,
                     engine_hours=eng_hrs,
                     idle_rate_lph=idle_rate_lph,
-                    estimated_idle_fuel_litres=None,
-                    estimated_idle_cost=None,
-                    estimated_driving_fuel_litres=None,
-                    estimated_idle_percentage=None,
-                    estimated_driving_percentage=None,
+                    **idle_fields,
                     fuel_efficiency_l_per_100km=None,
                     fuel_cost_per_km=None,
                     status="no_distance_data",
-                    estimation_status="unavailable",
-                    quality_warnings=["GPS unit online but 0 km / 0 engine hours recorded in selected period."],
+                    quality_warnings=["GPS unit online but 0 km / 0 engine hours recorded in selected period."] + idle_warnings,
                     distance_source="wialon_report",
                     telemetry_status=tele_status,
                 )
@@ -591,11 +692,6 @@ def calculate_vehicle_efficiency_records(
             fuel_eff = _round2((f_data["litres"] / dist_dec) * Decimal(100)) if suppressed is None else None
             fuel_c_km = _round2(f_data["cost"] / dist_dec) if suppressed is None else None
 
-            # Driving vs Idling estimation (impossible when Wialon idle hours are unknown)
-            idle_known = idle_hrs is not None
-            est_idle_l = round(idle_hrs * idle_rate_lph, 2) if idle_known and idle_hrs > 0 else 0.0
-            est_idle_cost = round(est_idle_l * avg_price, 2) if est_idle_l > 0 else 0.0
-
             warnings = []
             if suppressed == "non_positive_net_fuel":
                 warnings.append("Refund adjustments leave zero or negative net litres in this period; efficiency withheld." if f_data["litres"] == 0 else "Refund adjustments exceed purchases in this period (negative net litres); efficiency withheld.")
@@ -603,24 +699,8 @@ def calculate_vehicle_efficiency_records(
                 warnings.append(f"Wialon distance {dist_km:.1f} km is below the {min_km:.0f} km minimum; efficiency withheld.")
             elif suppressed == "mixed_fuel_types":
                 warnings.append("Vehicle bought more than one fuel type in this period; distance cannot be attributed to the filtered fuel type.")
-            est_driving_l = None
-            est_idle_pct = None
-            est_driving_pct = None
             # Purchased fuel split is always an estimate (rate x Wialon idle hours), never a measurement.
-            est_status = "estimated"
-            if not idle_known:
-                est_status = "unavailable"
-                warnings.append("Wialon idle hours unavailable for this unit; idle/driving fuel split not estimated.")
-
-            if idle_known and v_litres >= est_idle_l and v_litres > 0:
-                est_driving_l = round(v_litres - est_idle_l, 2)
-                est_idle_pct = round((est_idle_l / v_litres) * 100.0, 1)
-                est_driving_pct = round((est_driving_l / v_litres) * 100.0, 1)
-            elif idle_known and est_idle_l > v_litres:
-                est_status = "provisional"
-                warnings.append(
-                    f"Estimated idle fuel ({est_idle_l:.1f} L) exceeds recorded purchases ({v_litres:.1f} L) for period. Driving split withheld."
-                )
+            warnings.extend(idle_warnings)
 
             results.append(
                 VehicleEfficiencyItem(
@@ -636,15 +716,10 @@ def calculate_vehicle_efficiency_records(
                     idle_duration_hours=idle_hrs,
                     engine_hours=eng_hrs,
                     idle_rate_lph=idle_rate_lph,
-                    estimated_idle_fuel_litres=est_idle_l if idle_known and idle_hrs > 0 else None,
-                    estimated_idle_cost=est_idle_cost if idle_known and idle_hrs > 0 else None,
-                    estimated_driving_fuel_litres=est_driving_l,
-                    estimated_idle_percentage=est_idle_pct,
-                    estimated_driving_percentage=est_driving_pct,
+                    **idle_fields,
                     fuel_efficiency_l_per_100km=fuel_eff,
                     fuel_cost_per_km=fuel_c_km,
                     status="matched",
-                    estimation_status=est_status,
                     quality_warnings=warnings,
                     distance_source="wialon_report",
                     telemetry_status=tele_status,
@@ -783,6 +858,16 @@ def bucket_trips_by_period(trips: List[Dict[str, Any]], group_by: str) -> Tuple[
     return dict(km), dict(boundary), complete
 
 
+def _period_in_months(period: str, group_by: str, months: Optional[set]) -> bool:
+    """True when a day/week period key touches any of the given YYYY-MM months."""
+    if not months:
+        return False
+    if group_by == "week":
+        start = datetime.strptime(period, "%Y-%m-%d").date()
+        return bool({start.strftime("%Y-%m"), (start + timedelta(days=6)).strftime("%Y-%m")} & months)
+    return period[:7] in months
+
+
 def calculate_efficiency_trend(
     transactions: List[Dict[str, Any]],
     telematics_map: Dict[str, Any],
@@ -792,6 +877,7 @@ def calculate_efficiency_trend(
     unit_trips: Optional[Dict[int, Dict[str, Any]]] = None,
     min_distance_km: Optional[float] = None,
     mixed_fuel_unit_ids: Optional[set] = None,
+    mixed_fuel_unit_months: Optional[Dict[int, set]] = None,
 ) -> EfficiencyTrendResponse:
     """
     Chronological purchase-based efficiency with ACTUAL Wialon distance per period.
@@ -801,6 +887,11 @@ def calculate_efficiency_trend(
     distance. Units whose report failed or was partial are excluded and listed (never counted as 0 km).
     Per-period L/100 km = tracked litres (units with distance) / period km x 100, only when the period km
     reaches the minimum and tracked litres are positive; cumulative_l_per_100km is the running ratio of totals.
+    Month rows use the monthly KPI's vehicle set for that month (positive net fuel in the month, km > 0, not
+    mixed-fuel that month), so a single-month trend row equals /analytics/efficiency for the month. Day/week rows
+    keep the window's unit set without units whose net fuel over the window is not positive. A trip is counted in
+    its start period (its km also reported as boundary_trip_km when it ends in a later one): Wialon gives no finer
+    split, so none is invented.
     Reconciliation: each unit's trip total is compared with the group-report distance; a difference above
     max(1 km, 2%) is reported, values are never adjusted.
     """
@@ -847,37 +938,102 @@ def calculate_efficiency_trend(
 
     periods: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
         "litres": Decimal(0), "cost": Decimal(0), "count": 0, "tracked_litres": Decimal(0), "tracked_cost": Decimal(0),
-        "km": Decimal(0), "boundary": Decimal(0), "units": set(),
+        "km": Decimal(0), "boundary": Decimal(0), "units": set(), "known": True,
     })
+    # Day/week: a monthly summary is a month's total, not a refuel on its reporting date. Its fuel is left out, and so
+    # is its unit's distance in the periods of that month, so no period compares fuel and distance of different spans.
+    summary_rows: List[Dict[str, Any]] = []
+    summary_months: Dict[int, set] = defaultdict(set)
+    # Fuel per (period, unit): month rows apply the monthly KPI's own eligibility to each month
+    unit_fuel: Dict[str, Dict[int, List[Decimal]]] = defaultdict(lambda: defaultdict(lambda: [Decimal(0), Decimal(0)]))
+    # Net fuel per unit over the whole window, monthly summaries included: the same accounting scope as the KPI for
+    # this range, so day/week eligibility never drops a unit the KPI keeps (a summary is left off the day/week periods,
+    # not out of the unit's net fuel)
+    window_net: Dict[int, Decimal] = defaultdict(Decimal)
     for tx in transactions:
         d = tx_local_date(tx.get("transaction_date"))
         kind, uid = unit_key(tx, resolver)
         if not d or kind != "unit":
             continue  # undated, unmatched or ambiguous rows are outside the KPI scope
+        if group_by != "month" and is_monthly_summary(tx):
+            summary_rows.append(tx)
+            summary_months[uid].add(d[:7])
+            window_net[uid] += Decimal(str(tx.get("litres") or 0))
+            continue
         p = period_key_for_date(datetime.strptime(d, "%Y-%m-%d").date(), group_by)
         l = Decimal(str(tx.get("litres") or 0))
         c = Decimal(str(tx.get("total_cost") or 0))
         periods[p]["litres"] += l
         periods[p]["cost"] += c
         periods[p]["count"] += 1
-        if uid in tracked and uid not in mixed:
-            periods[p]["tracked_litres"] += l
-            periods[p]["tracked_cost"] += c
-    for uid, t in tracked.items():
-        if uid in mixed:
-            continue
-        for p, km in t["km"].items():
-            periods[p]["km"] += km
-            periods[p]["units"].add(uid)
-        for p, km in t["boundary"].items():
-            periods[p]["boundary"] += km
+        unit_fuel[p][uid][0] += l
+        unit_fuel[p][uid][1] += c
+        window_net[uid] += l
+    if summary_rows:
+        warnings.append(MONTHLY_SUMMARY_TREND_WARNING + " Those units' distance in the same months is left out too.")
 
-    has_distance = bool(tracked) and any(uid not in mixed for uid in tracked)
+    if group_by == "month":
+        # Same set as /analytics/efficiency for that month: a unit's trip km counts in a month only when the unit has
+        # positive net fuel there, km > 0 and (under a fuel-type filter) was not mixed-fuel in that month. Without a
+        # per-month mixed map the window-level mixed set applies to every month.
+        mixed_months = mixed_fuel_unit_months
+        non_positive = 0
+        for p, by_unit in unit_fuel.items():
+            pd = periods[p]
+            positive = {uid: lc for uid, lc in by_unit.items() if lc[0] > 0}
+            non_positive += sum(1 for lc in by_unit.values() if lc[0] <= 0)
+            eligible = {uid: lc for uid, lc in positive.items()
+                        if not (p in mixed_months.get(uid, set()) if mixed_months is not None else uid in mixed)}
+            # No eligible unit (only refunds or mixed-fuel units), or every eligible unit's trips unknown: the month's
+            # distance is unknown, never 0 km
+            if not any(uid in tracked for uid in eligible):
+                pd["known"] = False
+                continue
+            for uid, (l, c) in eligible.items():
+                t = tracked.get(uid)
+                km = t["km"].get(p, Decimal(0)) if t else Decimal(0)
+                if t is None or km <= 0:
+                    continue
+                pd["km"] += km
+                pd["units"].add(uid)
+                pd["tracked_litres"] += l
+                pd["tracked_cost"] += c
+                pd["boundary"] += t["boundary"].get(p, Decimal(0))
+        if non_positive:
+            warnings.append(f"{non_positive} unit-month(s) with zero or negative net fuel after refunds are excluded "
+                            "from monthly distance and efficiency, as in the monthly KPI.")
+        has_distance = bool(tracked)
+    else:
+        # Day/week keep the window's unit set (distance on driving days, fuel on refuelling days), without units whose
+        # net fuel over the window is zero or negative (excluded from the KPI's distance set too).
+        excluded = set(mixed) | {uid for uid, net in window_net.items() if net <= 0}
+        dropped = [uid for uid in tracked if uid in window_net and window_net[uid] <= 0]  # summaries included
+        if dropped:
+            warnings.append(f"{len(dropped)} unit(s) with zero or negative net fuel after refunds are excluded from "
+                            "trend distance and efficiency, as in the KPI.")
+        for p, by_unit in unit_fuel.items():
+            for uid, (l, c) in by_unit.items():
+                if uid in tracked and uid not in excluded:
+                    periods[p]["tracked_litres"] += l
+                    periods[p]["tracked_cost"] += c
+        for uid, t in tracked.items():
+            if uid in excluded:
+                continue
+            for p, km in t["km"].items():
+                if _period_in_months(p, group_by, summary_months.get(uid)):
+                    continue
+                periods[p]["km"] += km
+                periods[p]["units"].add(uid)
+            for p, km in t["boundary"].items():
+                if not _period_in_months(p, group_by, summary_months.get(uid)):
+                    periods[p]["boundary"] += km
+        has_distance = any(uid not in excluded for uid in tracked)
+
     items: List[EfficiencyTrendItem] = []
     cum_l = cum_c = cum_km = Decimal(0)
     for p in sorted(periods):
         d = periods[p]
-        dist = d["km"] if has_distance else None
+        dist = d["km"] if has_distance and d["known"] else None
         eff = cost_km = None
         if dist is None:
             status = "unavailable"
@@ -914,6 +1070,7 @@ def calculate_efficiency_trend(
     return EfficiencyTrendResponse(
         group_by=group_by,
         data=items,
+        monthly_summary_excluded=monthly_summary_excluded(summary_rows),
         data_warnings=warnings,
         distance_reconciliation={"units_checked": units_checked, "tolerance": "max(1 km, 2%)", "mismatches": mismatches},
         units_failed=units_failed,
