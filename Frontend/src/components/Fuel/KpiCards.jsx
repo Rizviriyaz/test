@@ -37,13 +37,13 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
     if (loading) {
         return (
-            <div className="mb-5 space-y-3" role="status" aria-label="Loading fuel KPIs">
+            <div role="status" aria-label="Loading fuel KPIs">
                 <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
                     {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-                        <div key={i} className="bg-white px-4 py-3">
+                        <div key={i} className="bg-white px-3 py-2.5">
                             <div className="h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                            <div className="mt-2 h-6 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                            <div className="mt-2 h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                            <div className="mt-1.5 h-6 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                            <div className="mt-1.5 h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
                         </div>
                     ))}
                 </div>
@@ -274,7 +274,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Fuel Purchased",
             value: formatNumber(totalLitres, 1),
             unit: "L",
-            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : "Net of refunds",
+            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : null,
             provenance: "Recorded",
         },
         {
@@ -292,7 +292,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             unit: "km",
             note: !has(totalDistance)
                 ? "Unavailable"
-                : has(vehiclesWithDistance) && has(vehicleCount) ? `${vehiclesWithDistance} of ${vehicleCount} vehicles` : "Wialon trips",
+                : has(vehiclesWithDistance) && has(vehicleCount) ? `${vehiclesWithDistance} of ${vehicleCount} vehicles` : null,
             provenance: "Recorded",
         },
         {
@@ -315,7 +315,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Driving Hours",
             value: has(drivingHours) ? formatNumber(drivingHours, 1) : "—",
             unit: "h",
-            note: has(drivingHours) ? (fuelShareNote(drivingPct) ?? "Wialon motion") : "Unavailable",
+            note: has(drivingHours) ? fuelShareNote(drivingPct) : "Unavailable",
             provenance: "Recorded",
         },
         {
@@ -323,7 +323,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Idling Hours",
             value: has(idleHours) ? formatNumber(idleHours, 1) : "—",
             unit: "h",
-            note: has(idleHours) ? (fuelShareNote(idlePct) ?? "Engine on, stationary") : "Unavailable",
+            note: has(idleHours) ? fuelShareNote(idlePct) : "Unavailable",
             provenance: "Recorded",
         },
         {
@@ -331,7 +331,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Est. Idle Fuel",
             value: has(estimatedIdleFuel) ? formatNumber(estimatedIdleFuel, 1) : "—",
             unit: "L",
-            note: has(estimatedIdleCost) ? `AED ${formatCurrency(estimatedIdleCost)} est. cost` : "Unavailable",
+            note: has(estimatedIdleCost) ? `AED ${formatCurrency(estimatedIdleCost)} est. cost` : (has(estimatedIdleFuel) ? "Cost unavailable" : "Unavailable"),
             valueClass: has(estimatedIdleCost) && estimatedIdleCost > 0 ? "text-amber-800" : "text-slate-900",
             tag: `${idleRate.toFixed(1)} L/h`,
             provenance: "Estimated",
@@ -345,7 +345,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             note: [
                 has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : null,
                 unmatchedCount ? `${unmatchedCount} unmatched` : null,
-            ].filter(Boolean).join(" · ") || "Matched to Wialon",
+            ].filter(Boolean).join(" · ") || null,
             provenance: "Recorded",
             title: "Refuelled vehicles matched to one Wialon unit (not total fleet size)",
         },
@@ -356,49 +356,46 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
         return Number(val).toFixed(2)
     }
 
-    const renderCard = (cell, isPrimary = false) => (
+    // Label, value and (only when it adds context) one short note; provenance stays in the tooltip and the breakdown
+    const renderCard = (cell) => (
         <button
             key={cell.key}
             type="button"
             onClick={() => setSelectedKpi(cell.key)}
-            className="group flex min-w-0 flex-col bg-white p-3.5 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
-            title={cell.title ? `${cell.title}. Click for the calculation.` : `${cell.label}: click for the calculation`}
+            className="group flex min-w-0 flex-col bg-white px-3 py-2.5 text-left transition-colors hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40"
+            title={`${cell.title || cell.label} (${cell.provenance}). Click for the calculation.`}
         >
             <span className="flex items-center justify-between gap-1.5">
-                <span className="truncate text-xs font-medium text-slate-500">
+                <span className="truncate text-[11px] font-medium text-slate-500">
                     {cell.label}
                 </span>
-                <span className="flex shrink-0 items-center gap-1">
-                    <span className="font-mono text-[10px] text-slate-400 opacity-60 group-hover:opacity-100 transition-opacity">
-                        {cell.provenance}
+                {cell.tag ? (
+                    <span className="shrink-0 font-mono text-[10px] font-medium text-slate-600 bg-slate-100 rounded px-1">
+                        {cell.tag}
                     </span>
-                    <Calculator className="h-3.5 w-3.5 text-slate-300 transition-colors group-hover:text-brand" aria-hidden="true" />
-                </span>
+                ) : (
+                    <Calculator className="h-3 w-3 shrink-0 text-slate-300 transition-colors group-hover:text-brand" aria-hidden="true" />
+                )}
             </span>
-            <span className="mt-1.5 flex items-baseline gap-1">
+            <span className="mt-0.5 flex items-baseline gap-1">
                 {cell.prefix && <span className="text-xs font-medium text-slate-500">{cell.prefix}</span>}
-                <span className={`${isPrimary ? "text-[22px] sm:text-[24px]" : "text-[20px] sm:text-[22px]"} font-semibold leading-tight tracking-tight tabular-nums ${cell.valueClass || "text-slate-900"}`}>
+                <span className={`text-[22px] sm:text-2xl font-semibold leading-tight tracking-tight tabular-nums ${cell.valueClass || "text-slate-900"}`}>
                     {cell.value}
                 </span>
                 {cell.unit && <span className="text-xs text-slate-500 font-normal">{cell.unit}</span>}
             </span>
-            <span className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-                <span className="truncate text-[11px] text-slate-500">{cell.note}</span>
-                {cell.tag && (
-                    <span className="shrink-0 font-mono text-[10px] font-medium text-slate-600 bg-slate-100 rounded px-1 py-0.5">
-                        {cell.tag}
-                    </span>
-                )}
-            </span>
+            {cell.note && (
+                <span className="mt-0.5 truncate text-[11px] text-slate-500">{cell.note}</span>
+            )}
         </button>
     )
 
     return (
-        <div className="mb-4 space-y-2">
+        <div>
             {/* Unified 8-card hairline grid (Primary top row, Secondary bottom row) */}
             <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
-                {primaryMetrics.map((m) => renderCard(m, true))}
-                {secondaryMetrics.map((m) => renderCard(m, false))}
+                {primaryMetrics.map(renderCard)}
+                {secondaryMetrics.map(renderCard)}
             </div>
 
             {/* ─── INTERACTIVE KPI FORMULA & BREAKDOWN MODAL ───────────── */}

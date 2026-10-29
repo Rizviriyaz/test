@@ -241,11 +241,11 @@ def test_corrected_file_replaces_changed_rows_only():
 def test_identical_repeated_refuels_are_preserved():
     db = FakeReplaceDB()
     row = ["2026-08-07", "AUH 44120", 50, 3.0, 150.0, None]
-    first = dated(db, [row, list(row)])
+    first = dated(db, [row, list(row)], single_date_mode="dated")  # one identical date: confirmed as refuels
     assert first.rows_imported == 2 and first.rows_identical_in_file == 1 and db.totals() == (100, 300.0, 2), first
-    again = dated(db, [row, list(row)])
+    again = dated(db, [row, list(row)], single_date_mode="dated")
     assert again.rows_unchanged == 2 and again.rows_imported == 0 and db.totals() == (100, 300.0, 2), again
-    third = dated(db, [row, list(row), list(row)])  # the provider's corrected statement shows a third identical fill
+    third = dated(db, [row, list(row), list(row)], single_date_mode="dated")  # the provider's corrected statement shows a third identical fill
     assert (third.rows_unchanged, third.rows_imported, third.rows_replaced) == (2, 1, 0), third
     assert db.totals() == (150, 450.0, 3)
     fewer = dated(db, [row])  # and a later statement shows only one: the other two are replaced away
@@ -256,9 +256,9 @@ def test_identical_repeated_refuels_are_preserved():
 def test_v2_fingerprints_stay_unique_for_repeats_and_reimports():
     db = FakeReplaceDB()
     row = ["2026-08-07", "AUH 44120", 50, 3.0, 150.0, None]
-    dated(db, [row, list(row)], v2=True)
+    dated(db, [row, list(row)], v2=True, single_date_mode="dated")
     dated(db, [["2026-08-07", "AUH 44120", 51, 3.0, 153.0, None]], v2=True)   # replaces both
-    dated(db, [row, list(row)], v2=True)                                       # back to the original values
+    dated(db, [row, list(row)], v2=True, single_date_mode="dated")             # back to the original values
     fps = [r["fingerprint"] for r in db.rows]
     assert len(fps) == len(set(fps)) == 5 and all("|imp:" in f for f in fps), fps
     assert db.totals() == (100, 300.0, 2)
@@ -268,69 +268,56 @@ def test_v2_fingerprints_stay_unique_for_repeats_and_reimports():
 # ─── 17. Switching between dated transactions and monthly summaries ────────────
 
 def test_summary_after_dated_replaces_the_month_for_its_vehicles():
-    """Rule: a monthly summary is refused for a vehicle-month that already has daily transactions (nothing written)."""
+    """Rule: a monthly summary replaces the daily transactions of its vehicle-month (superseded, never deleted)."""
     db = FakeReplaceDB()
     dated(db, AUGUST + [["2026-09-02", "AUH 44120", 20, 3.0, 60.0, "SEP"]])
-    before, commits = db.snapshot(), len(db.commit_calls)
     with replace_env(db):
         p = generate_fuel_preview(xlsx(SUMMARY_HEADERS, [["AUH 44120", 500, 1500.0]]), "s.xlsx", reporting_month="2026-08")
-    assert not p.ready_to_import and any("Daily transactions already exist for AUH 44120 2026-08" in b
-                                         for b in p.blocking_reasons), p.blocking_reasons
-    try:
-        summary(db, [["AUH 44120", 500, 1500.0]], "2026-08")
-        raise AssertionError("expected 409")
-    except FuelImportError as exc:
-        assert exc.status_code == 409 and "Daily transactions already exist" in exc.message, exc.message
-    assert db.snapshot() == before and len(db.commit_calls) == commits, "dated August rows untouched"
-    # A summary for a vehicle-month without dated rows is still accepted (another vehicle, or another month)
-    res = summary(db, [["SHJ 88211", 300, 900.0]], "2026-08")
-    assert res.committed and res.rows_replaced == 0 and db.totals("AUH 44120", "2026-08")[2] == 4, res
-    print("[PASS] Monthly summary over a vehicle-month with daily transactions is refused; other vehicle-months import.")
+    assert p.ready_to_import and p.replacement["rows_to_replace"] == 4, (p.blocking_reasons, p.replacement)
+    res = summary(db, [["AUH 44120", 500, 1500.0]], "2026-08",
+                  expected_replace_count=p.replacement["expected_replace_count"])
+    assert res.committed and res.rows_replaced == 4 and res.rows_imported == 1, res
+    assert db.totals("AUH 44120", "2026-08") == (500, 1500.0, 1), "only the summary counts for AUH August"
+    assert db.totals("AUH 44120", "2026-09") == (20, 60.0, 1), "September untouched"
+    assert db.totals("DXB 10293", "2026-08")[2] == 4, "other vehicle untouched"
+    assert sum(1 for r in db.rows if r.get("superseded_by_import_id") == res.import_id) == 4 and len(db.rows) == 10
+    print("[PASS] Monthly summary over a vehicle-month with daily transactions replaces them; other scopes untouched.")
 
 
-def test_dated_full_month_after_summary_replaces_it():
-    """Rule: daily rows for a summarised vehicle-month are refused until the user confirms whole months."""
+def test_dated_full_month_after_summary_keeps_it():
+    """Rule: daily rows for a summarised vehicle-month are skipped (the summary is kept), even for whole months."""
     db = FakeReplaceDB()
     summary(db, [["AUH 44120", 500, 1500.0], ["DXB 10293", 300, 900.0]], "2026-08")
-    full = [aug(1, "AUH 44120", 50, "x1"), aug(31, "AUH 44120", 40, "x31")]
-    before = db.snapshot()
-    try:
-        dated(db, full)
-        raise AssertionError("expected 409: a whole-month file still needs the explicit confirmation")
-    except FuelImportError as exc:
-        assert exc.status_code == 409 and "A monthly summary already exists for AUH 44120 2026-08" in exc.message, exc.message
-    assert db.snapshot() == before
-    res = dated(db, full, extend_to_full_months=True)
-    assert res.committed and res.rows_replaced == 1, res
-    assert db.totals("AUH 44120") == (90, 270.0, 2) and db.totals("DXB 10293") == (300, 900.0, 1)
-    # A dated file for a month without a summary is not affected
-    res = dated(db, [["2026-09-05 08:00:00", "DXB 10293", 30, 3.0, 90.0, "S5"]])
-    assert res.committed and res.rows_imported == 1, res
-    print("[PASS] Daily rows over a summarised vehicle-month are refused until whole months are confirmed; then they replace it.")
+    full = [aug(1, "AUH 44120", 50, "x1"), aug(31, "AUH 44120", 40, "x31"),
+            ["2026-09-05 08:00:00", "AUH 44120", 30, 3.0, 90.0, "S5"]]
+    for extend in (False, True):
+        before = db.snapshot()
+        res = dated(db, full, extend_to_full_months=extend)
+        assert res.committed and res.rows_skipped_monthly_summary == 2 and res.rows_replaced == 0, (extend, res)
+        assert db.totals("AUH 44120", "2026-08") == (500, 1500.0, 1), "the August summary is kept"
+        assert [g["month"] for g in res.monthly_summary_scopes_kept] == ["2026-08"], res.monthly_summary_scopes_kept
+        assert all(r in db.snapshot() for r in before), "nothing visible was removed"
+    assert db.totals("AUH 44120", "2026-09") == (30, 90.0, 1), "September imported once (re-import unchanged)"
+    assert db.totals("DXB 10293") == (300, 900.0, 1)
+    print("[PASS] Daily rows over a summarised vehicle-month are skipped, whole months or not; other months import.")
 
 
-def test_partial_month_over_summary_is_blocked_until_confirmed():
+def test_partial_month_over_summary_is_refused_when_nothing_else_imports():
     db = FakeReplaceDB()
     summary(db, [["AUH 44120", 500, 1500.0]], "2026-08")
     before, commits = db.snapshot(), len(db.commit_calls)
     partial = [aug(3, "AUH 44120", 50, "p3"), aug(14, "AUH 44120", 40, "p14")]
     with replace_env(db):
         p = generate_fuel_preview(xlsx(DATED_HEADERS, partial), "p.xlsx")
-    assert not p.ready_to_import and p.replacement["partial_month_conflicts"], p.replacement
+    assert not p.ready_to_import and p.rows_skipped_monthly_summary == 2, (p.blocking_reasons, p)
     try:
         dated(db, partial)
         raise AssertionError("expected 409")
     except FuelImportError as exc:
-        assert exc.status_code == 409 and "A monthly summary already exists" in exc.message, exc.message
+        assert exc.status_code == 409 and "monthly summary is already stored for AUH 44120 2026-08" in exc.message, exc.message
     assert db.snapshot() == before and len(db.commit_calls) == commits
-    assert db.imports[max(db.imports)]["status"] == "failed", "the refused import is closed as failed"
-    # The user confirms the statement covers whole months: the summary and the vehicle's whole month are replaced
-    with replace_env(db):
-        p = generate_fuel_preview(xlsx(DATED_HEADERS, partial), "p.xlsx", extend_to_full_months=True)
-    assert p.ready_to_import and p.replacement["period_from"] == "2026-08-01" and p.replacement["period_to"] == "2026-08-31"
-    res = dated(db, partial, extend_to_full_months=True, expected_replace_count=p.replacement["expected_replace_count"])
-    assert res.committed and res.rows_replaced == 1 and db.totals("AUH 44120") == (90, 270.0, 2), res
-    print("[PASS] A dated statement covering part of a summarised month is refused; confirmed full months replace it.")
+    assert db.imports[max(db.imports)]["status"] == "failed", "the refused import is closed as failed (history kept)"
+    print("[PASS] A dated statement wholly inside summarised vehicle-months is refused; nothing changes.")
 
 
 def test_summary_over_summary_and_other_months():
@@ -474,8 +461,9 @@ def test_sql_is_review_only_and_non_destructive():
 
 
 def test_monthly_only_flag_keeps_dated_imports_legacy():
-    """FUEL_IMPORT_REPLACE=1 with FUEL_IMPORT_REPLACE_DATED=0: dated statements import exactly as before."""
-    sent, fetched = [], []
+    """FUEL_IMPORT_REPLACE=1 with FUEL_IMPORT_REPLACE_DATED=0: dated statements import as before, except that the
+    visible rows are read (never changed) to skip vehicle-months that have a monthly summary."""
+    sent, fetched, scope_reads = [], [], []
     with patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1", "FUEL_IMPORT_REPLACE_DATED": "0", "FUEL_SCHEMA_V2": ""}), \
          patch("app.fuel.importer.fetch_running_imports", return_value=[]), \
          patch("app.fuel.importer.create_fuel_import_record", return_value=5), \
@@ -484,11 +472,13 @@ def test_monthly_only_flag_keeps_dated_imports_legacy():
                side_effect=lambda transactions, **_: (sent.extend(transactions) or len(transactions), [])), \
          patch("app.fuel.importer.fetch_existing_transaction_fingerprints",
                side_effect=lambda **kw: fetched.append(kw) or set()), \
-         patch("app.fuel.importer.fetch_visible_rows_in_range", side_effect=AssertionError("no scope read")), \
+         patch("app.fuel.importer.fetch_visible_rows_in_range",
+               side_effect=lambda *a, **kw: scope_reads.append(a) or []), \
          patch("app.fuel.importer.commit_fuel_import", side_effect=AssertionError("no commit")):
         res = execute_fuel_import(xlsx(DATED_HEADERS, AUGUST), "a.xlsx", DATED_MAP, USER)
         p = generate_fuel_preview(xlsx(DATED_HEADERS, AUGUST), "a.xlsx")
     assert res.rows_imported == 8 and res.committed is None and fetched, res
+    assert scope_reads == [("2026-08-03", "2026-08-31")] * 2, "summary check read by the import and the preview"
     assert not ({"staged", "date_basis"} & set().union(*map(set, sent))), "dated rows: no staging, nothing superseded"
     assert "rows_replaced" not in update.call_args.kwargs["updates"]
     assert p.replacement is None and p.monthly_summary_enabled, "preview: no replacement plan for dated files"
@@ -548,8 +538,8 @@ TESTS = [
     test_identical_repeated_refuels_are_preserved,
     test_v2_fingerprints_stay_unique_for_repeats_and_reimports,
     test_summary_after_dated_replaces_the_month_for_its_vehicles,
-    test_dated_full_month_after_summary_replaces_it,
-    test_partial_month_over_summary_is_blocked_until_confirmed,
+    test_dated_full_month_after_summary_keeps_it,
+    test_partial_month_over_summary_is_refused_when_nothing_else_imports,
     test_summary_over_summary_and_other_months,
     test_failures_leave_visible_data_unchanged,
     test_unanswered_commit_is_settled_by_reading_back,

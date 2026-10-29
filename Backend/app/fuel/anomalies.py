@@ -15,7 +15,8 @@ from app.fuel.db import build_fingerprint
 from app.fuel.schemas import FuelAnomalyItem, FuelWasteResponse, VehicleEfficiencyItem
 from app.fuel.reporting_period import is_monthly_summary
 from app.fuel.scope import (
-    OVERLAP_UNCONFIRMED,
+    OVERLAP_SUMMARY_PRECEDENCE,
+    REASON_DATED_SUPERSEDED,
     REASON_DUPLICATE,
     REASON_OVERLAP,
     REASON_PARTIAL_SUMMARY,
@@ -105,8 +106,8 @@ def detect_fuel_waste_and_anomalies(
        from the scope partition (already excluded from KPIs). [recorded]
     6. Unmatched / ambiguous identifiers: one info item each, from the scope partition. [recorded]
     7. Monthly-summary / dated overlaps (excluded_scope.overlap_conflicts): one 'summary_dated_overlap' info item per
-       unresolved unit-month. Those vehicles ARE matched to a Wialon unit, so they are never reported as unmatched;
-       a summary superseded by confirmed full-month dated rows is resolved and reported nowhere here. [recorded]
+       unit-month whose dated rows the monthly summary superseded. Those vehicles ARE matched to a Wialon unit, so
+       they are never reported as unmatched. [recorded]
     refuel_anomalies_count counts distinct transactions; data_quality_issues_count equals the number of
     data-quality items emitted.
     """
@@ -424,8 +425,8 @@ def detect_fuel_waste_and_anomalies(
         rsn = g.get("reason")
         if rsn == REASON_PARTIAL_SUMMARY:
             continue  # excluded only because the selected range splits its month; not a data-quality finding
-        if rsn in (REASON_OVERLAP, REASON_SUMMARY_SUPERSEDED):
-            continue  # matched vehicles: unresolved overlaps are reported per unit-month below, superseded ones are resolved
+        if rsn in (REASON_DATED_SUPERSEDED, REASON_OVERLAP, REASON_SUMMARY_SUPERSEDED):
+            continue  # matched vehicles: overlaps are reported per unit-month below
         is_dup = rsn == REASON_DUPLICATE
         if is_dup:
             data_quality_issues_count += 1
@@ -454,7 +455,7 @@ def detect_fuel_waste_and_anomalies(
 
     # ── 5. Monthly-summary / dated overlaps of matched units (excluded from KPIs, never "unmatched") ──
     for c in overlap_conflicts or []:
-        if c.get("resolution") != OVERLAP_UNCONFIRMED:
+        if c.get("resolution") != OVERLAP_SUMMARY_PRECEDENCE:
             continue
         summ, dated = c.get("excluded_summary") or {}, c.get("excluded_dated") or {}
         unit = c.get("wialon_unit_name") or c.get("wialon_unit_id")
@@ -466,15 +467,14 @@ def detect_fuel_waste_and_anomalies(
                 finding_type="measured",
                 classification="recorded",
                 vehicle_identifier=(c.get("identifiers") or [str(unit)])[0],
-                title=f"Monthly Summary and Dated Transactions Overlap ({unit}, {c.get('month')})",
+                title=f"Dated Transactions Superseded by a Monthly Summary ({unit}, {c.get('month')})",
                 description=(
-                    f"Wialon unit {unit} has both a monthly-summary total and dated transactions for {c.get('month')}, "
-                    "and no import confirms that the dated statement covers the whole month. Both are excluded from "
-                    "KPIs to avoid double counting; nothing was deleted. Re-import a complete statement to resolve it."
+                    f"Wialon unit {unit} has a monthly-summary total and dated transactions for {c.get('month')}. The "
+                    "monthly summary takes precedence: the dated transactions are excluded from KPIs so the month is "
+                    "never counted twice. Nothing was deleted."
                 ),
-                recorded_value=(f"summary {summ.get('transaction_count', 0)} row(s) / {summ.get('litres', 0.0):.1f} L; "
-                                f"dated {dated.get('transaction_count', 0)} row(s) / {dated.get('litres', 0.0):.1f} L"),
-                threshold_or_baseline="One source per unit-month: dated rows only with confirmed full-month coverage",
+                recorded_value=f"dated {dated.get('transaction_count', 0)} row(s) / {dated.get('litres', 0.0):.1f} L excluded",
+                threshold_or_baseline="One source per vehicle-month: the monthly summary takes precedence over dated rows",
                 details={"wialon_unit_id": c.get("wialon_unit_id"), "wialon_unit_name": c.get("wialon_unit_name"),
                          "month": c.get("month"), "identifiers": c.get("identifiers"),
                          "excluded_summary": summ, "excluded_dated": dated, "resolution": c.get("resolution")},

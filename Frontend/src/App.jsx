@@ -21,7 +21,6 @@ const operationalPages = {
     tracking: () => import("./pages/Tracking"),
     idle: () => import("./pages/IdleAnalytics"),
     health: () => import("./pages/VehicleHealth"),
-    alerts: () => import("./pages/FleetAlerts"),
 }
 
 // Main Fleet Dashboard Pages
@@ -33,7 +32,6 @@ const FuelDailyDashboard = lazy(() => import("./pages/FuelDailyDashboard"))
 const Tracking = lazy(operationalPages.tracking)
 const IdleAnalytics = lazy(operationalPages.idle)
 const VehicleHealth = lazy(operationalPages.health)
-const FleetAlerts = lazy(operationalPages.alerts)
 
 const AiAssistantWidget = lazy(() => import("./components/AI/AiAssistantWidget"))
 
@@ -154,14 +152,7 @@ function App() {
                                     </ProtectedRoute>
                                 }
                             />
-                            <Route
-                                path="/alerts"
-                                element={
-                                    <ProtectedRoute>
-                                        <FleetAlerts />
-                                    </ProtectedRoute>
-                                }
-                            />
+                            <Route path="/alerts" element={<Navigate to="/dashboard" replace />} />
                             <Route
                                 path="/reports"
                                 element={<Navigate to="/idle-analytics" replace />}

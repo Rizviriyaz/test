@@ -8,12 +8,28 @@ import {
     isReportingMonth,
     reportingMonthInSync,
     formatReportingDate,
+    formatReportingMonth,
     importOptions,
     mappingForImport,
     needsReportingMonth,
+    needsSingleDateChoice,
+    replacementRecordDateLabel,
     showColumnChoices,
     transactionDateLabel,
 } from "./fuelImportState.js"
+
+test("monthly summaries are labelled by reporting month, never by a day", () => {
+    assert.equal(formatReportingMonth("2026-07"), "Jul 2026")
+    assert.equal(formatReportingMonth("2026-12-01"), "Dec 2026")
+    assert.equal(formatReportingMonth("2026-13"), "—")
+    assert.equal(formatReportingMonth(null), "—")
+    // fuel_monthly_summaries record (no transaction date) and a legacy month-end record
+    assert.equal(replacementRecordDateLabel({ date_basis: "reporting_month_end", reporting_month: "2026-07", transaction_date: null }),
+        "Monthly summary Jul 2026")
+    assert.equal(replacementRecordDateLabel({ date_basis: "reporting_month_end", transaction_date: "2026-07-31" }),
+        "Monthly summary Jul 2026")
+    assert.equal(replacementRecordDateLabel({ date_basis: "transaction", transaction_date: "2026-07-03T09:00:00" }), "2026-07-03 09:00")
+})
 
 const dated = {
     import_mode: "dated",
@@ -56,9 +72,9 @@ test("confirm is enabled only when the backend preview is ready", () => {
 
 test("import options mirror the preview", () => {
     assert.deepEqual(importOptions(summary, { mappingConfirmed: true }),
-        { reportingMonth: "2026-02", mappingConfirmed: true, extendToFullMonths: false, expectedReplaceCount: 0 })
+        { reportingMonth: "2026-02", mappingConfirmed: true, extendToFullMonths: false, singleDateMode: null, expectedReplaceCount: 0 })
     assert.deepEqual(importOptions(dated, { extendToFullMonths: true }),
-        { reportingMonth: null, mappingConfirmed: false, extendToFullMonths: true, expectedReplaceCount: 3 })
+        { reportingMonth: null, mappingConfirmed: false, extendToFullMonths: true, singleDateMode: null, expectedReplaceCount: 3 })
     assert.equal(importOptions({ ...dated, replacement: null }).expectedReplaceCount, null)
 })
 
@@ -103,4 +119,22 @@ test("repeated vehicle or litres columns can be chosen, like the date and price 
         assert.ok(PICKABLE_FIELDS.includes(field), field)
         assert.ok(FIELD_LABELS[field], `${field} has a label`)
     }
+})
+
+test("a date shared by every row needs the user's choice, sent exactly as previewed", () => {
+    assert.equal(needsSingleDateChoice(dated), false)
+    assert.equal(needsSingleDateChoice(null), false)
+    const pending = { ...dated, single_date: "2026-08-31", single_date_confirmation_required: true, single_date_mode: null, ready_to_import: false }
+    assert.equal(needsSingleDateChoice(pending), true)
+    assert.equal(canConfirmImport(pending), false, "blocked until the user chooses")
+    assert.equal(importOptions(pending).singleDateMode, null)
+    const asDaily = { ...pending, single_date_confirmation_required: false, single_date_mode: "dated", ready_to_import: true }
+    assert.equal(importOptions(asDaily).singleDateMode, "dated")
+    assert.equal(importOptions(asDaily).reportingMonth, null)
+    const asSummary = { ...asDaily, single_date_mode: "monthly_summary", import_mode: "monthly_summary", reporting_month: "2026-08" }
+    assert.deepEqual([importOptions(asSummary).singleDateMode, importOptions(asSummary).reportingMonth], ["monthly_summary", "2026-08"])
+    // The derived month needs no form value; an explicitly chosen month must match the preview
+    assert.equal(canConfirmImport(asSummary, false, ""), true)
+    assert.equal(canConfirmImport(asSummary, false, "2026-08"), true)
+    assert.equal(canConfirmImport(asSummary, false, "2026-07"), false, "month changed, preview not yet refreshed")
 })

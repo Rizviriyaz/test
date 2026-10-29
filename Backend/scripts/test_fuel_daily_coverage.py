@@ -96,10 +96,13 @@ def test_fuel_type_filter_never_makes_uncovered_days_zero():
 def test_monthly_summaries_never_become_daily_activity():
     summary = row(9, 1, 30, 400.0, 1200.0, imp=9, date_basis="reporting_month_end")
     res = daily(ROWS + [summary], coverage_rows=ROWS + [summary], meta={7: SEPT, 9: SEPT})
-    assert by_day(res)["2026-09-30"].litres == 0.0 and res.monthly_summary_excluded["rows"] == 1
+    # Unit 1's September fuel is a monthly total: none of its days is a verified zero, and the total is not on a day
+    assert by_day(res)["2026-09-30"].litres is None and by_day(res)["2026-09-30"].coverage != "statement_covered"
+    assert res.monthly_summary_excluded["rows"] == 1 and res.coverage_status != "covered"
     only_summary = daily([summary], coverage_rows=[summary], meta={9: SEPT})
     assert only_summary.coverage_status == "unverified" and by_day(only_summary)["2026-09-30"].litres is None
-    print("[PASS] Monthly summaries are never placed on a day and never establish coverage.")
+    print("[PASS] Monthly summaries are never placed on a day, never establish coverage, and keep their "
+          "vehicle-month's days unverified (no invented daily zeros).")
 
 
 def test_future_days_are_never_covered():

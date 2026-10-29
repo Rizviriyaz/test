@@ -51,6 +51,7 @@ export const EXCLUDED_REASON_LABELS = {
     partial_period_summary: "Monthly summary, partial range",
     summary_dated_overlap: "Summary and dated rows overlap",
     summary_superseded_by_dated: "Summary replaced by full-month dated rows",
+    dated_superseded_by_summary: "Dated row superseded by monthly summary",
 }
 
 // Number with fixed decimals, or "—" when the value is missing/not finite (a recorded 0 stays "0.00").

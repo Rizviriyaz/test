@@ -31,9 +31,11 @@ from app.fuel.db import (
     get_fuel_imports_list,
     get_fuel_vehicle_identifiers,
     get_fuel_transactions_list,
+    summary_table_enabled,
 )
 from app.fuel import classification
 from app.fuel.importer import FuelImportError, execute_fuel_import, generate_fuel_preview, reconcile_fuel_import
+from app.fuel.reporting_period import SUMMARY_TABLE, is_monthly_summary, is_summary_table_row, reporting_month_label
 from app.fuel.scope import (
     EXCLUDED_REASONS,
     NO_TRANSACTIONS_WARNING,
@@ -54,6 +56,8 @@ from app.fuel.schemas import (
     FuelImportPreviewResponse,
     FuelImportResultResponse,
     FuelImportsListResponse,
+    FuelMonthlySummariesListResponse,
+    FuelMonthlySummaryItem,
     FuelSummaryResponse,
     FuelTransactionItem,
     FuelTransactionsListResponse,
@@ -298,6 +302,30 @@ def _to_tx_item(record: Dict[str, Any]) -> FuelTransactionItem:
     return item
 
 
+def _to_summary_item(record: Dict[str, Any]) -> FuelMonthlySummaryItem:
+    """A monthly-summary row of either layout, reported by its reporting month (never by a date)."""
+    in_table = is_summary_table_row(record)
+    fields = {k: record.get(k) for k in FuelMonthlySummaryItem.model_fields
+              if k not in ("id", "source_table", "reporting_month")}
+    return FuelMonthlySummaryItem(
+        **fields,
+        id=record.get("summary_id") if in_table else record.get("id"),
+        source_table=SUMMARY_TABLE if in_table else "fuel_transactions",
+        reporting_month=reporting_month_label(record),
+    )
+
+
+def _split_summaries(records: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    (dated rows, monthly-summary rows). With FUEL_MONTHLY_SUMMARY_TABLE transaction lists hold dated rows only and
+    summaries are reported separately by month; without it the lists stay as before (summaries included, labelled
+    by date_basis) and no separate summaries are returned.
+    """
+    if not summary_table_enabled():
+        return records, []
+    return ([r for r in records if not is_monthly_summary(r)], [r for r in records if is_monthly_summary(r)])
+
+
 def _filter_wialon_matched_transactions(
     transactions: List[Dict[str, Any]],
     wialon_units: List[Dict[str, Any]],
@@ -327,6 +355,7 @@ async def preview_fuel_import(
     reporting_month: Optional[str] = Form(None, description="YYYY-MM for a statement without a transaction date column"),
     mapping_confirmed: bool = Form(False, description="The user explicitly confirmed the ambiguous column mappings"),
     extend_to_full_months: bool = Form(False, description="A dated statement covers whole calendar months"),
+    single_date_mode: Optional[str] = Form(None, description="Every row has the same date: 'dated' (actual refuelling dates) or 'monthly_summary' (a monthly reporting date)"),
 ):
     """
     Preview and dynamically map fuel spreadsheet data before database commit.
@@ -350,7 +379,7 @@ async def preview_fuel_import(
 
         preview_data = await run_in_threadpool(
             generate_fuel_preview, file_bytes, file.filename, preview_mapping, reporting_month, mapping_confirmed,
-            extend_to_full_months, _get_bearer_token(request),
+            extend_to_full_months, _get_bearer_token(request), None, single_date_mode or None,
         )
         return preview_data
 
@@ -379,6 +408,7 @@ async def import_fuel_statement(
     reporting_month: Optional[str] = Form(None, description="YYYY-MM for a statement without a transaction date column"),
     mapping_confirmed: bool = Form(False, description="The user explicitly confirmed the ambiguous column mappings"),
     extend_to_full_months: bool = Form(False, description="A dated statement covers whole calendar months"),
+    single_date_mode: Optional[str] = Form(None, description="Every row has the same date: 'dated' (actual refuelling dates) or 'monthly_summary' (a monthly reporting date)"),
     expected_replace_count: Optional[int] = Form(None, ge=0, description="Rows the preview showed would be replaced; a different count at import time is refused (409)"),
 ):
     """
@@ -418,6 +448,7 @@ async def import_fuel_statement(
             mapping_confirmed,
             extend_to_full_months,
             expected_replace_count,
+            single_date_mode or None,
         )
         return import_result
 
@@ -612,8 +643,10 @@ async def list_fuel_transactions(
     filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier,
                "fuel_type": fuel_type, "import_id": import_id}
     scope = await _build_scope(filters, bearer_token)
-    # Newest first (as the previous database listing returned them)
-    matched_records = sorted(scope.matched, key=lambda r: (str(r.get("transaction_date") or ""), r.get("id") or 0), reverse=True)
+    # Newest first (as the previous database listing returned them); monthly summaries are listed by
+    # /monthly-summaries with FUEL_MONTHLY_SUMMARY_TABLE
+    dated, _ = _split_summaries(scope.matched)
+    matched_records = sorted(dated, key=lambda r: (str(r.get("transaction_date") or ""), r.get("id") or 0), reverse=True)
 
     total = len(matched_records)
     offset = (page - 1) * page_size
@@ -625,6 +658,41 @@ async def list_fuel_transactions(
         page_size=page_size,
         total=total,
         transactions=[_to_tx_item(r) for r in paged],
+        excluded_scope=scope.excluded_scope,
+    )
+
+
+@router.get(
+    "/monthly-summaries",
+    response_model=FuelMonthlySummariesListResponse,
+    summary="List monthly fuel summaries in the KPI scope",
+    description="Monthly-summary totals (statements without refuelling dates) in the KPI scope, by reporting month. A summary is in range when its month-end reporting date is, as for the KPIs. Works with either storage layout.",
+)
+async def list_fuel_monthly_summaries(
+    request: Request,
+    date_from: Optional[str] = Query(None, description="Start date filter (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="End date filter (YYYY-MM-DD)"),
+    vehicle_identifier: Optional[str] = Query(None, description="Exact vehicle filter (same Wialon unit or identical identifier)"),
+    fuel_type: Optional[str] = Query(None, description="Fuel product type filter"),
+    import_id: Optional[int] = Query(None, description="Filter by specific import ID"),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    page_size: int = Query(50, ge=1, le=1000, description="Number of items per page"),
+):
+    _validate_range(date_from, date_to)
+    bearer_token = _get_bearer_token(request)
+    filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier,
+               "fuel_type": fuel_type, "import_id": import_id}
+    scope = await _build_scope(filters, bearer_token)
+    summaries = [r for r in scope.matched if is_monthly_summary(r)]
+    summaries.sort(key=lambda r: (reporting_month_label(r) or "", str(r.get("vehicle_identifier") or "")), reverse=True)
+    offset = (page - 1) * page_size
+    paged = summaries[offset : offset + page_size]
+    return FuelMonthlySummariesListResponse(
+        count=len(paged),
+        page=page,
+        page_size=page_size,
+        total=len(summaries),
+        monthly_summaries=[_to_summary_item(r) for r in paged],
         excluded_scope=scope.excluded_scope,
     )
 
@@ -1149,7 +1217,10 @@ async def get_vehicle_fuel_detail(
     scope = await _build_scope(filters, bearer_token, login_fn=lambda: sid, units_fn=lambda _sid: wialon_units)
     raw_records = [r for r in scope.matched if r.get("_unit_id") == unit_id]
     raw_records.sort(key=lambda r: str(r.get("transaction_date") or ""), reverse=True)
-    tx_items = [_to_tx_item(r) for r in raw_records]
+    # KPIs below use every row; the lists keep monthly totals out of the dated history (FUEL_MONTHLY_SUMMARY_TABLE)
+    dated_records, summary_records = _split_summaries(raw_records)
+    tx_items = [_to_tx_item(r) for r in dated_records]
+    summary_items = [_to_summary_item(r) for r in summary_records]
 
     dates = _resolve_effective_dates(raw_records, date_from, date_to)
     if raw_records and dates is not None:
@@ -1211,7 +1282,8 @@ async def get_vehicle_fuel_detail(
         "driving_formula": "Estimated Driving Fuel (L) = Fuel Purchased (L) − Estimated Idle Fuel (L) [estimated]",
         "efficiency_formula": "Purchase-based L/100 km = fuel purchased ÷ Wialon trip distance × 100 (derived; not measured consumption)",
         "telematics_source": "Wialon Native Reports (Template 4 Trips & Template 1 Engine Hours)",
-        "transaction_source": "Supabase public.fuel_transactions table",
+        "transaction_source": ("Supabase public.fuel_transactions (dated) and public.fuel_monthly_summaries (monthly totals)"
+                               if summary_table_enabled() else "Supabase public.fuel_transactions table"),
         "disclaimer": "Purchased fuel reflects refuelling events in the selected window, not measured consumption. The driving/idling split is an estimate from Wialon idle hours and the configured idle rate.",
     }
 
@@ -1219,6 +1291,7 @@ async def get_vehicle_fuel_detail(
         vehicle_identifier=clean_vid,
         vehicle_summary=v_summary,
         transactions=tx_items,
+        monthly_summaries=summary_items,
         activity_breakdown=telematics_detail,
         anomalies=waste_res.anomalies,
         calculation_transparency=calculation_transparency,

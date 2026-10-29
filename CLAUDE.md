@@ -91,6 +91,24 @@ Copy `Backend/.env.example` and `Frontend/.env.example`.
 - Do not duplicate work another agent has already completed.
 - Report verified facts separately from assumptions, and reference changed or affected files and lines.
 
+
+## Graphify Code Intelligence
+
+- **When to use:** For codebase exploration, debugging, data-accuracy audits, performance investigations, and changes involving multiple files, consult the Graphify code graph before investigating dependencies.
+- **Trace dependencies:** Use Graphify to identify relationships between frontend components, API endpoints, backend functions, shared utilities, data sources, and affected pages.
+- **Data-accuracy investigations:** Trace each dashboard metric from its frontend display through the API and backend calculations to its original data source. Verify findings against actual source code and, when authorized, real data.
+- **Change-impact analysis:** Before modifying shared functions, caching, API contracts, normalization, or calculations, use the graph to identify potentially affected components and dependencies.
+- **Simple tasks:** Do not invoke Graphify unnecessarily for isolated edits, simple styling changes, or straightforward questions.
+- **Graph freshness:** If the graph is missing, stale, incomplete, or inconsistent with the source code, inspect the actual files. Refresh the graph when necessary and only through supported Graphify commands.
+- **Semantic coverage:** Check whether relevant documentation and code are represented in the graph. Do not assume indexing is complete when extraction has failed or skipped files.
+- **No false confidence:** Graphify describes code structure and relationships; it does not prove runtime behavior, calculation correctness, or live-data accuracy. Validate conclusions independently.
+- **Safe operation:** Do not modify application files merely to build or refresh the graph. Follow all existing project safeguards, approval requirements, testing restrictions, and no-commit/push/deploy rules.
+- **No unnecessary repetition:** Reuse the existing graph when it is sufficiently current. Do not rebuild it for every task.
+- **Reporting:** When Graphify materially informs an investigation, state what was traced, identify relevant files and lines, and distinguish verified findings from assumptions.
+
+
+
+
 ## Subagent delegation
 
 Subagents are optional, not automatic. The main agent handles simple and routine tasks directly. For a complex task that genuinely benefits from specialized or independent work, invoke only the one specialist it needs. Ask the user before launching subagents for broad or expensive investigations.
@@ -105,3 +123,14 @@ Project agents are defined in `.claude/agents/`: `backend-wialon-specialist`, `f
 - **Proportionate delegation**: never launch agents by default. Give each agent one narrow, explicit objective with the relevant files and context. Never run two agents on the same investigation or let more than one agent edit the same files at once.
 - **Main agent responsibilities**: coordinate the work, check agent findings against the code before acting on them, implement or integrate the final changes, and run or verify approved tests itself. An agent's report is input, not proof.
 - **Honest reporting**: never claim an agent was used unless it was actually invoked in the current session, and never present an agent's findings as verified unless the main agent confirmed them. When agents were used, say which ones and what each contributed.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- When graphify-out/graph.json exists, run `graphify query "<question>"` before your first grep, search or source-file read for a codebase question, and put this rule in every subagent prompt that explores code. Read raw files only for lines the graph or an earlier read already located. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
+- A committed graphify-out/graph.json is rewritten whole on every build, so a large diff to it in a pull request is expected. Do not flag it as churn or suggest skipping the graph rebuild or its hooks.

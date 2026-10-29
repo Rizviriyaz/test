@@ -171,7 +171,7 @@ class FakePostgrest:
         return FakeResponse(page, headers=resp_headers)
 
 
-def run_import(fake, rows, mapping=MAPPING, headers=HEADERS):
+def run_import(fake, rows, mapping=MAPPING, headers=HEADERS, **kwargs):
     """Run the real importer + real fingerprint fetch against the fake table."""
     create = MagicMock(side_effect=lambda **kw: 500 + len(fake.rows))
     with patch("app.fuel.importer.fetch_running_imports", return_value=[]), patch("app.fuel.importer.create_fuel_import_record", create), \
@@ -179,7 +179,7 @@ def run_import(fake, rows, mapping=MAPPING, headers=HEADERS):
          patch("app.fuel.importer.insert_fuel_transactions_batch", side_effect=fake.insert), \
          patch("app.fuel.importer.resolve_fleet_vehicles", side_effect=AssertionError("must not be called")) as resolve, \
          patch("app.fuel.db._session.get", side_effect=fake.get):
-        res = execute_fuel_import(make_xlsx(rows, headers), "statement.xlsx", mapping, FAKE_USER["id"])
+        res = execute_fuel_import(make_xlsx(rows, headers), "statement.xlsx", mapping, FAKE_USER["id"], **kwargs)
     assert not resolve.called, "resolve_fleet_vehicles (Wialon login) must no longer run during import"
     return res, create
 
@@ -538,12 +538,13 @@ def test_warnings_and_derived_counts():
 def test_in_file_duplicate_details():
     fake = FakePostgrest("timestamp")
     row = ["2026-03-07 09:00:00", "DXB 10293", 50, 3.1, 155, "INV-7", 1000]
-    res, _ = run_import(fake, [row, list(row)])
+    # Both rows carry one identical date: the user confirms they are real refuelling dates
+    res, _ = run_import(fake, [row, list(row)], single_date_mode="dated")
     # Approved rule: identical rows of one file are repeated refuels, all imported and reported as a warning
     assert res.rows_imported == 2 and res.rows_duplicate == 0 and res.rows_identical_in_file == 1, res
     assert any("identical to another row" in w for w in res.warnings), res.warnings
     # Re-importing the same file stores nothing new: both copies match the stored rows
-    res2, _ = run_import(fake, [row, list(row)])
+    res2, _ = run_import(fake, [row, list(row)], single_date_mode="dated")
     assert res2.rows_imported == 0 and res2.rows_duplicate == 2, res2
     print("[PASS] Identical rows in one file are kept as repeated refuels; a re-import of the file adds nothing.")
 

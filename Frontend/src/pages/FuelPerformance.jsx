@@ -31,16 +31,31 @@ import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import { excludedSummary, skippedRowsLabel } from "../components/Fuel/fuelLabels"
 import FuelImportControls from "../components/Fuel/FuelImportControls"
-import { canConfirmImport, importOptions, isReportingMonth, mappingForImport, showColumnChoices } from "../components/Fuel/fuelImportState"
+import DataCoverage from "../components/Fuel/DataCoverage"
+import { canConfirmImport, formatReportingDate, formatReportingMonth, importOptions, isReportingMonth, mappingForImport, showColumnChoices } from "../components/Fuel/fuelImportState"
 import { dailySearch, datedDailyAvailability, datedTransactionCount, isCurrentMonth, latestMonthWithData, monthLabel } from "../components/Fuel/fuelPeriod"
 import { fuelVehicleListParams } from "../utils/fleetRules"
 import { getUAETodayStr } from "../utils/datetime"
 import { TELEMATICS_RETRY_DELAY_MS, shouldRetryTelematics } from "../components/Fuel/telemetryFormat"
 
-const NO_IMPORT_CHOICES = { mapping: null, reportingMonth: "", mappingConfirmed: false, extendToFullMonths: false }
+const NO_IMPORT_CHOICES = { mapping: null, reportingMonth: "", mappingConfirmed: false, extendToFullMonths: false, singleDateMode: "" }
+
+// Reporting period of a previewed statement, read from the preview only; null when the preview does not state one
+function previewPeriodLabel(preview) {
+    if (preview?.import_mode === "monthly_summary" && preview.reporting_month) {
+        return formatReportingMonth(preview.reporting_month)
+    }
+    const from = String(preview?.replacement?.period_from || "").slice(0, 10)
+    const to = String(preview?.replacement?.period_to || "").slice(0, 10)
+    if (from && to) {
+        return from === to ? formatReportingDate(from) : `${formatReportingDate(from)} – ${formatReportingDate(to)}`
+    }
+    if (preview?.single_date) return formatReportingDate(preview.single_date)
+    return null
+}
 
 export default function FuelPerformance() {
-    const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, fuelType } = useFuelFilters()
+    const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, setVehicle } = useFuelFilters()
 
     // Configurable Telematics Idle Rate (Litres/Hour)
     const [idleRate, setIdleRate] = useState(2.0)
@@ -276,7 +291,7 @@ export default function FuelPerformance() {
     const handleMappingChange = (field, header) => {
         const mapping = { ...(previewData.active_mapping || previewData.suggested_mapping || {}), [field]: header }
         // Choosing a column is an explicit decision; a new choice must be confirmed again
-        updateImportChoices({ mapping, mappingConfirmed: false, ...(field === "transaction_date" && header ? { reportingMonth: "" } : {}) })
+        updateImportChoices({ mapping, mappingConfirmed: false, ...(field === "transaction_date" ? { singleDateMode: "", ...(header ? { reportingMonth: "" } : {}) } : {}) })
     }
 
     const handleConfirmImport = async () => {
@@ -330,7 +345,7 @@ export default function FuelPerformance() {
         let active = true
         // eslint-disable-next-line react-hooks/set-state-in-effect -- the lookup shows its loading state while it runs
         setLatestMonth({ status: "loading", month: null })
-        getFuelTrend({ group_by: "month", ...(vehicle ? { vehicle_identifier: vehicle } : {}), ...(fuelType ? { fuel_type: fuelType } : {}) })
+        getFuelTrend({ group_by: "month", ...(vehicle ? { vehicle_identifier: vehicle } : {}) })
             .then((res) => {
                 if (!active) return
                 const month = latestMonthWithData(res?.data, getUAETodayStr())
@@ -340,7 +355,7 @@ export default function FuelPerformance() {
                 if (active) setLatestMonth({ status: "error", month: null })
             })
         return () => { active = false }
-    }, [lookupLatest, vehicle, fuelType])
+    }, [lookupLatest, vehicle])
 
     // Concise data notices, most relevant first
     const notices = []
@@ -383,8 +398,6 @@ export default function FuelPerformance() {
     return (
         <AppShell>
             <FuelHeader
-                title="Fuel Performance"
-                subtitle={periodLabel}
                 showFilters={true}
                 idleRate={idleRate}
                 setIdleRate={setIdleRate}
@@ -400,7 +413,7 @@ export default function FuelPerformance() {
                 ) : null}
             />
 
-            <div className="space-y-5">
+            <div className="space-y-3 sm:space-y-4">
                 {overviewError && (
                     <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} />
                 )}
@@ -422,7 +435,7 @@ export default function FuelPerformance() {
                     <EmptyState
                         icon={CalendarDays}
                         title={`No fuel data for ${periodLabel}`}
-                        message={vehicle || fuelType ? `Filters: ${[vehicle, fuelType].filter(Boolean).join(" · ")}` : undefined}
+                        message={vehicle ? `Filter: ${vehicle}` : undefined}
                         action={monthMode ? (
                             latestMonth.status === "loading" ? (
                                 <span className="text-xs text-slate-400">Finding the latest month with data…</span>
@@ -483,32 +496,34 @@ export default function FuelPerformance() {
                         />
                     </>
                 )}
+
+                {/* Data coverage: fleet vehicles without fuel records, and matched vehicles without distance */}
+                <DataCoverage
+                    queryParams={queryParams}
+                    vehicleFilter={vehicle}
+                    onClearVehicle={() => setVehicle("")}
+                    refreshKey={`${telematicsRetries}|${importResult?.import_id ?? ""}`}
+                />
             </div>
 
             {/* ─── IMPORT DIALOG ─────────────────────────────────── */}
             {isImportModalOpen && createPortal(
                 <div
-                    className="fixed inset-0 z-[9999] flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4"
+                    className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-3 sm:p-4"
                     onClick={() => setIsImportModalOpen(false)}
                 >
                     <div
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="fuel-import-title"
-                        className="my-8 w-full max-w-2xl rounded-xl border border-slate-200 bg-white p-5 shadow-dialog sm:p-6"
+                        className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog sm:max-h-[calc(100dvh-2rem)]"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* Modal Header */}
-                        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                            <div>
-                                <h3 id="fuel-import-title" className="text-[15px] font-semibold text-slate-900">
-                                    Fuel Data Management
-                                </h3>
-                                <p className="text-xs text-slate-500">
-                                    Import fuel statement (.xlsx)
-                                </p>
-                            </div>
-
+                        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
+                            <h3 id="fuel-import-title" className="text-[15px] font-semibold text-slate-900">
+                                Import Fuel Statement
+                            </h3>
                             <button
                                 type="button"
                                 onClick={() => {
@@ -524,210 +539,207 @@ export default function FuelPerformance() {
                             </button>
                         </div>
 
-                        <div>
-                                {/* Upload Result Alert */}
-                                {importResult && (
-                                    <div className={`my-3 rounded-lg border p-4 text-xs ${
-                                        importResult.status === "completed"
-                                            ? "border-emerald-200 bg-emerald-50/80"
-                                            : importResult.status === "failed"
-                                                ? "border-rose-200 bg-rose-50/80"
-                                                : "border-amber-200 bg-amber-50/80"
-                                    }`}>
-                                        <div className="flex items-center gap-2 font-semibold text-slate-800 mb-1">
+                        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+                            {/* Upload Result Alert */}
+                            {importResult && (
+                                <div className={`rounded-lg border px-3 py-2.5 text-xs ${
+                                    importResult.status === "completed"
+                                        ? "border-emerald-200 bg-emerald-50/80"
+                                        : importResult.status === "failed"
+                                            ? "border-rose-200 bg-rose-50/80"
+                                            : "border-amber-200 bg-amber-50/80"
+                                }`}>
+                                    <div className="flex items-center gap-2 font-semibold text-slate-800">
+                                        {importResult.status === "completed"
+                                            ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                                            : <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600" />}
+                                        <span>
                                             {importResult.status === "completed"
-                                                ? <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                                                : <AlertTriangle className="h-4 w-4 text-amber-600" />}
-                                            <span>
-                                                {importResult.status === "completed"
-                                                    ? "Import complete"
-                                                    : importResult.status === "failed"
-                                                        ? "Import Failed"
-                                                        : "Imported with errors"}
-                                            </span>
-                                        </div>
-                                        <p className="text-slate-700">
-                                            {importResult.rows_imported} transactions imported • {importResult.rows_duplicate} duplicates skipped • {importResult.rows_failed} failed
-                                            {importResult.rows_unverified > 0 && ` • ${importResult.rows_unverified} unverified`}
-                                            {importResult.rows_not_processed > 0 && ` • ${importResult.rows_not_processed} not processed`}
-                                            {skippedRowsLabel(importResult) && ` • ${skippedRowsLabel(importResult)}`}
-                                            {importResult.committed && importResult.rows_replaced > 0 && ` • ${importResult.rows_replaced} older row(s) replaced`}
-                                            {importResult.rows_unchanged > 0 && ` • ${importResult.rows_unchanged} already stored unchanged`}
+                                                ? "Import complete"
+                                                : importResult.status === "failed"
+                                                    ? "Import Failed"
+                                                    : "Imported with errors"}
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-slate-700">
+                                        {importResult.rows_imported} transactions imported
+                                        {importResult.rows_duplicate > 0 && ` • ${importResult.rows_duplicate} duplicates skipped`}
+                                        {importResult.rows_failed > 0 && ` • ${importResult.rows_failed} failed`}
+                                        {importResult.rows_unverified > 0 && ` • ${importResult.rows_unverified} unverified`}
+                                        {importResult.rows_not_processed > 0 && ` • ${importResult.rows_not_processed} not processed`}
+                                        {skippedRowsLabel(importResult) && ` • ${skippedRowsLabel(importResult)}`}
+                                        {importResult.committed && importResult.rows_replaced > 0 && ` • ${importResult.rows_replaced} older row(s) replaced`}
+                                        {importResult.rows_unchanged > 0 && ` • ${importResult.rows_unchanged} already stored unchanged`}
+                                        {importResult.rows_skipped_monthly_summary > 0 && ` • ${importResult.rows_skipped_monthly_summary} skipped (monthly summary kept)`}
+                                    </p>
+                                    {importResult.import_mode === "monthly_summary" && (
+                                        <p className="mt-1 text-slate-600">
+                                            {importResult.monthly_summary_table
+                                                ? `Monthly summary ${importResult.reporting_month}: stored as monthly totals, without a refuelling date.`
+                                                : `Monthly summary ${importResult.reporting_month}: dated ${importResult.assigned_transaction_date} as the reporting date, not a refuelling date.`}
                                         </p>
-                                        {importResult.import_mode === "monthly_summary" && (
-                                            <p className="mt-1 text-slate-600">
-                                                Monthly summary {importResult.reporting_month}: rows dated {importResult.assigned_transaction_date} as the reporting date, not a refuelling date.
-                                            </p>
-                                        )}
-                                        {importResult.error_message && (
-                                            <p className="mt-1 text-rose-700">{importResult.error_message}</p>
-                                        )}
-                                    </div>
-                                )}
+                                    )}
+                                    {importResult.error_message && (
+                                        <p className="mt-1 text-rose-700">{importResult.error_message}</p>
+                                    )}
+                                </div>
+                            )}
 
-                                {/* Preview / Import Error */}
-                                {(previewError || importError) && (
-                                    <div role="alert" className="my-3 flex items-center gap-3 rounded-lg border border-rose-200 bg-rose-50/80 p-4 text-xs font-semibold text-rose-700">
-                                        <AlertTriangle className="h-4 w-4 shrink-0 text-rose-600" />
-                                        <span>{previewError || importError}</span>
-                                    </div>
-                                )}
+                            {/* Preview / Import Error */}
+                            {(previewError || importError) && (
+                                <div role="alert" className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50/80 px-3 py-2.5 text-xs font-semibold text-rose-700">
+                                    <AlertTriangle className="mt-px h-4 w-4 shrink-0 text-rose-600" />
+                                    <span>{previewError || importError}</span>
+                                </div>
+                            )}
 
-                                {/* Upload Area */}
-                                {!previewData && !previewLoading && (
-                                    <div
-                                        onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
-                                        onDragLeave={() => setIsDragging(false)}
-                                        onDrop={(e) => {
+                            {/* Upload Area */}
+                            {!previewData && !previewLoading && (
+                                <div
+                                    onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+                                    onDragLeave={() => setIsDragging(false)}
+                                    onDrop={(e) => {
+                                        e.preventDefault()
+                                        setIsDragging(false)
+                                        if (e.dataTransfer.files?.length) handleFileChosen(e.dataTransfer.files[0])
+                                    }}
+                                    onClick={() => fileInputRef.current?.click()}
+                                    onKeyDown={(e) => {
+                                        if (e.key === "Enter" || e.key === " ") {
                                             e.preventDefault()
-                                            setIsDragging(false)
-                                            if (e.dataTransfer.files?.length) handleFileChosen(e.dataTransfer.files[0])
+                                            fileInputRef.current?.click()
+                                        }
+                                    }}
+                                    role="button"
+                                    tabIndex={0}
+                                    className={`rounded-xl border border-dashed px-4 py-6 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
+                                        isDragging
+                                            ? "border-brand bg-brand/5"
+                                            : "border-slate-200 hover:border-brand/50 bg-slate-50/50"
+                                    }`}
+                                >
+                                    <input
+                                        ref={fileInputRef}
+                                        type="file"
+                                        accept=".xlsx"
+                                        className="hidden"
+                                        onChange={(e) => {
+                                            if (e.target.files?.length) handleFileChosen(e.target.files[0])
                                         }}
-                                        onClick={() => fileInputRef.current?.click()}
-                                        onKeyDown={(e) => {
-                                            if (e.key === "Enter" || e.key === " ") {
-                                                e.preventDefault()
-                                                fileInputRef.current?.click()
-                                            }
-                                        }}
-                                        role="button"
-                                        tabIndex={0}
-                                        className={`my-4 rounded-xl border border-dashed p-8 text-center cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${
-                                            isDragging
-                                                ? "border-brand bg-brand/5"
-                                                : "border-slate-200 hover:border-brand/50 bg-slate-50/50"
-                                        }`}
-                                    >
-                                        <input
-                                            ref={fileInputRef}
-                                            type="file"
-                                            accept=".xlsx"
-                                            className="hidden"
-                                            onChange={(e) => {
-                                                if (e.target.files?.length) handleFileChosen(e.target.files[0])
-                                            }}
-                                        />
-                                        <FileSpreadsheet className="mx-auto mb-2 h-8 w-8 text-slate-400" />
-                                        <p className="text-[13px] font-medium text-slate-800">
-                                            Drop the Excel fuel statement here, or <span className="text-brand underline underline-offset-2">choose a file</span>
+                                    />
+                                    <FileSpreadsheet className="mx-auto mb-2 h-7 w-7 text-slate-400" />
+                                    <p className="text-[13px] font-medium text-slate-800">
+                                        Drop the Excel fuel statement here, or <span className="text-brand underline underline-offset-2">choose a file</span>
+                                    </p>
+                                    <span className="mt-1 block text-[11px] text-slate-400">.xlsx only</span>
+                                </div>
+                            )}
+
+                            {/* Preview Loading */}
+                            {previewLoading && (
+                                <div className="py-8 text-center text-xs text-slate-500" role="status">
+                                    <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
+                                    Reading the statement…
+                                </div>
+                            )}
+
+                            {/* Preview Result: only what the decision needs */}
+                            {previewData && (
+                                <>
+                                    <dl className="divide-y divide-slate-100 rounded-lg border border-slate-200 text-xs">
+                                        <div className="flex items-center gap-2 px-3 py-2">
+                                            <FileSpreadsheet className="h-4 w-4 shrink-0 text-slate-400" aria-hidden="true" />
+                                            <dt className="sr-only">File</dt>
+                                            <dd className="min-w-0 truncate font-medium text-slate-900" title={previewData.file_name}>{previewData.file_name}</dd>
+                                        </div>
+                                        <div className="flex items-baseline justify-between gap-3 px-3 py-2">
+                                            <dt className="text-slate-500">{previewData.rows_fuel != null ? "Fuel transactions" : "Rows detected"}</dt>
+                                            <dd className="text-sm font-semibold tabular-nums text-slate-900">
+                                                {(previewData.rows_fuel ?? previewData.rows_candidate ?? 0).toLocaleString()}
+                                            </dd>
+                                        </div>
+                                        {previewPeriodLabel(previewData) && (
+                                            <div className="flex items-baseline justify-between gap-3 px-3 py-2">
+                                                <dt className="text-slate-500">Reporting period</dt>
+                                                <dd className="text-right font-medium tabular-nums text-slate-900">
+                                                    {previewPeriodLabel(previewData)}
+                                                    {previewData.import_mode === "monthly_summary" && <span className="font-normal text-slate-500"> · monthly summary</span>}
+                                                </dd>
+                                            </div>
+                                        )}
+                                        {previewData.rows_invalid > 0 && (
+                                            <div className="flex items-baseline justify-between gap-3 px-3 py-2">
+                                                <dt className="text-rose-700">Invalid rows (not imported)</dt>
+                                                <dd className="font-semibold tabular-nums text-rose-700">{previewData.rows_invalid.toLocaleString()}</dd>
+                                            </div>
+                                        )}
+                                    </dl>
+
+                                    {previewData.invalid_row_details?.length > 0 && (
+                                        <ul className="space-y-0.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800" role="alert">
+                                            {previewData.invalid_row_details.slice(0, 5).map((d) => (
+                                                <li key={d.source_row}>Row {d.source_row}: {d.reason}</li>
+                                            ))}
+                                            {previewData.rows_invalid > 5 && (
+                                                <li className="text-rose-700/80">…and {previewData.rows_invalid - 5} more</li>
+                                            )}
+                                        </ul>
+                                    )}
+
+                                    {previewData.missing_required_fields?.length > 0 && !showColumnChoices(previewData) && (
+                                        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="alert">
+                                            Required columns not recognised: {previewData.missing_required_fields.join(", ")}. Rename these headers and upload again.
                                         </p>
-                                        <span className="text-[11px] text-slate-400 mt-1 block">Supported format: .xlsx</span>
-                                    </div>
-                                )}
+                                    )}
 
-                                {/* Preview Loading */}
-                                {previewLoading && (
-                                    <div className="my-8 text-center text-xs text-slate-500">
-                                        <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                                        Reading the statement…
-                                    </div>
-                                )}
-
-                                {/* Preview Result */}
-                                {previewData && (
-                                    <div className="my-3 space-y-3">
-                                        <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 text-xs">
-                                            <div className="flex items-center justify-between font-semibold text-slate-800 mb-2">
-                                                <span>{previewData.file_name}</span>
-                                                <span className="text-emerald-700">
-                                                    {previewData.rows_fuel ?? previewData.rows_candidate} {previewData.rows_fuel != null ? "fuel transactions detected" : "valid rows detected"}
-                                                </span>
-                                            </div>
-                                            <div className="grid grid-cols-3 gap-2 text-center text-[11px]">
-                                                <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                    <span className="text-slate-400 block">Total Rows</span>
-                                                    <span className="font-semibold tabular-nums text-slate-800">{previewData.rows_found}</span>
-                                                </div>
-                                                {previewData.rows_fuel != null && (
-                                                    <>
-                                                        <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                            <span className="text-slate-400 block">Fuel Purchases</span>
-                                                            <span className="font-semibold tabular-nums text-emerald-700">{previewData.rows_fuel}</span>
-                                                        </div>
-                                                        <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                            <span className="text-slate-400 block">Invalid</span>
-                                                            <span className={`font-semibold tabular-nums ${previewData.rows_invalid > 0 ? "text-rose-600" : "text-slate-500"}`}>{previewData.rows_invalid}</span>
-                                                        </div>
-                                                        <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                            <span className="text-slate-400 block">Non-fuel Skipped</span>
-                                                            <span className="font-semibold tabular-nums text-slate-500">{previewData.rows_non_fuel ?? 0}</span>
-                                                        </div>
-                                                    </>
-                                                )}
-                                                <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                    <span className="text-slate-400 block">{previewData.rows_fuel != null ? "Blank/Summary" : "Ignored"}</span>
-                                                    <span className="font-semibold tabular-nums text-slate-500">
-                                                        {previewData.rows_fuel != null ? previewData.rows_ignored - (previewData.rows_non_fuel ?? 0) : previewData.rows_ignored}
-                                                    </span>
-                                                </div>
-                                                <div className="rounded-md bg-white p-2 border border-slate-200">
-                                                    <span className="text-slate-400 block">Columns</span>
-                                                    <span className="font-semibold tabular-nums text-slate-900">{Object.keys(previewData.suggested_mapping || {}).length}</span>
-                                                </div>
-                                            </div>
-                                        </div>
-
-                                        {previewData.invalid_row_details?.length > 0 && (
-                                            <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800">
-                                                <p className="font-semibold mb-1">{previewData.rows_invalid} row(s) will fail validation and not be imported:</p>
-                                                <ul className="space-y-0.5">
-                                                    {previewData.invalid_row_details.slice(0, 5).map((d) => (
-                                                        <li key={d.source_row}>Row {d.source_row}: {d.reason}</li>
-                                                    ))}
-                                                </ul>
-                                            </div>
-                                        )}
-
-                                        <FuelImportControls
-                                            preview={previewData}
-                                            disabled={importing || previewLoading}
-                                            maxMonth={getUAETodayStr().slice(0, 7)}
-                                            reportingMonth={importChoices.reportingMonth}
-                                            mappingConfirmed={importChoices.mappingConfirmed}
-                                            extendToFullMonths={importChoices.extendToFullMonths}
-                                            onMappingChange={handleMappingChange}
-                                            onConfirmMapping={(checked) => updateImportChoices({ mapping: previewData.active_mapping, mappingConfirmed: checked })}
-                                            onMonthChange={(month) => updateImportChoices({ reportingMonth: month }, month === "" || isReportingMonth(month))}
-                                            onExtendChange={(checked) => updateImportChoices({ extendToFullMonths: checked })}
-                                        />
-
-                                        {previewData.missing_required_fields?.length > 0 && !showColumnChoices(previewData) && (
-                                            <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
-                                                Required columns not recognised: {previewData.missing_required_fields.join(", ")}. Rename these headers in the statement and upload it again.
-                                            </p>
-                                        )}
-
-                                        <div className="flex items-center justify-end gap-2 pt-2">
-                                            <button
-                                                type="button"
-                                                disabled={importing}
-                                                onClick={() => setPreviewData(null)}
-                                                className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-                                            >
-                                                Cancel
-                                            </button>
-                                            <button
-                                                type="button"
-                                                disabled={previewLoading || !canConfirmImport(previewData, importing, importChoices.reportingMonth)}
-                                                onClick={handleConfirmImport}
-                                                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
-                                            >
-                                                {importing ? (
-                                                    <>
-                                                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                                                        <span>Importing…</span>
-                                                    </>
-                                                ) : (
-                                                    <>
-                                                        <UploadCloud className="h-3.5 w-3.5" />
-                                                        <span>Confirm import</span>
-                                                    </>
-                                                )}
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
+                                    <FuelImportControls
+                                        preview={previewData}
+                                        disabled={importing || previewLoading}
+                                        maxMonth={getUAETodayStr().slice(0, 7)}
+                                        reportingMonth={importChoices.reportingMonth}
+                                        mappingConfirmed={importChoices.mappingConfirmed}
+                                        extendToFullMonths={importChoices.extendToFullMonths}
+                                        singleDateMode={importChoices.singleDateMode}
+                                        onMappingChange={handleMappingChange}
+                                        onConfirmMapping={(checked) => updateImportChoices({ mapping: previewData.active_mapping, mappingConfirmed: checked })}
+                                        onMonthChange={(month) => updateImportChoices({ reportingMonth: month }, month === "" || isReportingMonth(month))}
+                                        onExtendChange={(checked) => updateImportChoices({ extendToFullMonths: checked })}
+                                        onSingleDateChange={(mode) => updateImportChoices({ singleDateMode: mode, reportingMonth: "" })}
+                                    />
+                                </>
+                            )}
                         </div>
+
+                        {previewData && (
+                            <div className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-100 px-4 py-3">
+                                <button
+                                    type="button"
+                                    disabled={importing}
+                                    onClick={() => setPreviewData(null)}
+                                    className="h-8 rounded-md border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={previewLoading || !canConfirmImport(previewData, importing, importChoices.reportingMonth)}
+                                    onClick={handleConfirmImport}
+                                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white hover:bg-brand-hover cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                    {importing ? (
+                                        <>
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                            <span>Importing…</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <UploadCloud className="h-3.5 w-3.5" />
+                                            <span>Confirm import</span>
+                                        </>
+                                    )}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>,
                 document.body

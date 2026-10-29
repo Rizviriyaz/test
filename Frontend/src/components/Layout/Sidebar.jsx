@@ -4,7 +4,6 @@ import {
     Fuel,
     Map,
     HeartPulse,
-    Bell,
     Settings,
     Clock3,
     LogOut,
@@ -63,7 +62,6 @@ const navigation = [
             { name: "Live Tracking",   icon: Map,        path: "/tracking" },
             { name: "Idle Analytics",  icon: Clock3,     path: "/idle-analytics" },
             { name: "Vehicle Health",  icon: HeartPulse, path: "/vehicle-health" },
-            { name: "Alerts",          icon: Bell,       path: "/alerts" },
         ],
     },
 ]

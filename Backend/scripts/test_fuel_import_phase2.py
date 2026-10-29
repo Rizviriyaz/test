@@ -263,6 +263,7 @@ def run_phase2_tests():
                 "odometer_km": "Odo"
             },
             imported_by="user-uuid-1",
+            single_date_mode="dated",  # every row is dated 2026-03-01: the user confirms real refuelling dates
         )
         print(f"Dupe import status: {res_dupe.status}, imported: {res_dupe.rows_imported}, duplicate: {res_dupe.rows_duplicate}")
         assert res_dupe.rows_imported == 2  # Row B and its identical repeat Row C (repeated refuels are kept)

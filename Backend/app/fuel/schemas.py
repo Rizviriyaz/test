@@ -36,6 +36,7 @@ class FuelImportPreviewResponse(BaseModel):
     assigned_transaction_date: Optional[str] = Field(None, description="Month-end reporting date assigned to every row of a monthly summary (not a refuelling date)")
     partial_month: bool = Field(False, description="The reporting month has not ended yet")
     monthly_summary_enabled: bool = Field(False, description="Statements without a date column can be imported (FUEL_IMPORT_REPLACE)")
+    monthly_summary_table: bool = Field(False, description="Monthly summaries are stored in fuel_monthly_summaries by reporting month, without any date (FUEL_MONTHLY_SUMMARY_TABLE); assigned_transaction_date is then null")
     date_column_candidates: List[str] = Field(default_factory=list, description="Headers that could hold the transaction date")
     mapping_confirmation_required: List[str] = Field(default_factory=list, description="Fields whose mapping is ambiguous and must be confirmed (transaction_date, unit_price, total_cost)")
     mapping_confirmed: bool = False
@@ -44,6 +45,11 @@ class FuelImportPreviewResponse(BaseModel):
     rows_cost_derived: int = Field(0, description="Valid rows whose total cost will be derived as litres x unit price")
     rows_unit_price_derived: int = Field(0, description="Valid rows whose unit price will be derived as total cost / litres")
     replacement: Optional[Dict[str, Any]] = Field(None, description="Latest-import-wins preview: period, rows to supersede (exact records, capped), per-vehicle totals, conflicts, expected_replace_count")
+    single_date: Optional[str] = Field(None, description="The one date every valid row of a dated statement carries (YYYY-MM-DD); null when dates differ")
+    single_date_confirmation_required: bool = Field(False, description="All rows share single_date, which is not a month end: the user must select the reporting month (or choose single_date_mode 'dated')")
+    single_date_mode: Optional[str] = Field(None, description="How the single-date statement is treated: 'monthly_summary' (automatic) or 'dated' (the user's override)")
+    rows_skipped_monthly_summary: int = Field(0, description="Valid rows that will not be imported because a monthly summary is stored for their vehicle and month")
+    monthly_summary_scopes_kept: List[Dict[str, Any]] = Field(default_factory=list, description="Per vehicle-month: the kept monthly summary's totals and the file rows skipped (capped)")
     ready_to_import: bool = Field(False, description="True when the import would be accepted as previewed")
     blocking_reasons: List[str] = Field(default_factory=list, description="Why the import is not ready")
 
@@ -79,7 +85,8 @@ class FuelImportResultResponse(BaseModel):
     )
     import_mode: Optional[str] = Field(None, description="'dated' or 'monthly_summary'")
     reporting_month: Optional[str] = None
-    assigned_transaction_date: Optional[str] = Field(None, description="Month-end reporting date of a monthly summary")
+    assigned_transaction_date: Optional[str] = Field(None, description="Month-end reporting date of a monthly summary (null when monthly_summary_table)")
+    monthly_summary_table: bool = Field(False, description="The monthly summary was stored in fuel_monthly_summaries by reporting month, without any date")
     rows_price_mismatch: int = 0
     rows_identical_in_file: int = 0
     replacement_enabled: bool = False
@@ -87,6 +94,9 @@ class FuelImportResultResponse(BaseModel):
     rows_replaced: int = Field(0, description="Older visible rows superseded by this import (kept in the database, hidden from KPIs)")
     rows_unchanged: int = Field(0, description="Rows identical to a stored row in the replaced period; the stored row was kept (counted in rows_duplicate)")
     replacement_period: Optional[Dict[str, Any]] = None
+    rows_skipped_monthly_summary: int = Field(0, description="Rows not imported because a monthly summary is stored for their vehicle and month (the summary is kept); with the counts above they add up to rows_found")
+    monthly_summary_scopes_kept: List[Dict[str, Any]] = Field(default_factory=list, description="Per vehicle-month: the kept monthly summary's totals and the file rows skipped (capped)")
+    single_date: Optional[str] = Field(None, description="The one date every row carried, when the user confirmed what it means")
 
 
 class FuelImportItem(BaseModel):
@@ -150,6 +160,33 @@ class FuelTransactionsListResponse(BaseModel):
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
+class FuelMonthlySummaryItem(BaseModel):
+    """A monthly fuel total of one vehicle line of a statement. It has a reporting month and no refuelling date."""
+    id: int = Field(..., description="Row id in its source table")
+    source_table: str = Field(..., description="'fuel_monthly_summaries', or 'fuel_transactions' for a summary stored before FUEL_MONTHLY_SUMMARY_TABLE")
+    import_id: Optional[int] = None
+    reporting_month: str = Field(..., description="Reporting month (YYYY-MM) the total covers")
+    vehicle_identifier: str
+    fuel_type: Optional[str] = None
+    litres: float
+    unit_price: Optional[float] = None
+    total_cost: Optional[float] = None
+    station_name: Optional[str] = None
+    invoice_number: Optional[str] = None
+    card_number: Optional[str] = None
+    driver_name: Optional[str] = None
+    source_row_number: Optional[int] = None
+
+
+class FuelMonthlySummariesListResponse(BaseModel):
+    count: int
+    page: int
+    page_size: int
+    total: int
+    monthly_summaries: List[FuelMonthlySummaryItem]
+    excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation for the same filters")
+
+
 # ─── Analytics Schemas ─────────────────────────────────────────────────────────
 
 class ExcludedTransactionGroup(BaseModel):
@@ -163,6 +200,7 @@ class ExcludedTransactionGroup(BaseModel):
     first_date: Optional[str] = Field(None, description="Earliest transaction date (YYYY-MM-DD)")
     last_date: Optional[str] = Field(None, description="Latest transaction date (YYYY-MM-DD)")
     transaction_ids: List[int] = Field(default_factory=list, description="Up to 50 transaction ids, for review")
+    summary_ids: List[int] = Field(default_factory=list, description="Up to 50 fuel_monthly_summaries ids (FUEL_MONTHLY_SUMMARY_TABLE), for review")
 
 
 class ExcludedTransactionsResponse(BaseModel):
@@ -454,6 +492,7 @@ class VehicleFuelDetailResponse(BaseModel):
     vehicle_identifier: str = Field(..., description="Vehicle registration plate")
     vehicle_summary: VehicleEfficiencyItem = Field(..., description="Comprehensive vehicle performance metrics")
     transactions: List[FuelTransactionItem] = Field(default_factory=list, description="Chronological transaction history")
+    monthly_summaries: List[FuelMonthlySummaryItem] = Field(default_factory=list, description="Monthly totals in scope, by reporting month (FUEL_MONTHLY_SUMMARY_TABLE; they are then not in transactions)")
     activity_breakdown: Dict[str, Any] = Field(default_factory=dict, description="Driving vs Idling duration and fuel breakdown")
     anomalies: List[FuelAnomalyItem] = Field(default_factory=list, description="Specific anomalies identified for this vehicle")
     calculation_transparency: Dict[str, Any] = Field(default_factory=dict, description="Disclosed formulas, coefficient, and data sources")

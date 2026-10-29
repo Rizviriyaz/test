@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from app.fuel.reporting_period import confirmed_coverage_period, is_monthly_summary
-from app.fuel.scope import _q2, tx_local_date, unit_key
+from app.fuel.scope import REASON_DATED_SUPERSEDED, _q2, tx_local_date, unit_key
 from app.fuel.schemas import (
     DailyFuelItem,
     DailyFuelResponse,
@@ -362,12 +362,20 @@ def unit_coverage_days(
     """
     Wialon unit id -> the days of [first, last] its fuel statements are confirmed to cover: days inside the confirmed
     period (reporting_period.confirmed_coverage_period) of an import that holds one of the unit's dated rows. Every
-    fuel type counts (a statement covers a vehicle, not a product). Monthly-summary rows never establish coverage.
+    fuel type counts (a statement covers a vehicle, not a product). Monthly-summary rows never establish coverage, and
+    a unit-month with a monthly summary has no covered day: its fuel is a monthly total, so a day without dated rows
+    is unknown, never a zero. Dated rows a summary superseded establish nothing either.
     """
     covered: Dict[int, set] = defaultdict(set)
+    summary_months: Dict[int, set] = defaultdict(set)
     for r in rows:
         uid = r.get("_unit_id", r.get("_overlap_unit_id"))
-        if uid is None or is_monthly_summary(r):
+        d = tx_local_date(r.get("transaction_date"))
+        if uid is not None and d and is_monthly_summary(r):
+            summary_months[int(uid)].add(d[:7])
+    for r in rows:
+        uid = r.get("_unit_id", r.get("_overlap_unit_id"))
+        if uid is None or is_monthly_summary(r) or r.get("_exclusion_reason") == REASON_DATED_SUPERSEDED:
             continue
         try:
             period = confirmed_coverage_period(import_meta.get(int(r.get("import_id"))))
@@ -377,7 +385,8 @@ def unit_coverage_days(
             continue
         day, end = max(period[0], first), min(period[1], last)
         while day <= end:
-            covered[int(uid)].add(day)
+            if day.strftime("%Y-%m") not in summary_months[int(uid)]:
+                covered[int(uid)].add(day)
             day += timedelta(days=1)
     return covered
 

@@ -12,6 +12,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.exceptions import NewConnectionError
 
+from app.fuel.reporting_period import (
+    DATE_BASIS_MONTH_END,
+    SUMMARY_COLUMNS,
+    SUMMARY_TABLE,
+    summary_months_for_range,
+    summary_scope_row,
+)
 from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_float, get_env_int
 from app.utils.datetime_helpers import parse_tx_wallclock
@@ -170,6 +177,27 @@ def apply_visible_filter(params: Dict[str, str]) -> Dict[str, str]:
     if replace_enabled():
         params["superseded_by_import_id"] = "is.null"
         params["staged"] = "not.is.true"
+    return params
+
+
+def summary_table_enabled() -> bool:
+    """
+    FUEL_MONTHLY_SUMMARY_TABLE=1 (with FUEL_IMPORT_REPLACE=1) stores monthly summaries in public.fuel_monthly_summaries
+    and commits imports with public.fuel_commit_import_v2 (Backend/sql/monthly_summaries/). fuel_transactions
+    is then read as dated transactions only: legacy summary rows still in it (until the archive phase) are left out,
+    and their copies are read from the new table. Set it only after scripts 01-06 (or 01-03 + reset 90) are applied; with it
+    unset nothing names the new table or function.
+    """
+    return replace_enabled() and os.getenv("FUEL_MONTHLY_SUMMARY_TABLE", "").strip() == "1"
+
+
+def apply_dated_only_filter(params: Dict[str, str]) -> Dict[str, str]:
+    """
+    With FUEL_MONTHLY_SUMMARY_TABLE, restrict a fuel_transactions read to dated rows. NULL date_basis (every legacy
+    dated row) must pass, and `date_basis=neq.x` would drop NULLs, hence the explicit OR.
+    """
+    if summary_table_enabled():
+        params["or"] = f"(date_basis.is.null,date_basis.neq.{DATE_BASIS_MONTH_END})"
     return params
 
 
@@ -361,7 +389,7 @@ def fetch_existing_transaction_fingerprints(
         params["transaction_date"] = f"gte.{df}"
     elif dt:
         params["transaction_date"] = f"lte.{dt}"
-    apply_visible_filter(params)
+    apply_dated_only_filter(apply_visible_filter(params))
 
     rows = _fetch_all_pages(url, params, headers, "existing transactions for duplicate detection", deadline)
     fingerprints: Set[str] = set()
@@ -523,22 +551,25 @@ def fetch_import_rows(
     source_rows: Optional[List[int]] = None,
     bearer_token: Optional[str] = None,
     deadline: Optional[float] = None,
+    table: str = "fuel_transactions",
 ) -> List[Dict[str, Any]]:
     """
     Rows stored under one import (optionally only the given source rows): id, source_row_number,
     transaction_date (and staged with FUEL_IMPORT_REPLACE: staged rows are stored but not visible).
     (import_id, source_row_number) identifies a statement row of an import, so this is the
     read-back used to settle uncertain writes. Read-only; raises FuelDataFetchError if not read completely.
+    table=SUMMARY_TABLE reads fuel_monthly_summaries, whose rows carry reporting_month instead of a date.
     """
+    date_column = "reporting_month" if table == SUMMARY_TABLE else "transaction_date"
     params: Dict[str, str] = {
-        "select": "id,source_row_number,transaction_date" + (",staged" if replace_enabled() else ""),
+        "select": f"id,source_row_number,{date_column}" + (",staged" if replace_enabled() else ""),
         "import_id": f"eq.{int(import_id)}",
         "order": "id.asc",
         "limit": str(PAGE_SIZE),
     }
     if source_rows is not None:
         params["source_row_number"] = f"in.({','.join(str(int(r)) for r in sorted(set(source_rows)))})"
-    url = get_supabase_rest_url("fuel_transactions")
+    url = get_supabase_rest_url(table)
     return _fetch_all_pages(url, params, _read_headers(bearer_token), f"rows stored by import #{import_id}", deadline)
 
 
@@ -582,6 +613,8 @@ def fetch_visible_rows_in_range(
     Every visible transaction (FUEL_IMPORT_REPLACE) with transaction_date in [date_from, date_to] (inclusive days),
     all vehicles, with the values needed to define and fingerprint a replacement scope. Read-only; raises
     FuelDataFetchError unless read completely: a partial read would leave old rows visible next to their replacement.
+    With FUEL_MONTHLY_SUMMARY_TABLE the visible summaries of fuel_monthly_summaries whose reporting date (month end)
+    is in the window are appended as summary_scope_row rows (record_type, summary_id).
     """
     params: Dict[str, str] = {
         "select": "id,import_id,transaction_date,vehicle_identifier,litres,total_cost,invoice_number,odometer_km,date_basis",
@@ -590,9 +623,50 @@ def fetch_visible_rows_in_range(
         "and": (f"(transaction_date.gte.{normalize_date_filter(date_from, is_end=False)},"
                 f"transaction_date.lte.{normalize_date_filter(date_to, is_end=True)})"),
     }
-    apply_visible_filter(params)
+    apply_dated_only_filter(apply_visible_filter(params))
     url = get_supabase_rest_url("fuel_transactions")
-    return _fetch_all_pages(url, params, _read_headers(bearer_token), "transactions in the replacement period", deadline)
+    headers = _read_headers(bearer_token)
+    rows = _fetch_all_pages(url, params, headers, "transactions in the replacement period", deadline)
+    if not summary_table_enabled():
+        return rows
+    select = "id,import_id,reporting_month,vehicle_identifier,litres,total_cost,invoice_number,odometer_km"
+    return rows + _fetch_summaries({"select": select}, date_from, date_to, headers,
+                                   "monthly summaries in the replacement period", deadline)
+
+
+def _fetch_summaries(
+    params: Dict[str, str],
+    date_from: Optional[str],
+    date_to: Optional[str],
+    headers: Dict[str, str],
+    what: str,
+    deadline: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Visible fuel_monthly_summaries rows whose month-end reporting date lies in [date_from, date_to] (exactly the
+    window a legacy summary row dated on that day was read with), as summary_scope_row rows. Read-only; raises
+    FuelDataFetchError unless read completely, also for a stored row with an unreadable reporting_month.
+    """
+    try:
+        months = summary_months_for_range(date_from, date_to)
+    except ValueError as exc:
+        raise FuelDataFetchError(str(exc)) from None
+    if months is None:
+        return []
+    params = {**params, "order": "reporting_month.asc,id.asc", "limit": str(PAGE_SIZE)}
+    first, last = months
+    if first and last:
+        params["and"] = f"(reporting_month.gte.{first.isoformat()},reporting_month.lte.{last.isoformat()})"
+    elif first:
+        params["reporting_month"] = f"gte.{first.isoformat()}"
+    elif last:
+        params["reporting_month"] = f"lte.{last.isoformat()}"
+    apply_visible_filter(params)
+    rows = _fetch_all_pages(get_supabase_rest_url(SUMMARY_TABLE), params, headers, what, deadline)
+    try:
+        return [summary_scope_row(r) for r in rows]
+    except ValueError as exc:
+        raise FuelDataFetchError(f"Unreadable monthly summary: {exc}") from None
 
 
 class FuelCommitError(RuntimeError):
@@ -605,19 +679,31 @@ def commit_fuel_import(
     expected_rows: int,
     bearer_token: Optional[str] = None,
     deadline: Optional[float] = None,
+    supersede_summary_ids: Optional[List[int]] = None,
 ) -> Optional[Dict[str, int]]:
     """
     Make one import's staged rows visible and mark the rows it replaces as superseded, in ONE database transaction
     (public.fuel_commit_import, Backend/sql/fuel_import_replacement.sql). The function refuses (and changes nothing)
     unless every id in supersede_ids is still visible and exactly expected_rows rows of the import are staged.
+    With FUEL_MONTHLY_SUMMARY_TABLE it calls public.fuel_commit_import_v2 (Backend/sql/monthly_summaries/03_...),
+    which also supersedes supersede_summary_ids in fuel_monthly_summaries and refuses a commit that would leave a
+    vehicle-month with a visible summary and visible dated rows, or with summaries of two imports.
 
     Returns {"superseded": n, "committed": m} on success and None when the outcome is unknown (the request was sent
     but no usable answer came back: the caller must read the import's rows to find out). Raises FuelCommitError
     when the database refused it or the request was never sent; nothing changed in either case.
     """
-    url = get_supabase_rest_url("rpc/fuel_commit_import")
-    payload = {"p_import_id": int(import_id), "p_supersede_ids": [int(i) for i in supersede_ids],
-               "p_expected_rows": int(expected_rows)}
+    if summary_table_enabled():
+        url = get_supabase_rest_url("rpc/fuel_commit_import_v2")
+        payload = {"p_import_id": int(import_id), "p_supersede_tx_ids": [int(i) for i in supersede_ids],
+                   "p_supersede_summary_ids": [int(i) for i in supersede_summary_ids or []],
+                   "p_expected_rows": int(expected_rows)}
+    elif supersede_summary_ids:
+        raise FuelCommitError("monthly-summary rows can only be superseded with FUEL_MONTHLY_SUMMARY_TABLE")
+    else:
+        url = get_supabase_rest_url("rpc/fuel_commit_import")
+        payload = {"p_import_id": int(import_id), "p_supersede_ids": [int(i) for i in supersede_ids],
+                   "p_expected_rows": int(expected_rows)}
     if _remaining(deadline) < _MIN_CALL_SECONDS:
         raise FuelCommitError("no time left before the request limit")
     try:
@@ -674,6 +760,7 @@ def _insert_chunk(
     bearer_token: Optional[str],
     outcome: Dict[str, Any],
     deadline: Optional[float] = None,
+    table: str = "fuel_transactions",
 ) -> Tuple[int, int, Optional[str]]:
     """
     POST one batch. Returns (rows of the batch now stored under this import, rows not confirmed stored, error or None);
@@ -758,7 +845,7 @@ def _insert_chunk(
         try:
             found = {int(r["source_row_number"])
                      for r in fetch_import_rows(next(iter(import_ids)), [k[1] for _, k in pending], bearer_token,
-                                                deadline=deadline)
+                                                deadline=deadline, table=table)
                      if r.get("source_row_number") is not None}
         except FuelDataFetchError:
             _settle_rows(outcome, "unverified_rows", rows)
@@ -803,12 +890,13 @@ def _insert_batches(
     bearer_token: Optional[str],
     deadline: Optional[float],
     outcome: Optional[Dict[str, Any]],
+    table: str = "fuel_transactions",
 ) -> Tuple[int, int, List[str]]:
     """
     Returns (stored, unresolved, errors); unresolved rows were neither stored nor skipped by the database.
     A batch starts only if one full attempt and its read-back still fit before `deadline`.
     """
-    url = get_supabase_rest_url("fuel_transactions")
+    url = get_supabase_rest_url(table)
     outcome = outcome if outcome is not None else {}
     stored = unresolved = 0
     errors: List[str] = []
@@ -821,7 +909,7 @@ def _insert_batches(
                           "Re-import the same file to add them; rows already stored are skipped as duplicates.")
             break
         added, open_rows, error = _insert_chunk(url, transactions[i:i + batch_size], headers, params,
-                                                f"Batch {i // batch_size + 1}", bearer_token, outcome, deadline)
+                                                f"Batch {i // batch_size + 1}", bearer_token, outcome, deadline, table)
         stored += added
         unresolved += open_rows
         if error:
@@ -849,6 +937,26 @@ def insert_fuel_transactions_batch(
     headers = get_headers(bearer_token)
     headers["Prefer"] = "return=representation"
     inserted, _, errors = _insert_batches(transactions, batch_size, headers, None, bearer_token, deadline, outcome)
+    return inserted, errors
+
+
+def insert_monthly_summaries_batch(
+    rows: List[Dict[str, Any]],
+    batch_size: int = 100,
+    bearer_token: Optional[str] = None,
+    deadline: Optional[float] = None,
+    outcome: Optional[Dict[str, Any]] = None,
+) -> Tuple[int, List[str]]:
+    """
+    insert_fuel_transactions_batch for fuel_monthly_summaries (FUEL_MONTHLY_SUMMARY_TABLE): staged rows from
+    reporting_period.summary_insert_row, with the same retry and read-back rules. Returns (inserted, errors).
+    """
+    if not rows:
+        return 0, []
+    headers = get_headers(bearer_token)
+    headers["Prefer"] = "return=representation"
+    inserted, _, errors = _insert_batches(rows, batch_size, headers, None, bearer_token, deadline, outcome,
+                                          table=SUMMARY_TABLE)
     return inserted, errors
 
 
@@ -1000,7 +1108,7 @@ def get_fuel_transactions_list(
         params["fuel_type"] = f"ilike.*{filters['fuel_type']}*"
     if filters.get("import_id"):
         params["import_id"] = f"eq.{filters['import_id']}"
-    apply_visible_filter(params)
+    apply_dated_only_filter(apply_visible_filter(params))
 
     try:
         response = _session.get(url, params=params, headers=headers, timeout=15)
@@ -1033,6 +1141,9 @@ def fetch_fuel_transactions_for_analytics(
     Fetch lightweight transaction records for analytics calculations.
     Reads every page (see _fetch_all_pages) or raises FuelDataFetchError; never returns partial data.
     Selects only: transaction_date, vehicle_identifier, fuel_type, litres, total_cost, unit_price.
+    With FUEL_MONTHLY_SUMMARY_TABLE: dated rows of fuel_transactions plus the visible monthly summaries of
+    fuel_monthly_summaries (summary_scope_row), selected by the same reporting-date window and filters as the legacy
+    summary rows were, so every KPI sees the same rows in either layout.
     """
     url = get_supabase_rest_url("fuel_transactions")
     # Use server service role key when available for backend analytics aggregations
@@ -1064,19 +1175,50 @@ def fetch_fuel_transactions_for_analytics(
         params["fuel_type"] = f"ilike.*{filters['fuel_type']}*"
     if filters.get("import_id") is not None:
         params["import_id"] = f"eq.{filters['import_id']}"
-    apply_visible_filter(params)
+    apply_dated_only_filter(apply_visible_filter(params))
 
-    return _fetch_all_pages(url, params, headers, "fuel transactions")
+    rows = _fetch_all_pages(url, params, headers, "fuel transactions")
+    if not summary_table_enabled():
+        return rows
+    summary_params: Dict[str, str] = {"select": ",".join(SUMMARY_COLUMNS)}
+    for key in ("vehicle_identifier", "fuel_type", "import_id"):
+        if key in params:
+            summary_params[key] = params[key]
+    summaries = _fetch_summaries(summary_params, filters.get("date_from"), filters.get("date_to"), headers,
+                                 "monthly summaries")
+    return merge_by_reporting_date(rows, summaries)
+
+
+def merge_by_reporting_date(rows: List[Dict[str, Any]], summaries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Dated rows (already in transaction_date, id order) and adapted summaries in one list ordered by wall-clock date,
+    as a single legacy read returned them; a summary sorts at 00:00 of its month-end reporting date.
+    """
+    if not summaries:
+        return rows
+
+    def key(r: Dict[str, Any]) -> Tuple[int, Any]:
+        parsed = parse_tx_wallclock(r.get("transaction_date"))
+        return (0, parsed[0]) if parsed else (1, datetime.min)
+
+    return sorted(rows + summaries, key=key)
 
 
 def fetch_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[str]:
     """
     Every distinct vehicle_identifier ever imported (all dates), for the number-only plate conflict check.
     Reads every page (see _fetch_all_pages) or raises FuelDataFetchError; never returns a partial list.
+    With FUEL_MONTHLY_SUMMARY_TABLE the identifiers of visible monthly summaries are included, as before.
     """
     url = get_supabase_rest_url("fuel_transactions")
-    params = apply_visible_filter({"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)})
-    rows = _fetch_all_pages(url, params, _read_headers(bearer_token), "fuel vehicle identifiers")
+    headers = _read_headers(bearer_token)
+    params = apply_dated_only_filter(apply_visible_filter(
+        {"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)}))
+    rows = _fetch_all_pages(url, params, headers, "fuel vehicle identifiers")
+    if summary_table_enabled():
+        rows += _fetch_all_pages(get_supabase_rest_url(SUMMARY_TABLE), apply_visible_filter(
+            {"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)}), headers,
+            "monthly-summary vehicle identifiers")
     return sorted({str(r.get("vehicle_identifier") or "").strip() for r in rows} - {""})
 
 

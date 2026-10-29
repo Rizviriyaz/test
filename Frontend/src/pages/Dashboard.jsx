@@ -10,10 +10,8 @@ import {
 import {
     getVehicles,
     getDashboardMileage,
-    getFleetAlertsAnalytics,
     getFleetTripsAnalytics,
     getFleetIdleAnalytics,
-    peekFleetAlertsAnalytics,
     peekFleetIdleAnalytics,
     peekFleetTripsAnalytics,
     peekVehicles,
@@ -40,7 +38,7 @@ import { formatUAEDateTime, formatUAETime, getUAETodayBounds, getUAETodayStr } f
 import { groupNamesOf, idleDurationStatus, inGroup } from "../utils/fleetRules"
 import { isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
 import {
-    EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, activeTodaySummary, fleetAlertsCount, forUaeDay, formatKm2, offlineNote,
+    EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, activeTodaySummary, forUaeDay, formatKm2, offlineNote,
     previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState, yesterdayCellStates,
 } from "../utils/fleetNow"
 import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
@@ -98,7 +96,6 @@ function Dashboard() {
     // reports up to STALE_REPORT_MS)
     const [cached] = useState(() => ({
         vehicles: peekVehicles(),
-        alerts: peekFleetAlertsAnalytics(),
         trips: peekFleetTripsAnalytics({ timeframe: "today" }),
         idle: peekFleetIdleAnalytics({ timeframe: "today", include_events: false }),
         yesterdayTrips: peekFleetTripsAnalytics({ timeframe: "yesterday" }),
@@ -115,8 +112,6 @@ function Dashboard() {
     // Global Vehicle Group Filter (Affects all sections on the page)
     const [selectedGroup, setSelectedGroup] = useState("ALL")
 
-    // Alerts data
-    const [alertsData, setAlertsData] = useState(() => cached.alerts?.data ?? null)
 
     // Today's trips data
     const [tripsData, setTripsData] = useState(() => cached.trips?.data ?? null)
@@ -135,11 +130,11 @@ function Dashboard() {
 
     // Whether the latest request of each Dashboard report failed (the last good data, if any, stays shown)
     const [auxFailed, setAuxFailed] = useState({
-        alerts: false, trips: false, idle: false, yesterdayTrips: false, yesterdayIdle: false, yesterdayMileage: false,
+        trips: false, idle: false, yesterdayTrips: false, yesterdayIdle: false, yesterdayMileage: false,
     })
     // Reports still showing an earlier visit's cached response: labelled until their first request of this visit succeeds
     const [earlier, setEarlier] = useState(() => ({
-        alerts: Boolean(cached.alerts), trips: Boolean(cached.trips), idle: Boolean(cached.idle),
+        trips: Boolean(cached.trips), idle: Boolean(cached.idle),
         yesterdayTrips: Boolean(cached.yesterdayTrips), yesterdayIdle: Boolean(cached.yesterdayIdle),
     }))
     // Runs the report poll now (Retry), replacing its pending timer
@@ -236,7 +231,6 @@ function Dashboard() {
                     tracked("yesterdayMileage", getDashboardMileage("yesterday")).then(res => { if (isCurrent()) setYesterdayMileageData(res); return res }),
                 ] : []
                 const results = await Promise.allSettled([
-                    tracked("alerts", getFleetAlertsAnalytics()).then(res => { if (isCurrent()) setAlertsData(res) }),
                     tracked("trips", getFleetTripsAnalytics({ timeframe: "today" })).then(res => { if (isCurrent()) setTripsData(res) }),
                     tracked("idle", getFleetIdleAnalytics({ timeframe: "today", include_events: false })).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
                     getDashboardMileage("today").then(
@@ -363,11 +357,6 @@ function Dashboard() {
     }), [filteredVehicles, todayMileageData, tripsData, todayStr])
     const activeTodayCount = activeToday.active
 
-    // Alerts: the same current alerts as the Alerts page (null while unavailable, never 0)
-    const alertsSummary = useMemo(() => fleetAlertsCount(alertsData, {
-        selectedGroup, vehicleIds: filteredVehicleIdSet,
-    }), [alertsData, selectedGroup, filteredVehicleIdSet])
-    const alertsCount = alertsSummary.count
 
     // ─── 7. Fleet Activity Metrics Calculation (Reusable for Today & Yesterday)
     const formatHoursMins = (totalMins) => {
@@ -748,7 +737,6 @@ function Dashboard() {
     const idleState = sectionState(todayIdle, auxFailed.idle)
     const distanceState = sectionState(todayMileage.data ?? todayTrips, todayMileageFailed && auxFailed.trips)
     const topMileageState = sectionState(todayMileage.data ?? todayTrips, todayMileageFailed && auxFailed.trips)
-    const alertsState = sectionState(alertsData, auxFailed.alerts)
     // Each Yesterday cell follows its own report request (pending / failed / earlier-visit label)
     const yesterdayCellById = yesterdayCellStates({ mileage: yesterdayMileage, trips: yesterdayTrips, idle: yesterdayIdle }, {
         failed: { mileage: auxFailed.yesterdayMileage, trips: auxFailed.yesterdayTrips, idle: auxFailed.yesterdayIdle },
@@ -759,8 +747,6 @@ function Dashboard() {
     const distanceEarlier = !todayMileage.data && earlier.trips
     // Subtitle of a chart section still showing an earlier visit's cached response
     const earlierSubtitle = (state, isEarlier) => (state === "ready" && isEarlier ? EARLIER_RESULT_NOTICE.text : undefined)
-    // Alerts without data already read "unavailable" in the card: only data shown gets a notice
-    const alertsNotice = alertsState === "ready" ? reportNotice(alertsState, { failed: auxFailed.alerts, earlier: earlier.alerts }) : null
 
     const activityRows = [
         {
@@ -818,7 +804,6 @@ function Dashboard() {
             )}
         >
             <PageHeader
-                title="Fleet Overview"
                 lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
             >
                 <FilterSelect
@@ -839,7 +824,7 @@ function Dashboard() {
 
             {/* The layout renders at once; each section shows its own skeleton until its request answers */}
             {(
-                <div className="space-y-5">
+                <div className="space-y-4 sm:space-y-5">
                     {error && <ErrorBanner message={`${error}. Retrying automatically.`} />}
 
                     {/* ═══════════════════════════════════════════════════════════════
@@ -903,42 +888,6 @@ function Dashboard() {
                                                     Partial: {activeToday.unknown} unknown
                                                 </span>
                                             )}
-                                        </div>
-                                        <div>
-                                            <dt
-                                                className="text-[11px] font-medium uppercase tracking-wider text-slate-500"
-                                                title="Current battery, connection and GPS alerts plus harsh-driving events of the last 24 h, as on the Alerts page"
-                                            >
-                                                Alerts
-                                            </dt>
-                                            <dd className="mt-0.5">
-                                                <Link
-                                                    to="/alerts"
-                                                    title={selectedGroup === "ALL" ? "View fleet alerts" : "View fleet alerts (the Alerts page lists the whole fleet, not only this group)"}
-                                                    className={`group inline-flex items-baseline gap-1.5 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${alertsCount > 0 ? "text-rose-700" : "text-slate-900"}`}
-                                                >
-                                                    <span className="text-lg font-bold tabular-nums">
-                                                        {alertsState === "pending" ? <Pending /> : alertsCount === null ? "—" : `${alertsCount}${alertsSummary.lowerBound ? "+" : ""}`}
-                                                    </span>
-                                                    <span className="inline-flex items-center gap-0.5 text-xs text-slate-500 group-hover:text-brand font-medium">
-                                                        {alertsState === "pending" ? "loading" : alertsCount === null ? "unavailable" : alertsCount > 0 ? "review" : "none open"}
-                                                        <ArrowUpRight className="h-3.5 w-3.5" />
-                                                    </span>
-                                                </Link>
-                                                {alertsSummary.partial && (
-                                                    <span
-                                                        className="mt-0.5 block text-[11px] font-medium text-amber-700"
-                                                        title="Harsh-driving events could not be checked for some vehicles"
-                                                    >
-                                                        Partial
-                                                    </span>
-                                                )}
-                                                {alertsNotice && (
-                                                    <span className="mt-0.5 block text-[11px] font-medium text-amber-700" title={alertsNotice.title}>
-                                                        {alertsNotice.text}
-                                                    </span>
-                                                )}
-                                            </dd>
                                         </div>
                                     </dl>
                                 </div>

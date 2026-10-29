@@ -95,18 +95,17 @@ OVERLAP_ROWS = [tx(1, "V-1", "2026-08-31", 500.0, 1500.0, imp=9, date_basis="rep
                 tx(3, "V-2", "2026-08-11T08:00:00", 30.0, 90.0, imp=7, date_basis="transaction")]
 
 
-def test_build_scope_passes_the_coverage_reader():
-    with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-         patch("app.fuel.routes.fetch_import_coverage", return_value={7: FULL_AUG}) as cov:
-        confirmed = api.get(f"/api/fuel/analytics/summary?{AUG}")
-    assert cov.call_args[0][0] == {7}, cov.call_args
-    assert confirmed["total_litres"] == 100.0 and confirmed["monthly_summary_rows"] == 0, confirmed
-    assert confirmed["excluded_scope"]["summary_dated_overlap"]["transaction_count"] == 1
-    with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-         patch("app.fuel.routes.fetch_import_coverage", return_value={}):
-        unconfirmed = api.get(f"/api/fuel/analytics/summary?{AUG}")
-    assert unconfirmed["total_litres"] == 30.0 and unconfirmed["excluded_scope"]["summary_dated_overlap"]["transaction_count"] == 2
-    print("[PASS] _build_scope reads import coverage: confirmed -> dated rows used (100 L); unconfirmed -> unit-month excluded (30 L).")
+def test_monthly_summary_takes_precedence_whatever_the_coverage():
+    # The summary (500 L) wins over the unit-month's dated row (70 L); full-month dated coverage does not change that
+    for meta in ({7: FULL_AUG}, {}):
+        with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
+             patch("app.fuel.routes.fetch_import_coverage", return_value=meta):
+            body = api.get(f"/api/fuel/analytics/summary?{AUG}")
+        assert body["total_litres"] == 530.0 and body["monthly_summary_rows"] == 1, body
+        overlap = body["excluded_scope"]["summary_dated_overlap"]
+        assert (overlap["transaction_count"], overlap["litres"]) == (1, 70.0), overlap
+    print("[PASS] Monthly summary takes precedence over the same unit-month's dated rows (530 L, never 600 L), "
+          "with or without confirmed dated coverage.")
 
 
 def test_waste_reports_overlap_not_as_unmatched():
@@ -120,14 +119,10 @@ def test_waste_reports_overlap_not_as_unmatched():
     assert "unmatched_vehicle" not in by_type, by_type.get("unmatched_vehicle")
     (item,) = by_type["summary_dated_overlap"]
     assert item["severity"] == "info" and item["details"]["month"] == "2026-08" and item["details"]["wialon_unit_id"] == 1
-    assert item["details"]["excluded_summary"]["litres"] == 500.0 and item["details"]["excluded_dated"]["litres"] == 70.0
-    with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-         patch("app.fuel.routes.fetch_import_coverage", return_value={7: FULL_AUG}):
-        api.bundle.return_value = IDLE_BUNDLE
-        resolved = api.get(f"/api/fuel/analytics/waste?{AUG}")
-    types = {a["anomaly_type"] for a in resolved["anomalies"]}
-    assert "summary_dated_overlap" not in types and "unmatched_vehicle" not in types, types  # superseded = resolved
-    print("[PASS] /waste: unresolved overlap -> one summary_dated_overlap info item (unit 1, 2026-08); superseded summary -> nothing.")
+    assert item["details"]["excluded_summary"]["litres"] == 0.0 and item["details"]["excluded_dated"]["litres"] == 70.0
+    assert item["details"]["resolution"] == "summary_used_dated_excluded" and "Superseded" in item["title"]
+    print("[PASS] /waste: one summary_dated_overlap info item (unit 1, 2026-08): dated rows excluded, summary kept; "
+          "never reported as unmatched.")
 
 
 def test_daily_route_verifies_only_confirmed_past_days():
@@ -174,7 +169,7 @@ TESTS = [
     test_vehicle_detail_idle_estimate_uses_raw_seconds,
     test_fleet_idle_agrees_across_efficiency_rankings_and_waste,
     test_trend_route_applies_month_specific_mixed_fuel,
-    test_build_scope_passes_the_coverage_reader,
+    test_monthly_summary_takes_precedence_whatever_the_coverage,
     test_waste_reports_overlap_not_as_unmatched,
     test_daily_route_verifies_only_confirmed_past_days,
 ]

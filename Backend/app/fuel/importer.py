@@ -32,9 +32,11 @@ from app.fuel.db import (
     ignored_counts_enabled,
     insert_fuel_transactions_batch,
     insert_fuel_transactions_ignore_duplicates,
+    insert_monthly_summaries_batch,
     dated_replace_enabled,
     replace_enabled,
     schema_v2_enabled,
+    summary_table_enabled,
     update_fuel_import_record,
     weak_fingerprint_key,
 )
@@ -53,10 +55,13 @@ from app.fuel.reporting_period import (
     DATE_BASIS_TRANSACTION,
     IMPORT_MODE_DATED,
     IMPORT_MODE_MONTHLY,
+    SUMMARY_TABLE,
     is_monthly_summary,
     is_partial_month,
+    is_summary_table_row,
     month_bounds,
     parse_reporting_month,
+    summary_insert_row,
     tx_day,
 )
 from app.fuel.schemas import FuelImportPreviewResponse, FuelImportResultResponse, HeaderMappingItem
@@ -857,59 +862,92 @@ def replacement_fetch_window(period: Tuple[date, date]) -> Tuple[str, str]:
     return period[0].isoformat(), month_bounds(period[1])[1].isoformat()
 
 
-# Why a stored row blocks an import (daily transactions and a monthly summary never mix for one vehicle-month)
-CONFLICT_DAILY_EXISTS = "daily transactions exist for this vehicle and month"
-CONFLICT_SUMMARY_EXISTS = "monthly summary exists for this vehicle and month"
+CONFLICT_UNREADABLE_DATE = "unreadable stored date"
+
+
+def _vehicle_month(vehicle_identifier: Any, day: date) -> Tuple[str, str]:
+    return replacement_vehicle_key(vehicle_identifier), day.strftime("%Y-%m")
+
+
+def _row_ref(row: Dict[str, Any]) -> Tuple[str, int]:
+    """(table, id) of a stored row: ids of fuel_transactions and fuel_monthly_summaries may coincide."""
+    if is_summary_table_row(row):
+        return SUMMARY_TABLE, int(row["summary_id"])
+    return "fuel_transactions", int(row["id"])
+
+
+def split_supersede_ids(rows: List[Dict[str, Any]]) -> Tuple[List[int], List[int]]:
+    """(fuel_transactions ids, fuel_monthly_summaries ids) of the rows a plan supersedes."""
+    refs = [_row_ref(r) for r in rows]
+    return [i for t, i in refs if t != SUMMARY_TABLE], [i for t, i in refs if t == SUMMARY_TABLE]
 
 
 def plan_replacement(candidates: List[Dict[str, Any]], period: Tuple[date, date],
                      visible_rows: List[Dict[str, Any]], whole_period: bool = False) -> Dict[str, Any]:
     """
-    Which visible rows a new import replaces. Pure: `visible_rows` comes from fetch_visible_rows_in_range over
-    replacement_fetch_window(period). In scope are rows of the vehicles in the new file (replacement_vehicle_key)
-    only, whatever import or provider they came from:
-      - dated import: stored dated rows on a day the new file has rows for that vehicle (a corrected statement
-        replaces the vehicle-days it contains); with whole_period (the user confirmed the file covers whole months),
-        every row of the vehicle in those months, monthly summaries included;
-      - monthly-summary import: the earlier monthly summary of the same vehicle and month.
-    Daily transactions and a monthly summary never mix for one vehicle-month, so these are conflicts that refuse the
-    import (nothing is written):
-      - a monthly summary for a vehicle-month that already has dated transactions;
-      - dated rows for a vehicle-month that has a monthly summary, until the user confirms the statement covers whole
-        months (whole_period), which replaces the summary as a whole.
-    A row whose stored date cannot be read is a conflict too. Rows of other vehicles, and dates outside the period,
-    are never touched.
+    Which visible rows a new import replaces, and which of its rows it must not store. Pure: `visible_rows` comes
+    from fetch_visible_rows_in_range over replacement_fetch_window(period). Only rows of the vehicles in the new
+    file (replacement_vehicle_key) are considered, whatever import or provider they came from.
+
+    Daily transactions and a monthly summary never count together for one vehicle and month, and the monthly
+    summary takes precedence. This is decided per vehicle-month, never for the whole file:
+      - monthly-summary import: the vehicle-month's earlier monthly summary and its daily transactions are replaced
+        (superseded, never deleted);
+      - dated import, vehicle-month with a stored monthly summary: the summary is kept and the file's rows for that
+        vehicle-month are skipped (returned in "skipped"); nothing stored for that vehicle-month is touched;
+      - dated import, any other vehicle-month: stored dated rows on a day the new file has rows for that vehicle are
+        replaced (a corrected statement replaces the vehicle-days it contains); with whole_period (the user confirmed
+        the file covers whole months), every dated row of the vehicle in those months.
+    A stored row whose date cannot be read is a conflict that refuses the import (its month cannot be checked). Rows
+    of other vehicles, and dates outside the period, are never touched.
 
     An in-scope row identical to a new row (same fingerprint and date basis) is paired with it one-to-one and kept as
     is: the new copy is not inserted. Repeated identical refuels pair one each, so none is lost or doubled.
-    Returns {"in_scope", "supersede", "retained_for" (candidate index -> kept row id), "conflicts", "vehicles"}.
+    Stored rows are told apart by _row_ref: with FUEL_MONTHLY_SUMMARY_TABLE `visible_rows` also holds
+    fuel_monthly_summaries rows (summary_scope_row), whose ids are a separate sequence.
+    Returns {"in_scope", "supersede", "retained_for" (candidate index -> kept row id), "conflicts", "vehicles",
+    "skipped" (candidate indexes not to store), "kept_summaries" ((vehicle key, YYYY-MM) -> kept summary rows)}.
     """
     lo, hi = period
     vehicles = {replacement_vehicle_key(c["fields"]["vehicle_identifier"]) for c in candidates}
     monthly_import = any(c["date_basis"] == DATE_BASIS_MONTH_END for c in candidates)
     vehicle_days = {(replacement_vehicle_key(c["fields"]["vehicle_identifier"]), tx_day(c["fields"])) for c in candidates}
-    in_scope: List[Dict[str, Any]] = []
     conflicts: List[Dict[str, Any]] = []
-    for r in sorted(visible_rows, key=lambda r: int(r["id"])):
+    readable: List[Tuple[Dict[str, Any], date]] = []
+    for r in sorted(visible_rows, key=_row_ref):
         if replacement_vehicle_key(r.get("vehicle_identifier")) not in vehicles:
             continue
         day = tx_day(r)
         if day is None:
-            conflicts.append({**r, "_conflict": "unreadable stored date"})
-            continue
+            conflicts.append({**r, "_conflict": CONFLICT_UNREADABLE_DATE})
+        else:
+            readable.append((r, day))
+
+    # Vehicle-months a stored monthly summary already reports: a dated import leaves them exactly as they are
+    kept_summaries: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    if not monthly_import:
+        for r, day in readable:
+            first, last = month_bounds(day)
+            if is_monthly_summary(r) and not (last < lo or first > hi):
+                kept_summaries[_vehicle_month(r.get("vehicle_identifier"), day)].append(r)
+
+    in_scope: List[Dict[str, Any]] = []
+    for r, day in readable:
         if is_monthly_summary(r):
             first, last = month_bounds(day)
-            if last < lo or first > hi:
-                continue
-            if (monthly_import or whole_period) and lo <= first and last <= hi:
+            if monthly_import and lo <= first and last <= hi:
                 in_scope.append(r)
-            else:
-                conflicts.append({**r, "_conflict": CONFLICT_SUMMARY_EXISTS})
         elif lo <= day <= hi:
             if monthly_import:
-                conflicts.append({**r, "_conflict": CONFLICT_DAILY_EXISTS})
+                in_scope.append(r)
+            elif _vehicle_month(r.get("vehicle_identifier"), day) in kept_summaries:
+                continue
             elif whole_period or (replacement_vehicle_key(r.get("vehicle_identifier")), day) in vehicle_days:
                 in_scope.append(r)
+
+    skipped = {i for i, c in enumerate(candidates)
+               if not monthly_import and tx_day(c["fields"]) is not None
+               and _vehicle_month(c["fields"]["vehicle_identifier"], tx_day(c["fields"])) in kept_summaries}
 
     available: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
     for r in in_scope:
@@ -917,18 +955,53 @@ def plan_replacement(candidates: List[Dict[str, Any]], period: Tuple[date, date]
                                r.get("total_cost"), r.get("invoice_number"), r.get("odometer_km"))
         available[(fp, r.get("date_basis") or DATE_BASIS_TRANSACTION)].append(r)
     retained_for: Dict[int, int] = {}
+    kept: Set[Tuple[str, int]] = set()
     for i, cand in enumerate(candidates):
-        same = available.get((cand["fingerprint"], cand["date_basis"]))
+        same = None if i in skipped else available.get((cand["fingerprint"], cand["date_basis"]))
         if same:
-            retained_for[i] = int(same.pop(0)["id"])
-    kept = set(retained_for.values())
+            ref = _row_ref(same.pop(0))
+            retained_for[i] = ref[1]
+            kept.add(ref)
     return {
         "in_scope": in_scope,
-        "supersede": [r for r in in_scope if int(r["id"]) not in kept],
+        "supersede": [r for r in in_scope if _row_ref(r) not in kept],
         "retained_for": retained_for,
         "conflicts": conflicts,
         "vehicles": vehicles,
+        "skipped": skipped,
+        "kept_summaries": dict(kept_summaries),
     }
+
+
+def describe_kept_summaries(plan: Dict[str, Any], candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per vehicle-month whose stored monthly summary is kept: the summary's totals and the file rows skipped."""
+    skipped_by_scope: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for i in sorted(plan.get("skipped", ())):
+        f = candidates[i]["fields"]
+        skipped_by_scope[_vehicle_month(f["vehicle_identifier"], tx_day(f))].append(f)
+    out = []
+    for key in sorted(plan.get("kept_summaries", {})):
+        rows, file_rows = plan["kept_summaries"][key], skipped_by_scope.get(key, [])
+        out.append({
+            "vehicle_identifier": str(rows[0].get("vehicle_identifier") or "").strip(),
+            "month": key[1],
+            "summary_import_ids": sorted({r.get("import_id") for r in rows if r.get("import_id") is not None}),
+            "summary_litres": round(sum(float(r.get("litres") or 0) for r in rows), 2),
+            "summary_cost": round(sum(float(r.get("total_cost") or 0) for r in rows), 2),
+            "rows_skipped": len(file_rows),
+            "skipped_source_rows": [f["source_row_number"] for f in file_rows][:MAX_DETAIL_ROWS],
+        })
+    return [g for g in out if g["rows_skipped"]]
+
+
+def kept_summary_message(scopes: List[Dict[str, Any]]) -> Optional[str]:
+    if not scopes:
+        return None
+    pairs = [f"{g['vehicle_identifier']} {g['month']}" for g in scopes]
+    shown = ", ".join(pairs[:8]) + (f" and {len(pairs) - 8} more" if len(pairs) > 8 else "")
+    total = sum(g["rows_skipped"] for g in scopes)
+    return (f"{total} row(s) not imported: a monthly summary is already stored for {shown}, and daily transactions "
+            "are never counted together with it. The monthly summary is kept; other vehicles and months are imported.")
 
 
 MAX_REPLACEMENT_RECORDS = 200
@@ -952,9 +1025,14 @@ def describe_replacement(plan: Dict[str, Any], period: Tuple[date, date], extend
         g["litres"], g["cost"] = round(g["litres"], 2), round(g["cost"], 2)
 
     def record(r: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: r.get(k) for k in ("id", "import_id", "vehicle_identifier", "transaction_date", "litres",
-                                      "total_cost", "invoice_number")} | {
+        out = {k: r.get(k) for k in ("id", "import_id", "vehicle_identifier", "transaction_date", "litres",
+                                     "total_cost", "invoice_number")} | {
             "date_basis": r.get("date_basis") or DATE_BASIS_TRANSACTION}
+        if is_summary_table_row(r):
+            # A stored monthly summary has no transaction date: it is shown by its reporting month
+            out.update(id=None, summary_id=r.get("summary_id"), record_type=r.get("record_type"),
+                       reporting_month=r.get("reporting_month"), transaction_date=None)
+        return out
 
     conflicts = [{"vehicle_identifier": r.get("vehicle_identifier"), "transaction_date": r.get("transaction_date"),
                   "import_id": r.get("import_id"), "reason": r["_conflict"]} for r in plan["conflicts"]]
@@ -976,29 +1054,104 @@ def describe_replacement(plan: Dict[str, Any], period: Tuple[date, date], extend
 
 
 def replacement_conflict_message(plan: Dict[str, Any]) -> str:
-    kinds = {r["_conflict"] for r in plan["conflicts"]}
     pairs = sorted({f"{r.get('vehicle_identifier')} {str(r.get('transaction_date'))[:7]}" for r in plan["conflicts"]})
     shown = ", ".join(pairs[:8]) + (f" and {len(pairs) - 8} more" if len(pairs) > 8 else "")
-    parts = []
-    if CONFLICT_DAILY_EXISTS in kinds:
-        parts.append(f"Daily transactions already exist for {shown}: a monthly summary cannot be imported for a "
-                     "vehicle and month that has dated transactions. Remove those vehicles from the summary file.")
-    if CONFLICT_SUMMARY_EXISTS in kinds:
-        parts.append(f"A monthly summary already exists for {shown}: daily transactions cannot be added to that "
-                     "vehicle and month. To replace the summary, confirm that this statement covers whole calendar "
-                     "months; otherwise remove those vehicles or months from the file.")
-    if "unreadable stored date" in kinds:
-        parts.append(f"A stored row for {shown} has an unreadable date, so its period cannot be checked.")
-    return " ".join(parts) + " Nothing was imported."
+    return f"A stored row for {shown} has an unreadable date, so its period cannot be checked. Nothing was imported."
+
+
+# ─── Statements whose rows all share one date ──────────────────────────────────
+# A statement whose valid rows all carry one identical date is a monthly summary, classified automatically. Its
+# reporting month is that date's month only when the date is the month's last day; any other date (a statement printed
+# on the 1st for the month before, or mid-month) is not guessed: the user selects the reporting month.
+# single_date_mode IMPORT_MODE_DATED is the user's explicit override (the rows are individual refuels on that day).
+SINGLE_DATE_MODES = (IMPORT_MODE_DATED, IMPORT_MODE_MONTHLY)
+
+
+def single_statement_day(candidates: List[Dict[str, Any]]) -> Optional[date]:
+    """
+    The calendar day of a dated statement whose valid rows (two or more) all carry the identical date value, else
+    None. Rows on one day with different times of day are distinct refuel timestamps, not a reporting date; a single
+    row gives no evidence either way and keeps its date column's meaning.
+    """
+    stamps = {str(c["fields"]["transaction_date"]) for c in candidates}
+    return tx_day(candidates[0]["fields"]) if len(candidates) >= 2 and len(stamps) == 1 else None
+
+
+def single_date_message(day: date) -> str:
+    return (f"Every row of this statement has the same date ({day.isoformat()}), so it is treated as a monthly "
+            "summary. That date is not the last day of a month, so its reporting month is not certain: select the "
+            "reporting month, or mark the rows as individual refuels on that day.")
+
+
+def needs_single_date_month(day: Optional[date], mode_info: Dict[str, Any], single_date_mode: Optional[str]) -> bool:
+    """True while a single-date statement still waits for the user's reporting month (nothing can be imported)."""
+    return day is not None and mode_info.get("mode") == IMPORT_MODE_DATED and single_date_mode != IMPORT_MODE_DATED
+
+
+def effective_single_date_mode(day: Optional[date], single_date_mode: Optional[str]) -> Optional[str]:
+    """How a single-date statement is treated: monthly unless the user chose individual refuels; None otherwise."""
+    if day is None:
+        return None
+    return IMPORT_MODE_DATED if single_date_mode == IMPORT_MODE_DATED else IMPORT_MODE_MONTHLY
+
+
+def apply_single_date_mode(candidates: List[Dict[str, Any]], mode_info: Dict[str, Any], single_date_mode: Optional[str],
+                           reporting_month: Optional[str] = None, today: Optional[date] = None) -> Optional[date]:
+    """
+    For a dated statement whose valid rows all share one day: returns that day and, unless single_date_mode is
+    IMPORT_MODE_DATED, makes the rows a monthly summary of `reporting_month`, or of the day's month when the day is
+    the month's last day. Each row is then dated on the month's last day exactly as a statement without a date
+    column; mode_info and the candidates are updated in place. Rows are never split or spread over days. Without a
+    reporting month for any other day nothing changes (needs_single_date_month: the user selects the month).
+    Returns None (nothing to confirm) for other statements. Raises FuelImportError (422) for an unknown mode, a
+    reporting month on an ordinary dated statement, an invalid month, a monthly summary while FUEL_IMPORT_REPLACE is
+    off, or a monthly summary with rows whose total cost was not given (it is never derived from a unit price).
+    """
+    month_given = bool(str(reporting_month or "").strip())
+    if single_date_mode and single_date_mode not in SINGLE_DATE_MODES:
+        raise FuelImportError(f"Unknown single_date_mode '{single_date_mode}'. Use 'dated' or 'monthly_summary'.",
+                              status_code=422)
+    day = single_statement_day(candidates) if mode_info.get("mode") == IMPORT_MODE_DATED else None
+    if day is None or single_date_mode == IMPORT_MODE_DATED:
+        if month_given and mode_info.get("mode") == IMPORT_MODE_DATED:
+            raise FuelImportError("This statement has a transaction date column, so a reporting month is not used. "
+                                  "Clear the reporting month, or set the date column to 'No date column'.", status_code=422)
+        return day
+    if not month_given and day != month_bounds(day)[1]:
+        return day
+    if not replace_enabled():
+        raise FuelImportError(MONTHLY_SUMMARY_DISABLED_MESSAGE, status_code=422)
+    no_cost = sum(1 for c in candidates if c.get("cost_derived"))
+    if no_cost:
+        raise FuelImportError(f"{no_cost} row(s) of this monthly summary have no total cost. A monthly summary needs "
+                              "every row's total cost (AED); it is never derived from a unit price.", status_code=422)
+    try:
+        first, last = parse_reporting_month(reporting_month if month_given else day.strftime("%Y-%m"), today)
+    except ValueError as exc:
+        raise FuelImportError(str(exc), status_code=422) from None
+    assigned = last.isoformat()
+    mode_info.update(mode=IMPORT_MODE_MONTHLY, assigned_date=assigned, reporting_month=first.strftime("%Y-%m"),
+                     month_from=first, month_to=last, partial_month=is_partial_month(last, today))
+    for c in candidates:
+        f = c["fields"]
+        f["transaction_date"] = assigned
+        c["date_basis"] = DATE_BASIS_MONTH_END
+        c["fingerprint"] = build_fingerprint(f["vehicle_identifier"], assigned, f["litres"], f["total_cost"],
+                                             f["invoice_number"], f["odometer_km"])
+    return day
 
 
 def _monthly_summary_warnings(mode_info: Dict[str, Any]) -> List[str]:
     if mode_info.get("mode") != IMPORT_MODE_MONTHLY:
         return []
     month_label = mode_info["month_from"].strftime("%B %Y")
-    out = [f"Monthly summary for {month_label}: every accepted row is dated {mode_info['assigned_date']} as the "
-           "reporting date. That is not when the vehicle refuelled; these rows are monthly totals and are never shown "
-           "as daily refuelling."]
+    if summary_table_enabled():
+        out = [f"Monthly summary for {month_label}: every accepted row is stored as a monthly total of that "
+               "reporting month, without a refuelling date, and is never shown as daily refuelling."]
+    else:
+        out = [f"Monthly summary for {month_label}: every accepted row is dated {mode_info['assigned_date']} as the "
+               "reporting date. That is not when the vehicle refuelled; these rows are monthly totals and are never "
+               "shown as daily refuelling."]
     if mode_info.get("partial_month"):
         out.append(f"{month_label} has not ended yet, so these totals may be incomplete. Importing the final "
                    "statement for the month later replaces them.")
@@ -1074,14 +1227,17 @@ def generate_fuel_preview(
     extend_to_full_months: bool = False,
     bearer_token: Optional[str] = None,
     today: Optional[date] = None,
+    single_date_mode: Optional[str] = None,
 ) -> FuelImportPreviewResponse:
     """
     Parse an uploaded Excel workbook, detect structure, map headers, and generate a safe preview.
 
-    `mapping` (the user's column choices; default: the suggested mapping) and `reporting_month` (statements without
-    a date column) are applied exactly as the import applies them, so the counts match. With FUEL_IMPORT_REPLACE the
-    preview also reads (never writes) the rows the import would supersede. ready_to_import is False, with
-    blocking_reasons, whenever the import would be refused.
+    `mapping` (the user's column choices; default: the suggested mapping), `reporting_month` (statements without
+    a date column, or a single-date statement confirmed as a monthly summary) and `single_date_mode` (see
+    apply_single_date_mode) are applied exactly as the import applies them, so the counts match. With
+    FUEL_IMPORT_REPLACE the preview also reads (never writes) the rows the import would supersede and the rows it
+    would skip because a monthly summary is kept. ready_to_import is False, with blocking_reasons, whenever the
+    import would be refused.
     """
     lower_name = file_name.lower()
     if not (lower_name.endswith(".xlsx") or lower_name.endswith(".xlsm") or lower_name.endswith(".xltx")):
@@ -1107,7 +1263,9 @@ def generate_fuel_preview(
 
     blocking_reasons: List[str] = []
     try:
-        mode_info = resolve_import_mode(active_mapping, reporting_month, today)
+        # With a date column a reporting month only applies to a confirmed single-date summary (apply_single_date_mode)
+        mode_info = resolve_import_mode(active_mapping, None if active_mapping.get("transaction_date") else reporting_month,
+                                        today)
     except FuelImportError as exc:
         mode_info = {"mode": None}
         blocking_reasons.append(exc.message)
@@ -1209,6 +1367,26 @@ def generate_fuel_preview(
     if rows_candidate == 0:
         validation_warnings.append("No transaction data rows were found below the header row.")
 
+    single_day: Optional[date] = None
+    try:
+        single_day = apply_single_date_mode(candidates, mode_info, single_date_mode, reporting_month, today)
+    except FuelImportError as exc:
+        blocking_reasons.append(exc.message)
+    if single_day and mode_info.get("mode") == IMPORT_MODE_MONTHLY:
+        monthly = True
+        assigned_date = mode_info["assigned_date"]
+        validation_warnings[:0] = _monthly_summary_warnings(mode_info)
+        for sample in sample_rows:
+            sample.update(transaction_date=assigned_date, date_basis=DATE_BASIS_MONTH_END)
+    single_date_pending = needs_single_date_month(single_day, mode_info, single_date_mode)
+    if single_date_pending:
+        blocking_reasons.append(single_date_message(single_day))
+    summary_table = summary_table_enabled()
+    if monthly and summary_table:
+        # Stored without a date: the sample shows the reporting month, never a month-end date
+        for sample in sample_rows:
+            sample.update(transaction_date=None, reporting_month=mode_info.get("reporting_month"))
+
     identical = _identical_rows(candidates)
     if identical:
         validation_warnings.append(f"{identical} row(s) are identical to another row of this file (same vehicle, date, "
@@ -1235,8 +1413,10 @@ def generate_fuel_preview(
         blocking_reasons.append("No valid fuel rows to import.")
 
     replacement: Optional[Dict[str, Any]] = None
-    if (replace_enabled() and mode_info.get("mode") and (monthly or dated_replace_enabled()) and candidates
-            and not missing_required_fields):
+    kept_scopes: List[Dict[str, Any]] = []
+    # With FUEL_IMPORT_REPLACE monthly summaries can exist, so every import checks them; dated statements are only
+    # planned as replacements with FUEL_IMPORT_REPLACE_DATED (else just the monthly-summary check applies)
+    if replace_enabled() and mode_info.get("mode") and candidates and not missing_required_fields and not single_date_pending:
         period = replacement_period(candidates, mode_info, extend_to_full_months)
         try:
             plan = plan_replacement(candidates, period, fetch_visible_rows_in_range(
@@ -1244,9 +1424,16 @@ def generate_fuel_preview(
         except FuelDataFetchError:
             blocking_reasons.append("The rows this import would replace could not be read; please retry the preview.")
         else:
-            replacement = describe_replacement(plan, period, extend_to_full_months and not monthly)
+            if monthly or dated_replace_enabled():
+                replacement = describe_replacement(plan, period, extend_to_full_months and not monthly)
             if plan["conflicts"]:
                 blocking_reasons.append(replacement_conflict_message(plan))
+            kept_scopes = describe_kept_summaries(plan, candidates)
+            if kept_scopes:
+                validation_warnings.insert(0, kept_summary_message(kept_scopes))
+                if len(plan["skipped"]) == len(candidates):
+                    blocking_reasons.append("Every valid row of this file is for a vehicle and month that already has "
+                                            "a monthly summary; nothing would be imported.")
 
     return FuelImportPreviewResponse(
         file_name=file_name,
@@ -1271,9 +1458,10 @@ def generate_fuel_preview(
         active_mapping=active_mapping,
         import_mode=mode_info.get("mode"),
         reporting_month=mode_info.get("reporting_month"),
-        assigned_transaction_date=assigned_date,
+        assigned_transaction_date=None if summary_table else assigned_date,
         partial_month=bool(mode_info.get("partial_month")),
         monthly_summary_enabled=replace_enabled(),
+        monthly_summary_table=summary_table,
         date_column_candidates=date_header_candidates(raw_headers),
         mapping_confirmation_required=confirmation_fields,
         mapping_confirmed=bool(mapping_confirmed),
@@ -1282,6 +1470,11 @@ def generate_fuel_preview(
         rows_cost_derived=sum(int(c["cost_derived"]) for c in candidates),
         rows_unit_price_derived=sum(int(c["unit_price_derived"]) for c in candidates),
         replacement=replacement,
+        single_date=single_day.isoformat() if single_day else None,
+        single_date_confirmation_required=single_date_pending,
+        single_date_mode=effective_single_date_mode(single_day, single_date_mode),
+        rows_skipped_monthly_summary=sum(g["rows_skipped"] for g in kept_scopes),
+        monthly_summary_scopes_kept=kept_scopes[:MAX_DETAIL_ROWS],
         ready_to_import=not blocking_reasons,
         blocking_reasons=blocking_reasons,
     )
@@ -1295,9 +1488,16 @@ def _summarize_stored_rows(rows: List[Dict[str, Any]], include_staged: bool = Tr
     if not include_staged:
         rows = [r for r in rows if r.get("staged") is not True]
     copies: Dict[Any, int] = {}
+    days: List[str] = []
     for r in rows:
         copies[r.get("source_row_number")] = copies.get(r.get("source_row_number"), 0) + 1
-    days = sorted(str(r["transaction_date"])[:10] for r in rows if r.get("transaction_date"))
+        if r.get("transaction_date"):
+            days.append(str(r["transaction_date"])[:10])
+        elif r.get("reporting_month"):
+            # fuel_monthly_summaries: the reporting month, never a refuelling day
+            first = date.fromisoformat(str(r["reporting_month"])[:10])
+            days.extend(d.isoformat() for d in month_bounds(first))
+    days.sort()
     repeated = sorted(k for k, n in copies.items() if n > 1 and k is not None)
     return {
         "stored": len(copies),
@@ -1328,15 +1528,23 @@ def _parse_record_time(value: Any) -> Optional[datetime]:
         return None
 
 
+def _fetch_rows_of_import(import_id: int, table: str, **kwargs: Any) -> List[Dict[str, Any]]:
+    """fetch_import_rows from the table the import stores its rows in (fuel_transactions or SUMMARY_TABLE)."""
+    if table == SUMMARY_TABLE:
+        kwargs["table"] = SUMMARY_TABLE
+    return fetch_import_rows(import_id, **kwargs)
+
+
 def _finalize_interrupted_import(import_id: int, bearer_token: Optional[str],
-                                 deadlines: Optional[ImportDeadlines] = None) -> str:
+                                 deadlines: Optional[ImportDeadlines] = None,
+                                 table: str = "fuel_transactions") -> str:
     """
     Give an import that stopped after its record was created a terminal status from what is actually stored
     under it. Returns the client message. Never raises: the original error is what the caller reports.
     """
     try:
-        stored: Optional[Dict[str, Any]] = _summarize_stored_rows(fetch_import_rows(
-            import_id, bearer_token=bearer_token, deadline=deadlines.recount if deadlines else None),
+        stored: Optional[Dict[str, Any]] = _summarize_stored_rows(_fetch_rows_of_import(
+            import_id, table, bearer_token=bearer_token, deadline=deadlines.recount if deadlines else None),
             include_staged=False)
     except Exception as exc:
         logger.error("Could not count rows stored by interrupted import #%s: %s", import_id, exc)
@@ -1413,8 +1621,9 @@ def reconcile_fuel_import(import_id: int, bearer_token: Optional[str] = None) ->
     """
     Recount one import from the rows actually stored under it (import_id) and write the corrected counts and a
     terminal status to its history record. Repairs a record left 'processing' by an interrupted run and counts
-    that a lost batch response under-reported. Reads fuel_transactions and updates only that fuel_imports row:
-    nothing is inserted or deleted.
+    that a lost batch response under-reported. Reads fuel_transactions (and, for a monthly summary with
+    FUEL_MONTHLY_SUMMARY_TABLE, fuel_monthly_summaries) and updates only that fuel_imports row: nothing is inserted
+    or deleted.
 
     Idempotent: a repeat gives the same record. An import that was interrupted or left rows unprocessed or
     unverified (INCOMPLETE_MARKER) stays incomplete and is never upgraded to 'completed': the file's rows that are
@@ -1434,7 +1643,12 @@ def reconcile_fuel_import(import_id: int, bearer_token: Optional[str] = None) ->
             raise FuelImportError(f"Import #{import_id} may still be running; retry in a few minutes.", status_code=409)
 
     try:
-        stored = _summarize_stored_rows(fetch_import_rows(import_id, bearer_token=bearer_token), include_staged=False)
+        rows: List[Dict[str, Any]] = []
+        if summary_table_enabled() and record.get("import_mode") == IMPORT_MODE_MONTHLY:
+            rows = fetch_import_rows(import_id, bearer_token=bearer_token, table=SUMMARY_TABLE)
+        # A monthly summary imported before FUEL_MONTHLY_SUMMARY_TABLE (and not yet copied) has its rows here
+        rows = rows or fetch_import_rows(import_id, bearer_token=bearer_token)
+        stored = _summarize_stored_rows(rows, include_staged=False)
     except FuelDataFetchError:
         raise FuelImportError("Stored transactions could not be read completely; nothing was changed. Please retry.",
                               status_code=503) from None
@@ -1494,29 +1708,34 @@ def reconcile_fuel_import(import_id: int, bearer_token: Optional[str] = None) ->
 
 
 def _commit_replacement(import_id: int, supersede_ids: List[int], expected_rows: int,
-                        bearer_token: Optional[str], deadlines: ImportDeadlines) -> Tuple[str, int, Optional[str]]:
+                        bearer_token: Optional[str], deadlines: ImportDeadlines, table: str = "fuel_transactions",
+                        supersede_summary_ids: Optional[List[int]] = None) -> Tuple[str, int, Optional[str]]:
     """
     Run commit_fuel_import. Returns (state, rows superseded, note): 'committed', 'not_committed' (refused: nothing
     changed, the new rows stay hidden) or 'unknown' (sent, no answer, and reading the import back could not settle
     it). An unknown outcome is settled from the import's own rows: the commit is one transaction, so they are either
-    all still staged or all visible.
+    all still staged or all visible. `table` holds the import's rows; supersede_summary_ids are
+    fuel_monthly_summaries ids (FUEL_MONTHLY_SUMMARY_TABLE only).
     """
     unchanged = ("the new rows stay hidden and the dashboard still shows the previously imported data. "
                  "Preview and import the file again.")
+    summary_ids = list(supersede_summary_ids or [])
     try:
-        result = commit_fuel_import(import_id, supersede_ids, expected_rows, bearer_token, deadline=deadlines.recount)
+        result = commit_fuel_import(import_id, supersede_ids, expected_rows, bearer_token, deadline=deadlines.recount,
+                                    **({"supersede_summary_ids": summary_ids} if summary_table_enabled() else {}))
     except FuelCommitError as exc:
         return "not_committed", 0, f"Not committed ({exc}): {unchanged}"
     if result is not None:
         return "committed", result["superseded"], None
     if expected_rows:
         try:
-            rows = fetch_import_rows(import_id, bearer_token=bearer_token, deadline=deadlines.recount)
+            rows = _fetch_rows_of_import(import_id, table, bearer_token=bearer_token, deadline=deadlines.recount)
         except FuelDataFetchError:
             rows = None
         if rows is not None and len(rows) == expected_rows:
             if not any(r.get("staged") is True for r in rows):
-                return "committed", len(supersede_ids), "Commit outcome verified by reading the import back."
+                return ("committed", len(supersede_ids) + len(summary_ids),
+                        "Commit outcome verified by reading the import back.")
             if all(r.get("staged") is True for r in rows):
                 return "not_committed", 0, f"Not committed (no answer from the database): {unchanged}"
     return "unknown", 0, (f"{INCOMPLETE_MARKER} the commit outcome is unknown; the import is either fully visible or "
@@ -1534,6 +1753,7 @@ def execute_fuel_import(
     mapping_confirmed: bool = False,
     extend_to_full_months: bool = False,
     expected_replace_count: Optional[int] = None,
+    single_date_mode: Optional[str] = None,
 ) -> FuelImportResultResponse:
     """
     Run one import at a time, so a concurrent import of the same rows sees the first one's inserts.
@@ -1548,7 +1768,8 @@ def execute_fuel_import(
                                            deadlines=deadlines, reporting_month=reporting_month,
                                            mapping_confirmed=mapping_confirmed,
                                            extend_to_full_months=extend_to_full_months,
-                                           expected_replace_count=expected_replace_count)
+                                           expected_replace_count=expected_replace_count,
+                                           single_date_mode=single_date_mode)
     finally:
         _IMPORT_LOCK.release()
 
@@ -1564,15 +1785,18 @@ def _execute_fuel_import_locked(
     mapping_confirmed: bool = False,
     extend_to_full_months: bool = False,
     expected_replace_count: Optional[int] = None,
+    single_date_mode: Optional[str] = None,
 ) -> FuelImportResultResponse:
     """
     Execute full fuel import:
     1. Parse workbook & detect headers.
     2. Validate confirmed mapping against actual headers, and the format (dated / monthly summary).
-    3. Validate candidate rows and parse values.
+    3. Validate candidate rows and parse values. A dated statement whose rows all share one date needs the user's
+       single_date_mode (apply_single_date_mode); it is never guessed.
     4. Create initial 'processing' record in fuel_imports and claim the import (see _claim_import).
     5. Without FUEL_IMPORT_REPLACE: skip rows already stored (duplicate check against the database).
-       With it: plan the replacement (plan_replacement) - the visible rows of the file's vehicles in its period.
+       With it: plan the replacement (plan_replacement) - the visible rows of the file's vehicles in its period -
+       and skip the rows of vehicle-months whose stored monthly summary is kept (also on the legacy dated path).
     6. Batch insert valid records into fuel_transactions (staged, i.e. hidden, with FUEL_IMPORT_REPLACE).
     7. With FUEL_IMPORT_REPLACE, only when every new row is stored: commit_fuel_import makes them visible and
        supersedes the replaced rows in one database transaction. Otherwise nothing visible changes.
@@ -1598,7 +1822,8 @@ def _execute_fuel_import_locked(
     # 2. Validate confirmed mapping and the import format
     month_given = bool(str(reporting_month or "").strip())
     valid_mapping = validate_confirmed_mapping(raw_headers, confirmed_mapping, date_assigned=month_given)
-    mode_info = resolve_import_mode(valid_mapping, reporting_month)
+    # With a date column a reporting month only applies to a confirmed single-date summary (apply_single_date_mode)
+    mode_info = resolve_import_mode(valid_mapping, None if valid_mapping.get("transaction_date") else reporting_month)
     missing_prices = missing_price_fields(valid_mapping)
     if missing_prices:
         raise FuelImportError(
@@ -1674,6 +1899,15 @@ def _execute_fuel_import_locked(
         rows_price_mismatch += int(res["price_mismatch"])
         candidates.append(res["candidate"])
 
+    single_day = apply_single_date_mode(candidates, mode_info, single_date_mode, reporting_month)
+    if needs_single_date_month(single_day, mode_info, single_date_mode):
+        raise FuelImportError(f"{single_date_message(single_day)} Nothing was imported.", status_code=422)
+    monthly = mode_info["mode"] == IMPORT_MODE_MONTHLY
+    assigned_date = mode_info["assigned_date"] if monthly else None
+    replace = replace_enabled() and (monthly or dated_replace_enabled())
+    # With FUEL_MONTHLY_SUMMARY_TABLE a monthly summary is stored in fuel_monthly_summaries, without a date
+    stored_table = SUMMARY_TABLE if monthly and summary_table_enabled() else "fuel_transactions"
+
     for message in _monthly_summary_warnings(mode_info):
         add_warning(message)
     identical = _identical_rows(candidates)
@@ -1707,7 +1941,10 @@ def _execute_fuel_import_locked(
             "import_mode": mode_info["mode"],
             "reporting_month": mode_info["month_from"].isoformat() if monthly else None,
             "replace_scope": ({"period_from": period[0].isoformat(), "period_to": period[1].isoformat(),
-                               "extended_to_full_months": bool(extend_to_full_months and not monthly)}
+                               "extended_to_full_months": bool(extend_to_full_months and not monthly),
+                               # fuel_commit_import_v2 bounds what may be superseded by the file's vehicles
+                               **({"vehicle_keys": sorted({replacement_vehicle_key(c["fields"]["vehicle_identifier"])
+                                                           for c in candidates})} if summary_table_enabled() else {})}
                               if period else None),
         },
     )
@@ -1719,25 +1956,34 @@ def _execute_fuel_import_locked(
     check_to: Optional[str] = None
     existing_fingerprints: Set[str] = set()
     plan: Optional[Dict[str, Any]] = None
+    summary_plan: Optional[Dict[str, Any]] = None  # legacy dated path: only its monthly-summary precedence is used
     try:
         _claim_import(import_id, bearer_token, deadlines)
-        if replace and period:
-            # Latest import wins: read every visible row of the file's vehicles in its period, after the claim
+        # Read after the claim, so no other import can change these rows before this one finishes
+        check_period = period or (replacement_period(candidates, mode_info) if replace_enabled() and candidates else None)
+        if check_period:
             try:
-                plan = plan_replacement(candidates, period, fetch_visible_rows_in_range(
-                    *replacement_fetch_window(period), bearer_token=bearer_token, deadline=deadlines.writes),
-                    whole_period=extend_to_full_months)
+                scoped = plan_replacement(candidates, check_period, fetch_visible_rows_in_range(
+                    *replacement_fetch_window(check_period), bearer_token=bearer_token, deadline=deadlines.writes),
+                    whole_period=extend_to_full_months and replace)
             except FuelDataFetchError:
                 raise FuelImportError("The rows this import replaces could not be read completely; nothing was "
                                       "imported. Please retry.", status_code=503) from None
-            if plan["conflicts"]:
-                raise FuelImportError(replacement_conflict_message(plan), status_code=409)
-            if expected_replace_count is not None and int(expected_replace_count) != len(plan["supersede"]):
-                raise FuelImportError(
-                    f"The stored data changed since the preview ({len(plan['supersede'])} row(s) would now be "
-                    f"replaced, the preview showed {int(expected_replace_count)}). Nothing was imported; preview the "
-                    "file again.", status_code=409)
-        elif candidates and not replace:
+            if scoped["conflicts"]:
+                raise FuelImportError(replacement_conflict_message(scoped), status_code=409)
+            if len(scoped["skipped"]) == len(candidates):
+                raise FuelImportError(f"{kept_summary_message(describe_kept_summaries(scoped, candidates))} "
+                                      "Nothing was imported.", status_code=409)
+            if replace:
+                plan = scoped
+            else:
+                summary_plan = scoped
+        if plan and expected_replace_count is not None and int(expected_replace_count) != len(plan["supersede"]):
+            raise FuelImportError(
+                f"The stored data changed since the preview ({len(plan['supersede'])} row(s) would now be "
+                f"replaced, the preview showed {int(expected_replace_count)}). Nothing was imported; preview the "
+                "file again.", status_code=409)
+        if candidates and not replace:
             candidate_days = [c["fields"]["transaction_date"][:10] for c in candidates]
             check_from = (date.fromisoformat(min(candidate_days)) - timedelta(days=1)).isoformat()
             check_to = (date.fromisoformat(max(candidate_days)) + timedelta(days=1)).isoformat()
@@ -1773,8 +2019,11 @@ def _execute_fuel_import_locked(
         # kept: they are repeated refuels, and re-import protection comes from the database side.
         existing_weak = _build_weak_index(existing_fingerprints)
         retained_for: Dict[int, int] = plan["retained_for"] if plan else {}
+        skipped: Set[int] = (plan or summary_plan or {}).get("skipped", set())
+        kept_scopes = describe_kept_summaries(plan or summary_plan, candidates) if skipped else []
         file_copies: Dict[str, int] = defaultdict(int)
         rows_unchanged = 0
+        rows_skipped_monthly = 0
         rows_duplicate = 0
         rows_cost_derived = 0
         rows_unit_price_derived = 0
@@ -1786,6 +2035,9 @@ def _execute_fuel_import_locked(
         for i, cand in enumerate(candidates):
             fp = cand["fingerprint"]
             source_row = cand["fields"]["source_row_number"]
+            if i in skipped:
+                rows_skipped_monthly += 1  # the stored monthly summary of this vehicle-month is kept
+                continue
             if i in retained_for:
                 dup_reason = f"Identical to stored transaction #{retained_for[i]}, which is kept as is"
                 rows_unchanged += 1
@@ -1807,7 +2059,9 @@ def _execute_fuel_import_locked(
             tx = {"import_id": import_id, **cand["fields"]}
             if replace:
                 tx.update({"date_basis": cand["date_basis"], "staged": True})
-            if v2:
+            if stored_table == SUMMARY_TABLE:
+                tx = summary_insert_row(tx, mode_info["month_from"])
+            elif v2:
                 # The unique fingerprint index must accept repeated refuels (n-th copy suffixed) and, with
                 # replacement, rows equal to ones a later import superseded (suffixed with this import's row).
                 if replace:
@@ -1844,6 +2098,11 @@ def _execute_fuel_import_locked(
                 inserted, ignored, errs = insert_fuel_transactions_ignore_duplicates(
                     group, batch_size=batch_size, bearer_token=bearer_token, deadline=deadlines.writes, outcome=part,
                 )
+            elif stored_table == SUMMARY_TABLE:
+                inserted, errs = insert_monthly_summaries_batch(
+                    group, batch_size=batch_size, bearer_token=bearer_token, deadline=deadlines.writes, outcome=part,
+                )
+                ignored = 0
             else:
                 inserted, errs = insert_fuel_transactions_batch(
                     transactions=group, batch_size=batch_size, bearer_token=bearer_token,
@@ -1884,8 +2143,8 @@ def _execute_fuel_import_locked(
         # database so the totals are what is actually stored.
         if uncertain_batches or rows_unverified:
             try:
-                stored = _summarize_stored_rows(fetch_import_rows(import_id, bearer_token=bearer_token,
-                                                                  deadline=deadlines.recount))
+                stored = _summarize_stored_rows(_fetch_rows_of_import(import_id, stored_table, bearer_token=bearer_token,
+                                                                      deadline=deadlines.recount))
             except FuelDataFetchError:
                 add_warning(f"Rows stored by import #{import_id} could not be re-counted after uncertain batch "
                             "results; use Reconcile in import history to verify the counts.")
@@ -1913,14 +2172,15 @@ def _execute_fuel_import_locked(
         commit_state: Optional[str] = None
         if replace:
             to_store = len(purchases) + len(refunds)
-            supersede_ids = [int(r["id"]) for r in (plan or {}).get("supersede", [])]
+            supersede_ids, supersede_summary_ids = split_supersede_ids((plan or {}).get("supersede", []))
             if rows_imported != to_store or rows_unverified or rows_not_processed:
                 commit_state = "not_committed"
                 batch_errors.insert(0, "Not committed: not every new row was stored, so the new rows stay hidden and "
                                        "the dashboard still shows the previously imported data. Import the file again.")
-            elif to_store or supersede_ids:
+            elif to_store or supersede_ids or supersede_summary_ids:
                 commit_state, rows_replaced, note = _commit_replacement(import_id, supersede_ids, to_store,
-                                                                        bearer_token, deadlines)
+                                                                        bearer_token, deadlines, stored_table,
+                                                                        supersede_summary_ids)
                 if note:
                     batch_errors.insert(0, note)
             elif rows_unchanged:
@@ -1939,12 +2199,16 @@ def _execute_fuel_import_locked(
                 clear_vehicle_identifier_cache()
     except Exception as exc:
         logger.error("Fuel import #%s stopped after an internal error: %s", import_id, exc, exc_info=True)
-        raise FuelImportError(_finalize_interrupted_import(import_id, bearer_token, deadlines), status_code=500) from None
+        raise FuelImportError(_finalize_interrupted_import(import_id, bearer_token, deadlines, stored_table),
+                              status_code=500) from None
 
     # 9. Date ranges and final status. Rows never sent or with an unknown outcome make the import incomplete: its
     # status cannot be 'completed', and the marker keeps Reconcile from upgrading it later.
     date_from: Optional[str] = min(parsed_dates) if parsed_dates else None
     date_to: Optional[str] = max(parsed_dates) if parsed_dates else None
+    if stored_table == SUMMARY_TABLE and parsed_dates:
+        # A monthly summary covers its reporting month; it has no refuelling dates
+        date_from, date_to = mode_info["month_from"].isoformat(), mode_info["month_to"].isoformat()
 
     if rows_not_processed or rows_unverified:
         open_rows = []
@@ -1956,7 +2220,8 @@ def _execute_fuel_import_locked(
                                "the stored rows, then re-import the same file to add the missing ones.")
 
     # Every row of the sheet ends in exactly one bucket; a gap means a counting bug, so it is reported, not hidden.
-    accounted = (rows_ignored + rows_imported + rows_duplicate + rows_failed + rows_unverified + rows_not_processed)
+    accounted = (rows_ignored + rows_imported + rows_duplicate + rows_failed + rows_unverified + rows_not_processed
+                 + rows_skipped_monthly)
     if accounted != total_rows_found:
         logger.error("Fuel import #%s row counts do not add up: %d accounted of %d found", import_id, accounted,
                      total_rows_found)
@@ -1975,6 +2240,13 @@ def _execute_fuel_import_locked(
         final_status = "completed_with_errors"
     else:
         final_status = "completed"
+
+    # Rows skipped for a kept monthly summary follow the import rule, so they do not change the status; the note is
+    # stored in the import history for audit
+    kept_note = kept_summary_message(kept_scopes)
+    if kept_note:
+        add_warning(kept_note)
+        error_message = f"{error_message}; {kept_note}" if error_message else kept_note
 
     completed_at = datetime.now(timezone.utc).isoformat()
 
@@ -2033,7 +2305,8 @@ def _execute_fuel_import_locked(
         },
         import_mode=mode_info["mode"],
         reporting_month=mode_info["reporting_month"],
-        assigned_transaction_date=assigned_date,
+        assigned_transaction_date=None if stored_table == SUMMARY_TABLE else assigned_date,
+        monthly_summary_table=stored_table == SUMMARY_TABLE,
         rows_price_mismatch=rows_price_mismatch,
         rows_identical_in_file=identical,
         replacement_enabled=replace,
@@ -2042,4 +2315,7 @@ def _execute_fuel_import_locked(
         rows_unchanged=rows_unchanged,
         replacement_period=({"period_from": period[0].isoformat(), "period_to": period[1].isoformat()}
                             if period else None),
+        rows_skipped_monthly_summary=rows_skipped_monthly,
+        monthly_summary_scopes_kept=kept_scopes[:MAX_DETAIL_ROWS],
+        single_date=single_day.isoformat() if single_day else None,
     )

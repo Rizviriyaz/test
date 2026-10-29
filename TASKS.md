@@ -174,3 +174,52 @@ Run on 2026-10-27 against the uncommitted performance, caching and Dashboard cha
 - A group engine row with idling but no event sub-rows keeps its idle duration; its event count and details are unknown (no event is invented from the row total). Not seen live on 2026-10-26.
 - Live status: a vehicle keeps its last known MOVING / IDLING / STOPPED status until OFFLINE (12 h); `telemetry_stale` marks a status that is not live, and the live idle timer stops at the last message. The `delayed` counts in the summary/groups responses now count those stale vehicles (they overlap moving/idling).
 - Ignition: a missing or invalid reading is `null` (shown as Unknown). Live status does not use the `io_11` / `in1` / `io_239` fallbacks that history parsing uses; their meaning per device is unverified (in Teltonika's AVL ID list `io_239` is Ignition but `io_11` is ICCID, not an ignition input; not checked against this fleet's devices).
+
+---
+
+## Fuel Performance Dashboard — audit fixes (2026-10-28)
+
+Uncommitted, on top of the fuel working-tree changes. Offline only: every backend script ran under `OfflineGuard` with Wialon and Supabase mocked; no live service was contacted and no data, flag, schema or deployment changed.
+
+| Check | Result |
+| --- | --- |
+| Backend `scripts/test_fuel_*.py`, `test_ai_chat_*.py`, `test_production_remediation.py` under `OfflineGuard` | All pass except 2 cases of `test_fuel_import_replacement.py` (see below) |
+| `test_fuel_import_replacement.py` | 15/16 pass as run; 16/16 with placeholder `SUPABASE_URL` / `SUPABASE_ANON_KEY`. The script never imports `app.wialon`, which is what loads `Backend/.env`, so two db-helper cases see no `SUPABASE_URL` (test isolation, not a product defect) |
+| `test_fuel_efficiency.py` cases 01-09 and 13 (under `OfflineGuard`) | Pass. Cases 10-12 need live data: not run |
+| `test_ai_fuel_assistant.py`, `test_fuel_preview.py` | Not run (live services / no `OfflineGuard`) |
+| `npm test` | 160/160 pass |
+| `npm run lint` | Pass |
+| `npm run build` with an absolute non-loopback `VITE_API_URL` placeholder | Pass (existing >500 kB `index` chunk warning) |
+
+Rules now enforced (with offline regression tests):
+
+- Monthly trend rows use the monthly KPI's vehicle set per month (positive net fuel, not mixed-fuel that month, Wialon km > 0). Distance is null when no such unit has known distance and 0.0 when they recorded 0 km, in the KPI and the trend alike. A trip crossing a period boundary stays whole in its start period (`boundary_trip_km`); Wialon gives no finer split.
+- Day/week trend eligibility uses each unit's net fuel over the window including monthly summaries (the KPI's accounting scope).
+- One idle estimate (`efficiency.estimate_unit_idle`): idle seconds x the configured L/h, the vehicle's own net price for cost, rounded to 0.01 per vehicle. The fleet KPI, rankings and waste report sum the same per-vehicle values; vehicles with known idle hours but unknown distance are estimated; mixed-fuel vehicles under a fuel-type filter are not.
+- A Wialon unit-month with both a monthly summary and dated rows uses the dated rows only when a committed dated import confirms whole-month coverage; otherwise all its rows are excluded from KPIs and reported (`excluded_scope.overlap_conflicts`, waste item `summary_dated_overlap`). Source rows are never changed.
+- Counts: `transaction_count` = all source rows; `dated_purchase_count` excludes refunds and monthly summaries. Money is summed in `Decimal`.
+
+**Not verified**: read-only live reconciliation of these figures against Supabase and the Wialon UI (needs approval).
+
+**Known limitations** (documented, not fixed):
+
+- Daily coverage is per imported statement, not per supplier. `/api/fuel/analytics/daily` marks a day `statement_covered` only when a committed dated import confirmed as whole months (`replace_scope.extended_to_full_months`) covers it for every vehicle in scope, and reports `supplier_completeness: "not_established"`: fuel from a supplier whose statement was not imported is invisible. Establishing supplier completeness needs a schema decision: a provider identity on `fuel_imports` and the expected providers per vehicle. The endpoint needs `Backend/sql/fuel_import_replacement.sql` and `FUEL_IMPORT_REPLACE=1`; without them no day is covered and the Daily Dashboard link stays hidden.
+- Deferred: a per-month driving/idling trend. An offline report-count measurement with the mocked report engine (not production latency): one telematics bundle for a 6-month window runs 2 Wialon reports (Group Trips and Group Engine & Idling, concurrently on two fuel sessions); six monthly bundles run 12, and on each session the six reports queue behind its report lock, each `exec_report` allowing up to 120 s. Not added until live `PERF` timings show the cost is acceptable and it is approved.
+- Vehicle detail takes hours from the per-unit Engine Hours report; the fleet KPI, rankings and waste use the group Engine & Idling report, which can differ slightly for one unit. The detail estimate now uses the report's raw seconds, so only the report-source difference remains (`wialon_distance.get_vehicle_telematics_detail`).
+
+## Dedicated monthly-summary table — offline implementation (2026-10-29, uncommitted)
+
+Behind `FUEL_MONTHLY_SUMMARY_TABLE=1` (requires `FUEL_IMPORT_REPLACE=1`). Monthly summaries are stored in `fuel_monthly_summaries` by `reporting_month` (no date column) and committed atomically with `fuel_commit_import_v2`; `fuel_transactions` is read as dated rows only. KPI code receives summaries in the legacy in-memory shape (`reporting_period.summary_scope_row`) through the same month-end window. Lists (`/transactions`, vehicle detail) hold dated rows only; summaries are listed by month (`/monthly-summaries`, `vehicle-detail.monthly_summaries`).
+
+Import rules: a file whose rows all share one date is a monthly summary automatically (its month is asked unless the date is a month end; "individual refuels" is an explicit override); every summary row needs its own total cost. The monthly summary takes precedence over dated rows of the same vehicle-month at import (rows skipped / superseded, kept for audit) and at read time (`dated_superseded_by_summary`, whatever the dated coverage). Day coverage is never established for a vehicle-month that has a summary.
+
+SQL (not run): `Backend/sql/monthly_summaries/` 01 preflight, 02 table, 03 RLS/grants/v2, 04 in-place migration (audited), 05 verify, 06 cutover; 90 optional destructive reset; 99 rollback.
+
+| Check | Result |
+| --- | --- |
+| Offline backend scripts under `OfflineGuard` (all `test_fuel_*` except the live ones, `test_ai_chat_*`, `test_production_remediation.py`, `test_api_hardening.py`) | All pass; `test_fuel_monthly_summary_table.py` 18/18 |
+| `test_fuel_supabase_reads.py` | Pass (reads mocked; no network guard) |
+| `npm test` / `npm run lint` / `npm run build` (placeholder `VITE_API_URL`) | 165/165 / pass / pass |
+| `test_fuel_efficiency.py` | Earlier run by mistake (live read-only GETs, cases 10-12); not run since |
+
+**Not verified**: the SQL scripts, RLS policies and `fuel_commit_import_v2` against a database; live KPI totals.

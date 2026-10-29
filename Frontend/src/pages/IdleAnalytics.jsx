@@ -9,16 +9,20 @@ import {
     X,
     ChevronRight,
     Calendar,
+    RefreshCw,
+    SlidersHorizontal,
+    ChevronDown,
 } from "lucide-react"
 
 import { getCachedFleetIdleAnalytics, getFleetIdleAnalytics } from "../api/fleetApi"
 import AppShell from "../components/Common/AppShell"
-import PageHeader from "../components/Common/PageHeader"
+import { MobileNavButton } from "../components/Layout/Sidebar"
 import SectionCard from "../components/Common/SectionCard"
 import SearchInput from "../components/Common/SearchInput"
 import FilterSelect from "../components/Common/FilterSelect"
 import Pagination from "../components/Common/Pagination"
 import FleetStatusBadge from "../components/Common/FleetStatusBadge"
+import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
 import AnalyticsChart from "../components/Analytics/AnalyticsChart"
 import IdleMapModal from "../components/Analytics/IdleMapModal"
@@ -114,6 +118,10 @@ export default function IdleAnalytics() {
     const [filterGroupId, setFilterGroupId] = useState("")
     const [filterVehicleId, setFilterVehicleId] = useState("")
     const [searchText, setSearchText] = useState("")
+    // Filters start expanded on tablet/desktop and collapsed on phones, where they would push the KPIs below the fold
+    const [filtersOpen, setFiltersOpen] = useState(
+        () => typeof window === "undefined" || !window.matchMedia || window.matchMedia("(min-width: 640px)").matches
+    )
 
     // ── Data ──
     const [analytics, setAnalytics] = useState(null)
@@ -426,155 +434,195 @@ export default function IdleAnalytics() {
                 </>
             }
         >
-            <PageHeader
-                title="Idle Analytics"
-                onRefresh={refresh}
-                loading={loading || eventsLoading}
-                lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
-            />
-
-            <div className="space-y-5 pb-6">
-                {/* ─── 01 FILTER TOOLBAR ─────────────────────────────────── */}
-                <section
-                    aria-label="Filter Controls"
-                    className="rounded-xl border border-slate-200/70 bg-white p-3 sm:p-3.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]"
-                >
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                        {/* Date Range Presets & Inputs */}
-                        <div className="flex flex-wrap items-center gap-2.5">
-                            <fieldset className="flex min-w-0 max-w-full flex-col gap-1.5">
-                                <legend className="sr-only">Date range</legend>
-                                <div
-                                    role="group"
-                                    aria-label="Date range presets"
-                                    className="flex h-8 items-center rounded-lg bg-slate-100 p-0.5 border border-slate-200/50"
-                                >
-                                    {RANGE_PRESETS.map((p) => {
-                                        const active = rangePreset === p.id
-                                        return (
-                                            <button
-                                                key={p.id}
-                                                type="button"
-                                                onClick={() => applyPreset(p.id)}
-                                                aria-pressed={active}
-                                                className={`h-full rounded-md px-2.5 text-xs font-medium transition-all duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 whitespace-nowrap ${
-                                                    active
-                                                        ? "bg-white text-slate-900 font-semibold shadow-xs"
-                                                        : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
-                                                }`}
-                                            >
-                                                {p.label}
-                                            </button>
-                                        )
-                                    })}
-                                    {rangePreset === "custom" && (
-                                        <span className="inline-flex h-full items-center whitespace-nowrap rounded-md bg-white px-2.5 text-xs font-semibold text-slate-900 shadow-xs">
-                                            Custom
-                                        </span>
-                                    )}
-                                </div>
-                            </fieldset>
-
-                            <div className="flex flex-wrap items-center gap-1.5">
-                                {[["from", "From"], ["to", "To"]].map(([field, label]) => (
-                                    <label
-                                        key={field}
-                                        className={`inline-flex h-8 items-center gap-1.5 rounded-lg border bg-white px-2.5 transition-colors focus-within:ring-2 ${
-                                            rangeError
-                                                ? "border-rose-300 focus-within:border-rose-400 focus-within:ring-rose-100"
-                                                : "border-slate-200/80 focus-within:border-brand focus-within:ring-brand/15 hover:border-slate-300"
-                                        }`}
-                                    >
-                                        <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
-                                        <span className="shrink-0 text-xs text-slate-400 font-medium">{label}</span>
-                                        <input
-                                            type="datetime-local"
-                                            step="1"
-                                            value={rangeInputs[field]}
-                                            onChange={(e) => editRangeInput(field, e.target.value)}
-                                            aria-invalid={Boolean(rangeError)}
-                                            title={rangeError || undefined}
-                                            className="min-w-0 bg-transparent text-xs font-medium tabular-nums text-slate-800 outline-none cursor-pointer"
-                                        />
-                                    </label>
-                                ))}
+            <div className="space-y-4 pb-6">
+                {/* ─── 01 HEADER STRIP & FILTER TOOLBAR ──────────────────── */}
+                {/* Compact title-less header like the other dashboard pages: date presets left, page actions right */}
+                <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200/80 pb-2 sm:pb-2.5">
+                    <div className="flex min-w-0 max-w-full items-center gap-2">
+                        <MobileNavButton />
+                        <fieldset className="min-w-0 max-w-full">
+                            <legend className="sr-only">Date range</legend>
+                            <div
+                                role="group"
+                                aria-label="Date range presets"
+                                className="flex h-8 max-w-full items-center overflow-x-auto rounded-lg border border-slate-200/50 bg-slate-100 p-0.5"
+                            >
+                                {RANGE_PRESETS.map((p) => {
+                                    const active = rangePreset === p.id
+                                    return (
+                                        <button
+                                            key={p.id}
+                                            type="button"
+                                            onClick={() => applyPreset(p.id)}
+                                            aria-pressed={active}
+                                            className={`h-full rounded-md px-2.5 text-xs font-medium transition-all duration-150 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 whitespace-nowrap ${
+                                                active
+                                                    ? "bg-white text-brand font-semibold shadow-xs"
+                                                    : "text-slate-600 hover:text-slate-900 hover:bg-white/50"
+                                            }`}
+                                        >
+                                            {p.label}
+                                        </button>
+                                    )
+                                })}
+                                {rangePreset === "custom" && (
+                                    <span className="inline-flex h-full items-center whitespace-nowrap rounded-md bg-white px-2.5 text-xs font-semibold text-brand shadow-xs">
+                                        Custom
+                                    </span>
+                                )}
                             </div>
-                        </div>
+                        </fieldset>
+                    </div>
 
-                        {/* Dropdown Filters, Search, and Export */}
-                        <div className="flex flex-wrap items-center gap-2">
-                            <FilterSelect
-                                icon={Layers}
-                                label="Group"
-                                value={filterGroupId}
-                                onChange={(val) => {
-                                    setFilterGroupId(val)
-                                    setFilterVehicleId("")
-                                }}
-                                ariaLabel="Filter customer group"
-                                active={filterGroupId !== ""}
-                                selectClassName="max-w-[140px]"
-                            >
-                                <option value="">All Groups</option>
-                                {groups.map((g) => (
-                                    <option key={g.id} value={g.id}>{g.name}</option>
-                                ))}
-                            </FilterSelect>
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                        {lastUpdated && (
+                            <span className="hidden h-8 items-center gap-1.5 px-1 text-xs tabular-nums text-slate-500 sm:inline-flex" title="Updated (UAE time)">
+                                <span className="h-1.5 w-1.5 rounded-full bg-status-moving" aria-hidden="true" />
+                                Updated {formatUAETime(lastUpdated)}
+                            </span>
+                        )}
 
-                            <FilterSelect
-                                icon={Truck}
-                                label="Vehicle"
-                                value={filterVehicleId}
-                                onChange={setFilterVehicleId}
-                                ariaLabel="Filter vehicle"
-                                active={filterVehicleId !== ""}
-                                selectClassName="max-w-[150px]"
-                            >
-                                <option value="">All Vehicles</option>
-                                {vehicleOptions.map((v) => (
-                                    <option key={v.vehicle_id} value={v.vehicle_id}>
-                                        {v.registration_plate ? `${v.registration_plate} (${v.vehicle_name})` : v.vehicle_name}
-                                    </option>
-                                ))}
-                            </FilterSelect>
+                        <button
+                            type="button"
+                            onClick={refresh}
+                            disabled={loading || eventsLoading}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-2.5 text-xs font-medium text-slate-700 shadow-xs transition-colors hover:border-slate-300 hover:bg-slate-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 disabled:cursor-default disabled:opacity-60"
+                            title="Refresh idle analytics data"
+                        >
+                            <RefreshCw className={`h-3.5 w-3.5 text-slate-500 ${loading || eventsLoading ? "animate-spin motion-reduce:animate-none" : ""}`} />
+                            <span>{loading || eventsLoading ? "Updating…" : "Refresh"}</span>
+                        </button>
 
-                            <SearchInput
-                                value={searchText}
-                                onChange={setSearchText}
-                                placeholder="Search vehicle or group…"
-                                className="w-full sm:w-48"
-                            />
+                        <button
+                            type="button"
+                            onClick={() => exportToCSV(filteredEvents)}
+                            disabled={filteredEvents.length === 0}
+                            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-3 text-xs font-medium text-slate-700 shadow-xs hover:bg-slate-50 hover:border-slate-300 hover:text-brand transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
+                            title="Export filtered idle events to CSV"
+                            aria-label="Export filtered idle events to CSV"
+                        >
+                            <Download className="h-3.5 w-3.5 text-slate-500" />
+                            <span>Export CSV</span>
+                        </button>
 
+                        <button
+                            type="button"
+                            onClick={() => setFiltersOpen((o) => !o)}
+                            aria-expanded={filtersOpen}
+                            aria-controls="idle-filter-panel"
+                            className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-semibold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/30 ${
+                                filtersOpen || activeFilterCount > 0
+                                    ? "border-brand/40 bg-brand-light text-brand"
+                                    : "border-slate-200/80 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50"
+                            }`}
+                        >
+                            <SlidersHorizontal className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Filters</span>
                             {activeFilterCount > 0 && (
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        setFilterGroupId("")
-                                        setFilterVehicleId("")
-                                        setSearchText("")
-                                    }}
-                                    className="inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
-                                    title="Clear active filters"
-                                >
-                                    <X className="h-3.5 w-3.5" />
-                                    <span>Clear ({activeFilterCount})</span>
-                                </button>
+                                <span className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-brand px-1 text-[10px] font-bold tabular-nums text-white">
+                                    {activeFilterCount}
+                                </span>
                             )}
+                            <ChevronDown
+                                className={`h-3.5 w-3.5 transition-transform motion-reduce:transition-none ${filtersOpen ? "rotate-180" : ""}`}
+                                aria-hidden="true"
+                            />
+                        </button>
+                    </div>
+                </header>
 
+                {/* Collapsible filter panel: custom range and entity filters in one compact row */}
+                {filtersOpen && (
+                    <section
+                        id="idle-filter-panel"
+                        aria-label="Filter Controls"
+                        className="grid grid-cols-1 gap-2 rounded-xl border border-slate-200/70 bg-white px-3 py-2.5 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] sm:flex sm:flex-wrap sm:items-center sm:px-3.5"
+                    >
+                        {[["from", "From"], ["to", "To"]].map(([field, label]) => (
+                            <label
+                                key={field}
+                                className={`inline-flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg border bg-white px-2.5 transition-colors focus-within:ring-2 sm:w-auto ${
+                                    rangeError
+                                        ? "border-rose-300 focus-within:border-rose-400 focus-within:ring-rose-100"
+                                        : "border-slate-200/80 focus-within:border-brand focus-within:ring-brand/15 hover:border-slate-300"
+                                }`}
+                            >
+                                <Calendar className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
+                                <span className="w-8 shrink-0 text-xs text-slate-400 font-medium sm:w-auto">{label}</span>
+                                <input
+                                    type="datetime-local"
+                                    step="1"
+                                    value={rangeInputs[field]}
+                                    onChange={(e) => editRangeInput(field, e.target.value)}
+                                    aria-invalid={Boolean(rangeError)}
+                                    title={rangeError || undefined}
+                                    className="min-w-0 flex-1 bg-transparent text-xs font-medium tabular-nums text-slate-800 outline-none cursor-pointer"
+                                />
+                            </label>
+                        ))}
+
+                        <FilterSelect
+                            icon={Layers}
+                            label="Group"
+                            value={filterGroupId}
+                            onChange={(val) => {
+                                setFilterGroupId(val)
+                                setFilterVehicleId("")
+                            }}
+                            ariaLabel="Filter customer group"
+                            active={filterGroupId !== ""}
+                            className="w-full sm:w-auto"
+                            selectClassName="flex-1 sm:w-44 sm:flex-none"
+                        >
+                            <option value="">All Groups</option>
+                            {groups.map((g) => (
+                                <option key={g.id} value={g.id}>{g.name}</option>
+                            ))}
+                        </FilterSelect>
+
+                        {/* Native select: the browser shows the long option list as a bounded, scrollable popup */}
+                        <FilterSelect
+                            icon={Truck}
+                            label="Vehicle"
+                            value={filterVehicleId}
+                            onChange={setFilterVehicleId}
+                            ariaLabel="Filter vehicle"
+                            active={filterVehicleId !== ""}
+                            className="w-full sm:w-auto"
+                            selectClassName="flex-1 sm:w-52 sm:flex-none"
+                        >
+                            <option value="">All Vehicles</option>
+                            {vehicleOptions.map((v) => (
+                                <option key={v.vehicle_id} value={v.vehicle_id}>
+                                    {v.registration_plate ? `${v.registration_plate} (${v.vehicle_name})` : v.vehicle_name}
+                                </option>
+                            ))}
+                        </FilterSelect>
+
+                        <SearchInput
+                            value={searchText}
+                            onChange={setSearchText}
+                            placeholder="Search vehicle or group…"
+                            className="w-full sm:w-56"
+                        />
+
+                        {activeFilterCount > 0 && (
                             <button
                                 type="button"
-                                onClick={() => exportToCSV(filteredEvents)}
-                                disabled={filteredEvents.length === 0}
-                                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-200/80 bg-white px-3 text-xs font-medium text-slate-700 shadow-xs hover:bg-slate-50 hover:border-slate-300 hover:text-brand transition-all cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
-                                title="Export filtered idle events to CSV"
-                                aria-label="Export filtered idle events to CSV"
+                                onClick={() => {
+                                    setFilterGroupId("")
+                                    setFilterVehicleId("")
+                                    setSearchText("")
+                                }}
+                                className="inline-flex h-8 items-center justify-center gap-1 rounded-lg px-2 text-xs font-medium text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+                                title="Clear active filters"
                             >
-                                <Download className="h-3.5 w-3.5 text-slate-500" />
-                                <span>Export CSV</span>
+                                <X className="h-3.5 w-3.5" />
+                                <span>Clear ({activeFilterCount})</span>
                             </button>
-                        </div>
-                    </div>
-                </section>
+                        )}
+                    </section>
+                )}
 
                 {error && analytics && <ErrorBanner message={error} onRetry={refresh} />}
                 {!error && eventsError && analytics && <ErrorBanner message={eventsError} onRetry={refresh} />}
@@ -590,117 +638,56 @@ export default function IdleAnalytics() {
                     <ErrorState message={error} onRetry={refresh} />
                 ) : analytics ? (
                     <>
-                        {/* ─── 02 KPI METRIC CARDS ──────────────────────────────── */}
-                        <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 sm:gap-4">
-                            {/* 1. Total Vehicles */}
-                            <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300">
-                                <dt className="text-xs font-medium text-slate-500">Total Vehicles</dt>
-                                <dd className="mt-1">
-                                    <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
-                                        {kpis.total_vehicles ?? 0}
-                                    </span>
-                                    <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium">
-                                        Tracked in fleet
-                                    </span>
-                                </dd>
-                            </div>
-
-                            {/* 2. Currently Idling */}
-                            <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300">
-                                <dt className="flex items-center justify-between text-xs font-medium text-slate-500">
-                                    <span>Currently Idling</span>
-                                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" aria-hidden="true" />
-                                </dt>
-                                <dd className="mt-1">
-                                    <span className="text-2xl font-bold tabular-nums text-amber-800 tracking-tight whitespace-nowrap">
-                                        {kpis.currently_idling_vehicles ?? 0}
-                                    </span>
-                                    <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium">
-                                        {kpis.idling_fleet_ratio != null ? `${kpis.idling_fleet_ratio}% of fleet` : "Live status"}
-                                    </span>
-                                </dd>
-                            </div>
-
-                            {/* 3. Idle Events */}
-                            <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300">
-                                <dt className="text-xs font-medium text-slate-500">Idle Events</dt>
-                                <dd className="mt-1">
-                                    <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
-                                        {eventsPending ? "…" : (kpis.idle_event_count ?? "—")}
-                                    </span>
-                                    <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium" title={eventsNote || undefined}>
-                                        {eventsPending ? "Loading events…" : (eventsNote || "Engine-on periods with idling")}
-                                    </span>
-                                </dd>
-                            </div>
-
-                            {/* 4. Total Idle Time */}
-                            <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300">
-                                <dt className="text-xs font-medium text-slate-500">Total Idle Time</dt>
-                                <dd className="mt-1">
-                                    <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
-                                        {formatDuration(kpis.total_idle_seconds)}
-                                    </span>
-                                    <span
-                                        className={`mt-0.5 block truncate text-[11px] font-medium ${kpis.total_idle_partial ? "text-amber-700" : "text-slate-400"}`}
-                                        title={kpis.total_idle_partial ? "Left out of the total: vehicles whose idle time could not be read, that are outside the report group, or that share a name with another vehicle" : undefined}
-                                    >
-                                        {kpis.total_idle_partial ? "Partial: some vehicles unknown" : "Engine on & zero speed"}
-                                    </span>
-                                </dd>
-                            </div>
-
-                            {/* 5. Avg Idle Duration */}
-                            <div className="flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300">
-                                <dt className="text-xs font-medium text-slate-500">Avg Idle Duration</dt>
-                                <dd className="mt-1">
-                                    <span className="text-2xl font-bold tabular-nums text-slate-900 tracking-tight whitespace-nowrap">
-                                        {eventsPending ? "…" : kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
-                                    </span>
-                                    <span className="mt-0.5 block truncate text-[11px] text-slate-400 font-medium">
-                                        Per engine-on period with idling
-                                    </span>
-                                </dd>
-                            </div>
-
-                            {/* 6. Longest Idle Event */}
-                            <div
+                        {/* ─── 02 KPI METRIC STRIP ──────────────────────────────── */}
+                        <KpiStrip label="Idle analytics summary" className="grid-cols-2 sm:grid-cols-3 xl:grid-cols-6">
+                            <KpiCard
+                                label="Total Vehicles"
+                                value={kpis.total_vehicles ?? 0}
+                            />
+                            <KpiCard
+                                label="Currently Idling"
+                                dot="bg-status-idling"
+                                value={kpis.currently_idling_vehicles ?? 0}
+                                valueColor="text-amber-800"
+                            />
+                            <KpiCard
+                                label="Idle Events"
+                                value={eventsPending ? "…" : (kpis.idle_event_count ?? "—")}
+                                sub={eventsPending ? "Loading events…" : eventsNote}
+                                title={eventsNote || "Idle Events"}
+                            />
+                            <KpiCard
+                                label="Total Idle Time"
+                                value={formatDuration(kpis.total_idle_seconds)}
+                                sub={kpis.total_idle_partial ? <span className="font-medium text-amber-700">Partial: some vehicles unknown</span> : null}
+                                title={kpis.total_idle_partial ? "Left out of the total: vehicles whose idle time could not be read, that are outside the report group, or that share a name with another vehicle" : "Total Idle Time"}
+                            />
+                            <KpiCard
+                                label="Avg Idle Duration"
+                                value={eventsPending ? "…" : kpis.average_idle_seconds == null ? "—" : formatDuration(kpis.average_idle_seconds)}
+                            />
+                            <KpiCard
+                                label="Most Idle in One Period"
+                                value={eventsPending ? "…" : kpis.longest_idle_seconds == null ? "—" : formatDuration(kpis.longest_idle_seconds)}
+                                valueColor={highestIdleEvent ? "text-amber-800" : "text-slate-900"}
                                 onClick={highestIdleEvent ? () => setMapEvent(highestIdleEvent) : undefined}
-                                className={`flex flex-col justify-between rounded-xl border border-slate-200/70 bg-white p-3.5 sm:p-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] transition-all duration-150 hover:-translate-y-0.5 hover:shadow-[0_4px_12px_-2px_rgba(15,23,42,0.08)] hover:border-slate-300 ${
-                                    highestIdleEvent ? "cursor-pointer group" : ""
-                                }`}
                                 // Wialon's Engine Hours report gives idle time per engine-on period (it may hold several idle
                                 // stops and driving), not continuous idle stops
                                 title={`Most idle time Wialon reports within one engine-on period; it may add up several idle stops${highestIdleEvent ? ` · Inspect: ${highestIdleEvent.vehicle_name}` : ""}`}
-                            >
-                                <dt className="flex items-center justify-between text-xs font-medium text-slate-500">
-                                    <span>Most Idle in One Period</span>
-                                    {highestIdleEvent && (
-                                        <ArrowUpRight className="h-3.5 w-3.5 text-slate-400 group-hover:text-brand transition-colors" />
-                                    )}
-                                </dt>
-                                <dd className="mt-1">
-                                    <span className={`text-2xl font-bold tabular-nums tracking-tight whitespace-nowrap ${highestIdleEvent ? "text-amber-800" : "text-slate-900"}`}>
-                                        {eventsPending ? "…" : kpis.longest_idle_seconds == null ? "—" : formatDuration(kpis.longest_idle_seconds)}
-                                    </span>
-                                    <span className="mt-0.5 block truncate text-[11px] font-medium text-slate-400 group-hover:text-brand transition-colors">
-                                        {highestIdleEvent
-                                            ? `${highestIdleEvent.vehicle_name} · View map`
-                                            : eventsPending
-                                                ? "Loading events…"
-                                                : kpis.longest_idle_seconds == null
-                                                    ? "Incomplete data"
-                                                    : "No idling in period"}
-                                    </span>
-                                </dd>
-                            </div>
-                        </div>
+                                sub={highestIdleEvent
+                                    ? `${highestIdleEvent.vehicle_name} · View map`
+                                    : eventsPending
+                                        ? "Loading events…"
+                                        : kpis.longest_idle_seconds == null
+                                            ? "Incomplete data"
+                                            : "No idling in period"}
+                            />
+                        </KpiStrip>
 
                         {/* ─── 03 CUSTOMER GROUPS DRILL-DOWN ─────────────────────── */}
                         {byGroup.length > 0 && (
                             <SectionCard
                                 title="Customer Groups"
-                                subtitle="Group-membership totals (a vehicle in several groups counts in each) · Select a group to drill down into its vehicles"
                                 flush
                                 actions={
                                     selectedGroupId ? (
@@ -854,7 +841,7 @@ export default function IdleAnalytics() {
                             <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                 <AnalyticsChart
                                     title="Idle Duration Trend"
-                                    subtitle={eventsNote || "Idle minutes by start time of each engine-on period"}
+                                    subtitle={eventsNote || undefined}
                                     data={trendChartData}
                                     dataKey="value"
                                     nameKey="label"
@@ -868,7 +855,6 @@ export default function IdleAnalytics() {
                             <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                 <AnalyticsChart
                                     title="Idle by Customer Group"
-                                    subtitle="Idle minutes per group membership; groups overlap, so they do not add up to the fleet total"
                                     data={groupChartData}
                                     dataKey="value"
                                     nameKey="label"
@@ -907,7 +893,7 @@ export default function IdleAnalytics() {
                                 <div className="[&>div]:h-full [&>div]:rounded-xl [&>div]:border-slate-200/70 [&>div]:shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)] [&>div]:transition-all">
                                     <AnalyticsChart
                                         title="Idle Location Hotspots"
-                                        subtitle={eventsNote ? `Top 10 locations · ${eventsNote}` : "Top 10 start locations of engine-on periods with idling"}
+                                        subtitle={eventsNote ? `Top 10 locations · ${eventsNote}` : undefined}
                                         data={locationChartData}
                                         dataKey="value"
                                         nameKey="label"
@@ -923,7 +909,6 @@ export default function IdleAnalytics() {
                         {/* ─── 05 IDLE EVENTS TABLE ──────────────────────────────── */}
                         <SectionCard
                             title="Idle Events"
-                            subtitle="Individual engine-on periods with idle durations"
                             flush
                             actions={
                                 <div className="flex items-center gap-2">
@@ -1095,7 +1080,7 @@ export default function IdleAnalytics() {
                         {byLocation.length > 0 && (
                             <SectionCard
                                 title="Location Hotspots"
-                                subtitle={eventsNote ? `Ranked idle locations · ${eventsNote}` : "Ranked by idle time of engine-on periods starting there"}
+                                subtitle={eventsNote ? `Ranked idle locations · ${eventsNote}` : undefined}
                                 flush
                                 actions={
                                     <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold tabular-nums text-slate-700">

@@ -12,7 +12,7 @@ import VehicleStatusBadge from "./VehicleStatusBadge"
 import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber, idleSessionsLabel } from "./telemetryFormat"
 import ClassificationBadge from "./ClassificationBadge"
 import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels"
-import { transactionDateLabel } from "./fuelImportState"
+import { formatReportingMonth, transactionDateLabel } from "./fuelImportState"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -85,6 +85,8 @@ export default function VehicleFuelDetailModal({
 
     const summary = data?.vehicle_summary
     const txns = data?.transactions || []
+    // Monthly totals (stored without a refuelling date); listed apart from the dated refuels
+    const monthlySummaries = data?.monthly_summaries || []
     const activity = data?.activity_breakdown || {}
     const anomalies = data?.anomalies || []
     const transparency = data?.calculation_transparency || {}
@@ -417,6 +419,41 @@ export default function VehicleFuelDetailModal({
                                             </tbody>
                                         </table>
                                     </div>
+                                    {monthlySummaries.length > 0 && (
+                                        <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
+                                            <p className="border-b border-slate-200 bg-slate-50 px-3.5 py-2 text-[11px] text-slate-500">
+                                                Monthly summaries: statement totals for a whole month, not refuelling events
+                                            </p>
+                                            <table className="w-full text-left text-xs">
+                                                <thead className="border-b border-slate-200 text-[11px] text-slate-500">
+                                                    <tr>
+                                                        <th scope="col" className="px-3.5 py-2 font-medium">Reporting month</th>
+                                                        <th scope="col" className="px-3.5 py-2 font-medium">Product</th>
+                                                        <th scope="col" className="px-3.5 py-2 font-medium text-right">Quantity (L)</th>
+                                                        <th scope="col" className="px-3.5 py-2 font-medium text-right">Total (AED)</th>
+                                                        <th scope="col" className="px-3.5 py-2 font-medium">Import</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-slate-100">
+                                                    {monthlySummaries.map((s) => (
+                                                        <tr key={`${s.source_table}-${s.id}`}>
+                                                            <td className="px-3.5 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
+                                                                {formatReportingMonth(s.reporting_month)}
+                                                            </td>
+                                                            <td className="px-3.5 py-2.5 text-slate-700 whitespace-nowrap">{fuelTypeLabel(s.fuel_type)}</td>
+                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-slate-900 whitespace-nowrap">
+                                                                {formatNumber(s.litres, 1)}
+                                                            </td>
+                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-emerald-800 whitespace-nowrap">
+                                                                {s.total_cost != null ? `AED ${formatNumber(s.total_cost, 2)}` : "—"}
+                                                            </td>
+                                                            <td className="px-3.5 py-2.5 text-slate-500 whitespace-nowrap text-[11px]">#{s.import_id ?? "—"}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
                                 </div>
                             )}
 

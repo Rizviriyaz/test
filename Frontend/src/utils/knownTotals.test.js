@@ -99,18 +99,18 @@ test("Idle analytics labels its event figures as Wialon engine-on periods, not c
     // Verified live 2026-10-27: an Engine Hours sub-row is an engine-on period (69% also include driving) whose
     // Idling cell may add up several idle stops, so the event KPIs must not read as single idle stops
     const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
-    assert.match(page, /\(eventsNote \|\| "Engine-on periods with idling"\)/)
-    assert.match(page, /Per engine-on period with idling/)
-    assert.match(page, /<span>Most Idle in One Period<\/span>/)
+    assert.match(page, /sub=\{eventsPending \? "Loading events…" : eventsNote\}/)
+    assert.match(page, /label="Most Idle in One Period"/)
+    assert.match(page, /Most idle time Wialon reports within one engine-on period/)
     assert.doesNotMatch(page, /<span>Longest Idle<\/span>|Per idle occurrence|"Recorded in period"/)
 })
 
 test("Idle analytics labels trend, hotspots and the event list when events are partial", () => {
     const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
     assert.match(page, /const eventsNote = eventsPending \? "Loading idle events…" : partialEventsNote\(analytics\)/)
-    // The trend shows the partial-events note in place of its default subtitle
-    assert.match(page, /title="Idle Duration Trend"\s+subtitle=\{eventsNote \|\| "Idle minutes by start time of each engine-on period"\}/)
-    assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : "Top 10 start locations of engine-on periods with idling"\}/)
+    // The trend shows the partial-events note as its only subtitle
+    assert.match(page, /title="Idle Duration Trend"\s+subtitle=\{eventsNote \|\| undefined\}/)
+    assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : undefined\}/)
     assert.match(page, /subtitle=\{eventsNote \? `Ranked idle locations · \$\{eventsNote\}` : /, "hotspot table note")
     assert.equal((page.match(/\{eventsNote && \(/g) || []).length, 1, "event list note")
     assert.match(page, /\{eventsPending \? "…" : \(kpis\.idle_event_count \?\? "—"\)\}/,

@@ -16,15 +16,16 @@ const REASON_EXPLANATIONS = {
     partial_period_summary: "Monthly total whose reporting month is only partly inside the selected range; select whole months to include it.",
     summary_dated_overlap: "This vehicle-month has both a monthly-summary total and dated transactions, and no import confirms full-month dated coverage; all its rows are excluded to avoid double counting.",
     summary_superseded_by_dated: "Monthly total for a vehicle-month that a full-month dated statement covers; the dated transactions are used instead.",
+    dated_superseded_by_summary: "Dated transaction for a vehicle-month that has a monthly-summary total. The monthly summary takes precedence, so this row is excluded and the month is counted once.",
 }
 
 const AMBIGUITY_EXPLANATIONS = {
     plate_code_conflict: "Matches this Wialon unit by registration number only, and other plate codes share that number; not attributed.",
 }
 
-// A filter tab can cover several reasons: "Overlaps" lists unresolved conflicts and resolved (superseded) summaries,
-// which keep their own label, colour and explanation
-const TAB_REASONS = { overlaps: ["summary_dated_overlap", "summary_superseded_by_dated"] }
+// A filter tab can cover several reasons: "Overlaps" lists dated rows a monthly summary superseded, plus the reasons of
+// the earlier overlap rule, each with its own label, colour and explanation
+const TAB_REASONS = { overlaps: ["dated_superseded_by_summary", "summary_dated_overlap", "summary_superseded_by_dated"] }
 const matchesTab = (tab, reason) => tab === "all" || (TAB_REASONS[tab] || [tab]).includes(reason)
 
 const explanationOf = (g) => AMBIGUITY_EXPLANATIONS[g.ambiguity_reason] || REASON_EXPLANATIONS[g.reason]
@@ -257,7 +258,7 @@ export default function ExcludedFuelPanel() {
                                                         ? "bg-slate-100 text-slate-700"
                                                         : g.reason === "ambiguous"
                                                             ? "bg-amber-100 text-amber-800"
-                                                            : g.reason === "summary_superseded_by_dated"
+                                                            : g.reason === "summary_superseded_by_dated" || g.reason === "dated_superseded_by_summary"
                                                                 ? "bg-emerald-50 text-emerald-800"
                                                                 : "bg-rose-100 text-rose-800"
                                                 }`}>

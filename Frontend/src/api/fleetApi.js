@@ -407,12 +407,14 @@ export async function getFuelVehicleDistance(params = {}, options = {}) {
 }
 
 // Optional import choices as form fields: column mapping, reporting month (statements without a date column),
-// explicit confirmation of ambiguous columns, whole-month statement period, and the replace count the preview showed.
-function appendImportOptions(formData, { mapping, reportingMonth, mappingConfirmed, extendToFullMonths, expectedReplaceCount } = {}) {
+// explicit confirmation of ambiguous columns, whole-month statement period, what a date shared by every row means
+// ("dated" or "monthly_summary"), and the replace count the preview showed.
+function appendImportOptions(formData, { mapping, reportingMonth, mappingConfirmed, extendToFullMonths, singleDateMode, expectedReplaceCount } = {}) {
     if (mapping) formData.append("mapping", typeof mapping === "string" ? mapping : JSON.stringify(mapping))
     if (reportingMonth) formData.append("reporting_month", reportingMonth)
     if (mappingConfirmed) formData.append("mapping_confirmed", "true")
     if (extendToFullMonths) formData.append("extend_to_full_months", "true")
+    if (singleDateMode) formData.append("single_date_mode", singleDateMode)
     if (Number.isInteger(expectedReplaceCount)) formData.append("expected_replace_count", String(expectedReplaceCount))
 }
 
@@ -466,5 +468,10 @@ export async function getVehicleFuelDetail(params = {}, options = {}) {
 
 export async function getFuelTransactions(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`, options, 30000)
+}
+
+// Monthly-summary totals in the KPI scope, by reporting month (never by a refuelling date)
+export async function getFuelMonthlySummaries(params = {}, options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/monthly-summaries${buildFuelQueryString(params)}`, options, 30000)
 }
 

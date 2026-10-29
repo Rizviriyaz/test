@@ -8,10 +8,11 @@ Every fetched transaction lands in exactly one bucket:
   - suspected_duplicate  identical fingerprint to a row from a DIFFERENT import -> excluded, reported
   - partial_period_summary  monthly-summary row (FUEL_IMPORT_REPLACE) whose reporting month is only partly inside
                          the requested range -> excluded, reported: a month's total is never split by day
-  - summary_dated_overlap / summary_superseded_by_dated  a Wialon unit-month holding both monthly-summary and dated
-                         rows (identifiers of one unit combined, whatever import or flag state wrote them): without
-                         confirmed full-month dated coverage both are excluded; with it only the summary is
-                         (resolve_summary_overlaps). Reported per unit-month in excluded_scope.overlap_conflicts.
+  - dated_superseded_by_summary  dated rows of a Wialon unit-month that also has monthly-summary rows (identifiers of
+                         one unit combined, whatever import or flag state wrote them): the monthly summary takes
+                         precedence, so the dated rows are excluded and reported (resolve_summary_overlaps); monthly
+                         and daily fuel are never counted together. Reported per unit-month in
+                         excluded_scope.overlap_conflicts; the bucket is excluded_scope.summary_dated_overlap.
 
 Reconciliation invariant (count, litres and cost separately, refunds signed):
   kpi + unmatched + ambiguous + suspected_duplicates + partial_period_summary + summary_dated_overlap
@@ -32,7 +33,12 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.fuel.db import build_fingerprint, replace_enabled
-from app.fuel.reporting_period import covers, is_monthly_summary, month_bounds, summary_month_bounds
+from app.fuel.reporting_period import (
+    is_monthly_summary,
+    is_summary_table_row,
+    month_bounds,
+    summary_month_bounds,
+)
 from app.fuel.wialon_distance import (
     MATCH_NUMBER_ONLY,
     match_fuel_vehicle_to_wialon,
@@ -47,11 +53,14 @@ REASON_UNMATCHED = "unmatched"
 REASON_AMBIGUOUS = "ambiguous"
 REASON_DUPLICATE = "suspected_duplicate"
 REASON_PARTIAL_SUMMARY = "partial_period_summary"
-REASON_OVERLAP = "summary_dated_overlap"                  # coverage unconfirmed: summary and dated rows excluded
-REASON_SUMMARY_SUPERSEDED = "summary_superseded_by_dated"  # full-month dated coverage confirmed: summary excluded
+REASON_DATED_SUPERSEDED = "dated_superseded_by_summary"   # the unit-month's monthly summary takes precedence
+# Reasons of the earlier overlap rule (dated rows used with confirmed coverage, else both excluded). No longer
+# produced; kept so stored filters and clients that name them stay valid.
+REASON_OVERLAP = "summary_dated_overlap"
+REASON_SUMMARY_SUPERSEDED = "summary_superseded_by_dated"
 AMBIGUITY_PLATE_CODE_CONFLICT = "plate_code_conflict"
 EXCLUDED_REASONS = (REASON_UNMATCHED, REASON_AMBIGUOUS, REASON_DUPLICATE, REASON_PARTIAL_SUMMARY,
-                    REASON_OVERLAP, REASON_SUMMARY_SUPERSEDED)
+                    REASON_DATED_SUPERSEDED, REASON_OVERLAP, REASON_SUMMARY_SUPERSEDED)
 
 NO_TRANSACTIONS_WARNING = (
     "No fuel transactions in the selected scope; KPIs are empty and Wialon was not queried."
@@ -200,9 +209,13 @@ def _suspected_duplicate_flags(transactions: List[Dict[str, Any]]) -> List[bool]
     True for rows whose fingerprint equals a row from a different import_id. Per fingerprint the
     lowest id (else first fetched) is kept; rows from the keeper's own import are kept as well,
     because the importer already de-duplicates within one file.
+    fuel_monthly_summaries rows are not compared: their ids are another sequence, and one vehicle-month keeps the
+    summaries of a single import (fuel_commit_import_v2 supersedes the earlier ones).
     """
     groups: Dict[str, List[int]] = {}
     for i, tx in enumerate(transactions):
+        if is_summary_table_row(tx):
+            continue
         groups.setdefault(_row_fingerprint(tx), []).append(i)
     flags = [False] * len(transactions)
     for idxs in groups.values():
@@ -423,50 +436,59 @@ def split_partial_period_summaries(
     return kept, partial, warnings
 
 
-def _summary_after_range_warning(db_filters: Dict[str, Any],
-                                 fetch_fn: Callable[[Dict[str, Any]], List[Dict[str, Any]]]) -> List[str]:
+def _summaries_after_range(db_filters: Dict[str, Any],
+                           fetch_fn: Callable[[Dict[str, Any]], List[Dict[str, Any]]]) -> Tuple[List[str], List[Dict[str, Any]]]:
     """
-    Warning when the range ends before the last day of its month and that month has monthly-summary rows: they are
-    dated on the month's last day, so the range does not include them. Reads only that one day.
+    (warnings, summary rows) when the range ends before the last day of its month and that month has monthly-summary
+    rows: they are dated on the month's last day, so the range does not include them, but their dated rows inside the
+    range are still superseded by them (resolve_summary_overlaps). Reads only that one day.
     """
     date_to = str(db_filters.get("date_to") or "")[:10]
     if len(date_to) != 10:
-        return []
+        return [], []
     try:
         last = month_bounds(date.fromisoformat(date_to))[1]
     except ValueError:
-        return []
+        return [], []
     if last.isoformat() == date_to:
-        return []
-    probe = fetch_fn({**db_filters, "date_from": last.isoformat(), "date_to": last.isoformat()}) or []
-    if not any(is_monthly_summary(r) for r in probe):
-        return []
+        return [], []
+    probe = [r for r in fetch_fn({**db_filters, "date_from": last.isoformat(), "date_to": last.isoformat()}) or []
+             if is_monthly_summary(r)]
+    if not probe:
+        return [], []
     return [f"Monthly-summary data for {last.strftime('%B %Y')} is not included: the selected range ends before "
-            f"{last.isoformat()}, the reporting date of that month's totals. Select whole months to include it."]
+            f"{last.isoformat()}, the reporting date of that month's totals. Select whole months to include it."], probe
+
+
+def _summary_unit_months(rows: Iterable[Dict[str, Any]], resolver: "UnitResolver") -> List[Tuple[int, str]]:
+    """(Wialon unit id, 'YYYY-MM') of monthly-summary rows outside the KPI scope that resolve to exactly one unit."""
+    out = []
+    for r in rows:
+        bounds = summary_month_bounds(r)
+        res = resolver.resolve(_identifier(r))
+        if bounds and res["status"] == "matched":
+            out.append((int(res["unit_id"]), bounds[0].strftime("%Y-%m")))
+    return out
 
 
 # ─── Monthly summaries overlapping dated transactions ──────────────────────────
 
 CoverageFn = Callable[[Iterable[Any]], Dict[int, Dict[str, Any]]]
+OVERLAP_SUMMARY_PRECEDENCE = "summary_used_dated_excluded"
+# Resolutions of the earlier rule; no longer produced
 OVERLAP_UNCONFIRMED = "excluded_coverage_unconfirmed"
 OVERLAP_DATED_CONFIRMED = "dated_used_coverage_confirmed"
 
 
-def _import_key(value: Any) -> Optional[int]:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def resolve_summary_overlaps(part: ScopePartition, coverage_fn: Optional[CoverageFn] = None) -> List[str]:
+def resolve_summary_overlaps(part: ScopePartition, coverage_fn: Optional[CoverageFn] = None,
+                             summary_unit_months: Iterable[Tuple[int, str]] = ()) -> List[str]:
     """
     A Wialon unit-month (identifiers of one unit combined) holding both monthly-summary and dated matched rows would
-    count that month's fuel twice. When one of the dated rows' imports confirms full-month coverage of the month
-    (reporting_period.covers), the dated rows are used and the summary rows are excluded (summary_superseded_by_dated);
-    otherwise every row of the unit-month is excluded (summary_dated_overlap), since neither set is proven complete.
-    Rows are moved to part.summary_overlap, never changed or deleted. coverage_fn (import ids -> metadata) is called
-    only when an overlap exists. Returns warnings.
+    count that month's fuel twice. The monthly summary takes precedence: its rows stay in the KPI scope and the dated
+    rows are excluded (dated_superseded_by_summary), the rule the importer applies per vehicle-month. Rows are moved
+    to part.summary_overlap, never changed or deleted. summary_unit_months adds (unit id, 'YYYY-MM') pairs whose
+    summary is outside the KPI scope only because the range splits its month (partial_period_summary): their dated
+    rows are superseded all the same. coverage_fn is not needed by this rule (kept for callers). Returns warnings.
     """
     groups: Dict[Tuple[int, str], Dict[str, List[Dict[str, Any]]]] = {}
     for r in part.matched:
@@ -475,21 +497,13 @@ def resolve_summary_overlaps(part: ScopePartition, coverage_fn: Optional[Coverag
             continue
         g = groups.setdefault((int(r["_unit_id"]), d[:7]), {"summary": [], "dated": []})
         g["summary" if is_monthly_summary(r) else "dated"].append(r)
-    conflicts = {k: g for k, g in groups.items() if g["summary"] and g["dated"]}
+    outside = set(summary_unit_months)
+    conflicts = {k: g for k, g in groups.items() if g["dated"] and (g["summary"] or k in outside)}
     if not conflicts:
         return []
-    import_ids = {_import_key(r.get("import_id")) for g in conflicts.values() for r in g["dated"]}
-    meta = coverage_fn({i for i in import_ids if i is not None}) if coverage_fn else {}
     moved: Dict[int, Tuple[str, str]] = {}  # id(row) -> (reason, resolution)
-    confirmed = unconfirmed = 0
-    for (uid, month), g in conflicts.items():
-        first, last = month_bounds(date.fromisoformat(f"{month}-01"))
-        if any(covers(meta.get(_import_key(r.get("import_id"))), first, last) for r in g["dated"]):
-            confirmed += 1
-            moved.update({id(r): (REASON_SUMMARY_SUPERSEDED, OVERLAP_DATED_CONFIRMED) for r in g["summary"]})
-        else:
-            unconfirmed += 1
-            moved.update({id(r): (REASON_OVERLAP, OVERLAP_UNCONFIRMED) for r in g["summary"] + g["dated"]})
+    for g in conflicts.values():
+        moved.update({id(r): (REASON_DATED_SUPERSEDED, OVERLAP_SUMMARY_PRECEDENCE) for r in g["dated"]})
     kept: List[Dict[str, Any]] = []
     for r in part.matched:
         hit = moved.get(id(r))
@@ -501,18 +515,9 @@ def resolve_summary_overlaps(part: ScopePartition, coverage_fn: Optional[Coverag
                                          _overlap_unit_id=r["_unit_id"], _overlap_unit_name=r.get("_unit_name"),
                                          _overlap_month=tx_local_date(r.get("transaction_date"))[:7]))
     part.matched = kept
-    warnings = []
-    if unconfirmed:
-        warnings.append(f"{unconfirmed} unit-month(s) have both monthly-summary and dated fuel rows and no confirmed "
-                        "full-month dated statement coverage; all their rows are excluded from KPIs (see "
-                        "excluded_scope.overlap_conflicts). Re-import a complete statement to resolve them.")
-    if confirmed:
-        warnings.append(f"{confirmed} unit-month(s) have both monthly-summary and dated fuel rows; a dated import "
-                        "confirms full-month coverage, so the dated rows are used and the monthly-summary rows excluded.")
-    if unconfirmed and not replace_enabled():
-        warnings.append("Import coverage metadata is unavailable (FUEL_IMPORT_REPLACE is off), so no dated "
-                        "statement can be confirmed as covering a whole month.")
-    return warnings
+    return [f"{len(conflicts)} unit-month(s) have both a monthly summary and dated fuel rows; the monthly summary "
+            "takes precedence and the dated rows are excluded from KPIs (see excluded_scope.overlap_conflicts). "
+            "Nothing was deleted."]
 
 
 def overlap_conflicts(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -643,13 +648,16 @@ def build_scope(
         warn = [f"No fuel transactions match vehicle '{vehicle_value}' exactly."] + filter_warnings
         return ScopeContext(empty, resolver, sid, build_excluded_scope(empty, warn), warn, len(raw))
     rows, partial, summary_warnings = split_partial_period_summaries(rows, filters.get("date_from"))
+    after: List[Dict[str, Any]] = []
     if replace_enabled():
-        summary_warnings += _summary_after_range_warning(db_filters, fetch_fn)
+        after_warnings, after = _summaries_after_range(db_filters, fetch_fn)
+        summary_warnings += after_warnings
     base = partition_transactions(rows, resolver)
     base.partial_period_summary = partial
     base.warnings.extend(summary_warnings)
-    # Before the fuel-type filter: an overlap is a unit-month property, whatever fuel types its rows carry
-    base.warnings.extend(resolve_summary_overlaps(base, coverage_fn))
+    # Before the fuel-type filter: an overlap is a unit-month property, whatever fuel types its rows carry. Summaries
+    # the range splits are not counted, but they still supersede their unit-month's dated rows.
+    base.warnings.extend(resolve_summary_overlaps(base, coverage_fn, _summary_unit_months(partial + after, resolver)))
     part, mixed = apply_fuel_type(base, fuel_type)
     if fuel_type and not part.all_rows():
         part.warnings.append(f"No fuel transactions of type '{fuel_type}' in the selected scope.")
@@ -672,7 +680,7 @@ def summarize_excluded(
             "vehicle_identifier": key[1], "reason": rsn, "candidate_unit_names": list(r.get("_candidates") or []),
             "ambiguity_reason": r.get("_ambiguity"),
             "transaction_count": 0, "_l": Decimal(0), "_c": Decimal(0), "first_date": None, "last_date": None,
-            "transaction_ids": [],
+            "transaction_ids": [], "summary_ids": [],
         })
         g["transaction_count"] += 1
         g["_l"] += _dec(r.get("litres"))
@@ -683,6 +691,8 @@ def summarize_excluded(
             g["last_date"] = max(filter(None, [g["last_date"], d]))
         if r.get("id") is not None and len(g["transaction_ids"]) < 50:
             g["transaction_ids"].append(r.get("id"))
+        elif is_summary_table_row(r) and r.get("summary_id") is not None and len(g["summary_ids"]) < 50:
+            g["summary_ids"].append(r.get("summary_id"))
     out = []
     for g in groups.values():
         g["litres"] = _q2(g.pop("_l"))

@@ -146,38 +146,33 @@ def test_failed_import_leaves_visible_data_unchanged():
 
 
 def test_daily_and_summary_never_mix_for_a_vehicle_month():
-    from app.fuel.importer import FuelImportError
-    # Daily first, then a September summary for the same vehicles: refused, September untouched
+    # Daily first, then a September summary for AUH 44120: its September daily rows are replaced (kept in the table)
     db = FakeReplaceDB()
     dated_import(db, SEPT)
-    before = db.snapshot()
-    try:
-        summary_import(db, [["AUH 44120", 900.0, 2790.0]], "2026-09", "sept_summary.xlsx")
-        raise AssertionError("expected 409")
-    except FuelImportError as exc:
-        assert exc.status_code == 409 and "Daily transactions already exist for AUH 44120 2026-09" in exc.message, exc.message
-    assert db.snapshot() == before
+    res = summary_import(db, [["AUH 44120", 900.0, 2790.0]], "2026-09", "sept_summary.xlsx")
+    assert res.committed and res.rows_replaced == 2 and res.rows_imported == 1, res
+    sept = sorted((r["vehicle_identifier"], r["date_basis"], r["litres"]) for r in month_rows(db, "2026-09"))
+    assert sept == [("AUH 44120", "reporting_month_end", 900.0), ("DXB 10293", "transaction", 80.0),
+                    ("DXB 10293", "transaction", 95.0), ("SHJ 88211", "transaction", 45.0)], sept
+    assert len(db.rows) == 6, "superseded daily rows stay in the table for audit"
 
-    # Summary first, then daily rows for that vehicle-month: refused until whole months are confirmed
+    # Summary first, then daily rows for that vehicle-month: the summary is kept and the daily rows are skipped,
+    # while the file's other vehicle-month (September) is imported
     db = FakeReplaceDB()
     summary_import(db, AUGUST, "2026-08")
-    before = db.snapshot()
-    aug_daily = [[datetime(2026, 8, 5, 9, 0), "DXB 10293", "Diesel", 60.0, 3.0, 180.0, "A-5"]]
-    try:
-        dated_import(db, aug_daily, "aug_daily.xlsx")
-        raise AssertionError("expected 409")
-    except FuelImportError as exc:
-        assert exc.status_code == 409 and "A monthly summary already exists for DXB 10293 2026-08" in exc.message, exc.message
-    assert db.snapshot() == before
-    with replace_env(db):
-        res = execute_fuel_import(xlsx(DATED_HEADERS, aug_daily), "aug_daily.xlsx", DATED_MAP, USER,
-                                  extend_to_full_months=True)
-    assert res.committed and res.rows_replaced == 1, res
+    aug_daily = [[datetime(2026, 8, 5, 9, 0), "DXB 10293", "Diesel", 60.0, 3.0, 180.0, "A-5"],
+                 [datetime(2026, 9, 5, 9, 0), "DXB 10293", "Diesel", 70.0, 3.0, 210.0, "S-5"]]
+    for extend in (False, True):
+        with replace_env(db):
+            res = execute_fuel_import(xlsx(DATED_HEADERS, aug_daily), "aug_daily.xlsx", DATED_MAP, USER,
+                                      extend_to_full_months=extend)
+        assert res.committed and res.rows_skipped_monthly_summary == 1 and res.rows_replaced == 0, res
     aug = sorted((r["vehicle_identifier"], r["date_basis"], r["litres"]) for r in month_rows(db, "2026-08"))
-    assert aug == [("AUH 44120", "reporting_month_end", 2310.5), ("DXB 10293", "transaction", 60.0),
+    assert aug == [("AUH 44120", "reporting_month_end", 2310.5), ("DXB 10293", "reporting_month_end", 1840.0),
                    ("SHJ 88211", "reporting_month_end", 610.25)], aug
-    print("[PASS] Daily then summary is refused; summary then daily is refused until whole months are confirmed, "
-          "then replaces only that vehicle's summary.")
+    assert [r["litres"] for r in month_rows(db, "2026-09")] == [70.0]
+    print("[PASS] Daily then summary: the summary replaces that vehicle-month; summary then daily: the summary is "
+          "kept and only the file's other vehicle-months import.")
 
 
 TESTS = [

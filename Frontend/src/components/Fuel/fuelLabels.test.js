@@ -191,11 +191,13 @@ test("monthly page: \"View Daily Transactions\" needs dated rows; idle ranking k
     assert.match(daily, /coverage_note/)
 })
 
-test("excluded panel: Overlaps tab lists unresolved and superseded rows, labelled apart", () => {
+test("excluded panel: Overlaps tab lists dated rows a monthly summary superseded, labelled apart", () => {
     const panel = read("./ExcludedFuelPanel.jsx")
-    assert.match(panel, /overlaps: \["summary_dated_overlap", "summary_superseded_by_dated"\]/)
+    assert.match(panel, /overlaps: \["dated_superseded_by_summary", "summary_dated_overlap", "summary_superseded_by_dated"\]/)
+    assert.match(EXCLUDED_REASON_LABELS.dated_superseded_by_summary, /superseded by monthly summary/)
     assert.notEqual(EXCLUDED_REASON_LABELS.summary_dated_overlap, EXCLUDED_REASON_LABELS.summary_superseded_by_dated)
-    assert.match(panel, /summary_superseded_by_dated"\s*\?\s*"bg-emerald-50/)
+    assert.match(panel, /"dated_superseded_by_summary"\s*\?\s*"bg-emerald-50/)
+    assert.match(panel, /dated_superseded_by_summary: "Dated transaction for a vehicle-month that has a monthly-summary total/)
 })
 
 test("leaderboard: unknown distance is never labelled as zero distance", () => {

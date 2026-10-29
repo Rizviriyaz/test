@@ -229,81 +229,73 @@ def assert_reconciles(s):
     assert round(sum(ex[b]["cost"] for b in buckets), 2) == ex["all_cost"]
 
 
-def test_overlap_through_identifier_alias_is_excluded_without_coverage():
+def test_monthly_summary_supersedes_dated_rows_of_an_identifier_alias():
+    # "auh 44120" resolves to the summary's unit: the summary (500 L) wins, the alias' dated rows (100.75 L) are excluded
     s, calls = overlap_scope(coverage={})
     ex = s.excluded_scope
-    assert {r["vehicle_identifier"] for r in s.matched} == {"DXB 10293"}, [r["id"] for r in s.matched]
-    assert calculate_fuel_summary(s.matched).total_litres == 100.0  # neither the summary nor the dated rows counted
-    assert ex["summary_dated_overlap"]["transaction_count"] == 3 and ex["summary_dated_overlap"]["litres"] == 600.75
+    assert sorted(r["id"] for r in s.matched) == [10, 11, 12], [r["id"] for r in s.matched]
+    assert calculate_fuel_summary(s.matched).total_litres == 600.0, "summary + other vehicle; never 700.75"
+    assert ex["summary_dated_overlap"]["transaction_count"] == 2 and ex["summary_dated_overlap"]["litres"] == 100.75
     (c,) = ex["overlap_conflicts"]
-    assert (c["wialon_unit_id"], c["month"], c["resolution"]) == (1, "2026-08", "excluded_coverage_unconfirmed"), c
-    assert c["excluded_summary"]["litres"] == 500.0 and c["excluded_dated"]["litres"] == 100.75
-    assert c["excluded_dated"]["cost"] == 302.3 and c["identifiers"] == ["AUH 44120", "auh 44120"]
-    assert calls == [[4]] and any("no confirmed full-month dated statement coverage" in w for w in s.warnings)
+    assert (c["wialon_unit_id"], c["month"], c["resolution"]) == (1, "2026-08", "summary_used_dated_excluded"), c
+    assert c["excluded_summary"]["litres"] == 0.0 and c["excluded_dated"]["litres"] == 100.75
+    assert c["identifiers"] == ["auh 44120"] and ex["monthly_summary_rows"] == 1
+    assert calls == [] and any("monthly summary takes precedence" in w for w in s.warnings)
+    assert {r["_exclusion_reason"] for r in s.partition.summary_overlap} == {"dated_superseded_by_summary"}
     assert_reconciles(s)
-    groups = summarize_excluded(s.partition, "summary_dated_overlap")
-    assert sum(g["transaction_count"] for g in groups) == 3
-    print("[PASS] Overlap across identifier aliases (one unit): all 3 rows excluded and reported; KPIs reconcile.")
+    groups = summarize_excluded(s.partition, "dated_superseded_by_summary")
+    assert sum(g["transaction_count"] for g in groups) == 2
+    print("[PASS] Alias overlap (one unit): the monthly summary is kept, the dated rows are excluded; KPIs reconcile.")
 
 
-def test_confirmed_full_month_coverage_uses_dated_rows():
-    s, _ = overlap_scope(coverage={4: FULL_MONTH})
-    ex = s.excluded_scope
-    assert sorted(r["id"] for r in s.matched) == [11, 12, 21, 22]
-    assert ex["summary_dated_overlap"]["transaction_count"] == 1 and ex["summary_dated_overlap"]["litres"] == 500.0
-    assert ex["overlap_conflicts"][0]["resolution"] == "dated_used_coverage_confirmed"
-    assert {r["_exclusion_reason"] for r in s.partition.summary_overlap} == {"summary_superseded_by_dated"}
-    assert ex["monthly_summary_rows"] == 0 and calculate_fuel_summary(s.matched).total_litres == 200.75
-    assert_reconciles(s)
-    print("[PASS] Confirmed full-month dated coverage: the dated rows are used and only the summary is excluded.")
-
-
-def test_incomplete_coverage_evidence_never_confirms():
-    first_last = {**FULL_MONTH, "replace_scope": {**FULL_MONTH["replace_scope"], "extended_to_full_months": False}}
-    with_errors = {**FULL_MONTH, "status": "completed_with_errors"}
-    part_month = {**FULL_MONTH, "replace_scope": {**FULL_MONTH["replace_scope"], "period_to": "2026-08-20"}}
-    summary_import = {**FULL_MONTH, "import_mode": "monthly_summary"}
-    for meta in (first_last, with_errors, part_month, summary_import, {"status": "completed"}):
-        s, _ = overlap_scope(coverage={4: meta})
-        assert s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 3, meta
-        assert s.excluded_scope["overlap_conflicts"][0]["resolution"] == "excluded_coverage_unconfirmed"
-    print("[PASS] First/last dates, errors, part-month, summary imports or missing scope never confirm coverage.")
-
-
-def test_legacy_overlap_and_flag_off():
+def test_dated_coverage_and_flags_never_override_the_summary():
+    for coverage, replace in (({4: FULL_MONTH}, "1"), ({}, "1"), ({4: FULL_MONTH}, "")):
+        s, _ = overlap_scope(coverage=coverage, replace=replace)
+        assert sorted(r["id"] for r in s.matched) == [10, 11, 12], (coverage, replace)
+        assert s.excluded_scope["overlap_conflicts"][0]["resolution"] == "summary_used_dated_excluded"
     legacy = [{"id": 31, "import_id": 1, "transaction_date": "2026-08-09T09:00:00", "vehicle_identifier": "AUH 44120",
-               "litres": 45.0, "total_cost": 135.0, "fuel_type": "Diesel"}]  # pre-SQL row: no date_basis, no metadata
+               "litres": 45.0, "total_cost": 135.0, "fuel_type": "Diesel"}]  # pre-SQL row: no date_basis
     s, _ = overlap_scope(coverage={}, extra=legacy)
-    assert s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 2 and len(s.matched) == 2
+    assert s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 1 and len(s.matched) == 3
     assert_reconciles(s)
-    from app.fuel.db import fetch_import_coverage  # flag off: no metadata columns, so no read and nothing confirmed
-    with patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": ""}):
-        assert fetch_import_coverage([1, 4]) == {}
-    s, _ = overlap_scope(coverage={4: FULL_MONTH}, replace="", extra=legacy)
-    assert s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 2
-    assert any("FUEL_IMPORT_REPLACE is off" in w for w in s.warnings)
-    print("[PASS] Legacy dated rows overlapping a summary are excluded; with the flag off nothing can be confirmed.")
+    print("[PASS] Confirmed dated coverage, flag state or legacy rows never override a monthly summary.")
 
 
-def test_overlap_is_unit_month_wide_and_read_only_when_needed():
-    s, calls = overlap_scope(coverage={}, fuel_type="Super")
+def test_summary_split_by_the_range_still_supersedes_its_dated_rows():
+    rows = ROWS + ALIAS_DATED
+
+    def fetch(filters):
+        lo, hi = filters.get("date_from") or "0000", filters.get("date_to") or "9999"
+        return [dict(r) for r in rows if lo <= str(r["transaction_date"])[:10] <= hi]
+
+    with patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}):
+        starts_mid = build_scope({"date_from": "2026-08-06", "date_to": "2026-08-31"}, fetch, lambda: "sid", lambda sid: UNITS)
+        ends_early = build_scope({"date_from": "2026-08-01", "date_to": "2026-08-30"}, fetch, lambda: "sid", lambda sid: UNITS)
+    for s in (starts_mid, ends_early):
+        assert not any(r["vehicle_identifier"] == "auh 44120" for r in s.matched), [r["id"] for r in s.matched]
+        assert not any(r.get("date_basis") == "reporting_month_end" for r in s.matched), "the split summary is not counted"
+        assert s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 2
+    print("[PASS] A summary the range splits is not counted, and its unit-month's dated rows stay superseded.")
+
+
+def test_overlap_is_unit_month_wide_and_months_are_independent():
+    s, _ = overlap_scope(coverage={}, fuel_type="Super")
     assert s.matched == [] and s.excluded_scope["summary_dated_overlap"]["transaction_count"] == 1  # the Super row
-    no_overlap, calls = overlap_scope(coverage={}, extra=[])
-    assert calls == [] and no_overlap.excluded_scope["overlap_conflicts"] == []
+    no_overlap, _ = overlap_scope(coverage={}, extra=[])
+    assert no_overlap.excluded_scope["overlap_conflicts"] == []
     sept = [{**ALIAS_DATED[0], "id": 41, "transaction_date": "2026-09-03T09:00:00"}]
-    other_month, calls = overlap_scope(coverage={}, extra=sept)
-    assert calls == [] and other_month.excluded_scope["summary_dated_overlap"]["transaction_count"] == 0
+    other_month, _ = overlap_scope(coverage={}, extra=sept)
+    assert other_month.excluded_scope["summary_dated_overlap"]["transaction_count"] == 0
     from app.fuel.scope import EXCLUDED_REASONS
-    assert {"summary_dated_overlap", "summary_superseded_by_dated"} <= set(EXCLUDED_REASONS)
-    print("[PASS] Overlap judged per unit-month across fuel types; coverage read only when an overlap exists.")
+    assert "dated_superseded_by_summary" in EXCLUDED_REASONS
+    print("[PASS] Precedence is judged per unit-month across fuel types; other months are untouched.")
 
 
 TESTS += [
-    test_overlap_through_identifier_alias_is_excluded_without_coverage,
-    test_confirmed_full_month_coverage_uses_dated_rows,
-    test_incomplete_coverage_evidence_never_confirms,
-    test_legacy_overlap_and_flag_off,
-    test_overlap_is_unit_month_wide_and_read_only_when_needed,
+    test_monthly_summary_supersedes_dated_rows_of_an_identifier_alias,
+    test_dated_coverage_and_flags_never_override_the_summary,
+    test_summary_split_by_the_range_still_supersedes_its_dated_rows,
+    test_overlap_is_unit_month_wide_and_months_are_independent,
 ]
 
 

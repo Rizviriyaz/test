@@ -32,9 +32,16 @@ export function isReportingMonth(value) {
     return /^\d{4}-(0[1-9]|1[0-2])$/.test(String(value ?? ""))
 }
 
-// The month in the form is the one the preview was computed for (always true for dated statements)
+// Every row carries one identical date: the user must say whether it is a monthly reporting date or real refuel dates
+export function needsSingleDateChoice(preview) {
+    return Boolean(preview?.single_date)
+}
+
+// The month in the form is the one the preview was computed for (always true for dated statements; for a single-date
+// statement confirmed as a monthly summary, only an explicitly chosen month is checked)
 export function reportingMonthInSync(preview, reportingMonth) {
-    if (!needsReportingMonth(preview)) return true
+    const singleDateMonth = preview?.single_date_mode === "monthly_summary" && Boolean(reportingMonth)
+    if (!needsReportingMonth(preview) && !singleDateMonth) return true
     return String(reportingMonth ?? "") === String(preview.reporting_month ?? "")
 }
 
@@ -57,6 +64,7 @@ export function importOptions(preview, { mappingConfirmed = false, extendToFullM
         reportingMonth: preview?.import_mode === "monthly_summary" ? preview.reporting_month : null,
         mappingConfirmed: Boolean(mappingConfirmed),
         extendToFullMonths: Boolean(extendToFullMonths),
+        singleDateMode: needsSingleDateChoice(preview) ? preview.single_date_mode || null : null,
         expectedReplaceCount: Number.isInteger(expected) ? expected : null,
     }
 }
@@ -79,4 +87,17 @@ export function transactionDateLabel(row) {
     if (!isMonthlySummaryRow(row)) return row?.transaction_date ?? "—"
     const day = String(row.transaction_date || "").slice(0, 10)
     return `Monthly summary · reporting date ${formatReportingDate(day)}`
+}
+
+// "2026-07" -> "Jul 2026": a monthly summary is labelled by its reporting month, never by a day
+export function formatReportingMonth(month) {
+    const m = /^(\d{4})-(\d{2})/.exec(String(month || ""))
+    if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return "—"
+    return formatReportingDate(`${m[1]}-${m[2]}-01`).replace(/^1 /, "")
+}
+
+// Date cell of a preview record the import would replace: a stored summary shows only its reporting month
+export function replacementRecordDateLabel(record) {
+    if (record?.date_basis !== "reporting_month_end") return String(record?.transaction_date || "—").slice(0, 16).replace("T", " ")
+    return `Monthly summary ${formatReportingMonth(record.reporting_month || String(record.transaction_date || "").slice(0, 7))}`
 }

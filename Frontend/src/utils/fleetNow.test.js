@@ -143,10 +143,8 @@ test("distance: Trips report precision is kept (no rounding to whole km), unknow
 test("Dashboard wires the Fleet Now rules and shows unavailable data as —", () => {
     const src = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
     assert.match(src, /activeTodaySummary\(filteredVehicles/)
-    assert.match(src, /fleetAlertsCount\(alertsData/)
     // Before the first vehicles response: a skeleton while loading, "—" once it failed; never a fleet of 0
     assert.match(src, /fleetValue = \(count\) => \(vehiclesLoaded \? count : error \? "—" : <Pending \/>\)/)
-    assert.match(src, /alertsCount === null \? "—"/)
     assert.match(src, /distance: distanceAllUnknown \? "—" : formatKm2\(distanceKm\)/)
     assert.doesNotMatch(src, /no signal > 12 h/, "the threshold is server-configurable and not hardcoded in the label")
     assert.doesNotMatch(src, /todayAlerts/, "alerts are not filtered by a vehicle's last-message date")
