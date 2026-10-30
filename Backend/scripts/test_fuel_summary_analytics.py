@@ -310,15 +310,16 @@ AI_TELE = {"by_name": {"AUH 44120": {"mileage_km": 900.0, "idle_seconds": 5400, 
 def test_ai_tools_pass_fuel_type_and_coverage_to_the_scope():
     seen = []
 
-    def spy(filters, *args):
-        seen.append((filters, args[4] if len(args) > 4 else None))
+    def spy(filters, *args, summary_only=False):
+        seen.append((filters, args[4] if len(args) > 4 else None, summary_only))
         return scope("2026-08-01", "2026-08-31")
     with patch("app.fuel.scope.build_scope", side_effect=spy):
         out = ai_tools.tool_get_fuel_summary("2026-08-01", "2026-08-31", fuel_type=" Diesel ")
-    filters, coverage_fn = seen[0]
+    filters, coverage_fn, summary_only = seen[0]
     assert filters["fuel_type"] == "Diesel" and coverage_fn.__name__ == "fetch_import_coverage", seen
+    assert summary_only is True, "AI answers use the dashboard's monthly-summary source"
     assert out["parameters"]["fuel_type"] == "Diesel"  # the effective (trimmed) filter is echoed
-    print("[PASS] AI tools build the dashboard's scope: fuel-type filter and import-coverage reader passed through.")
+    print("[PASS] AI tools build the dashboard's scope: fuel-type filter, import-coverage reader and monthly-summary source.")
 
 
 def test_ai_idle_rate_matches_dashboard_and_is_reported():

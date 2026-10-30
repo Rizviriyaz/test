@@ -193,18 +193,18 @@ def _group_fuel_by_unit(
             g = others.get(vid)
             if g is None:
                 status = tx.get("_exclusion_reason") or resolver.resolve(vid)["status"]
-                g = others[vid] = {"status": status, "litres": Decimal(0), "cost": Decimal(0), "count": 0}
+                g = others[vid] = {"status": status, "litres": Decimal(0), "cost": Decimal(0), "count": 0, "summaries": 0}
         g["litres"] += l
         g["cost"] += c
         g["count"] += 1
         if kind == "unit":
             g["identifiers"][vid] += 1
-            if is_monthly_summary(tx):
-                g["summaries"] += 1
-            elif l < 0:
-                g["refunds"] += 1
-            elif l > 0:
-                g["purchases"] += 1
+        if is_monthly_summary(tx):
+            g["summaries"] += 1
+        elif kind == "unit" and l < 0:
+            g["refunds"] += 1
+        elif kind == "unit" and l > 0:
+            g["purchases"] += 1
     return by_unit, others
 
 
@@ -324,7 +324,9 @@ def calculate_fleet_efficiency(
       - telemetry set : units with distance > 0 or engine hours > 0. These feed hour totals and idle estimates.
     Unknown values (None) are excluded and reported, never counted as 0. A ratio is withheld when the fleet
     distance is below the minimum, or net litres (after refunds) are not positive.
-    KPI scope: transactions resolving to exactly one Wialon unit; unmatched/ambiguous rows go to unmatched_*.
+    KPI scope: transactions resolving to exactly one Wialon unit. Unmatched/ambiguous rows passed in (the scope's
+    unmapped monthly records) count in the fleet fuel totals (total_litres, total_cost, transaction_count) and are
+    reported in unmatched_*; they have no Wialon unit, so they never enter distance, efficiency or idle values.
     """
     tele_by_id, ambiguous_names = index_telematics_by_unit_id(telematics_map, wialon_units, duplicate_names)
     warnings_out: List[str] = list(data_warnings or [])
@@ -332,9 +334,10 @@ def calculate_fleet_efficiency(
     mixed = set(mixed_fuel_unit_ids or [])
 
     fuel_by_unit, excluded_groups = _group_fuel_by_unit(transactions, wialon_units)
-    total_litres = sum((g["litres"] for g in fuel_by_unit.values()), Decimal(0))
-    total_cost = sum((g["cost"] for g in fuel_by_unit.values()), Decimal(0))
-    tx_count = sum(g["count"] for g in fuel_by_unit.values())
+    every_group = list(fuel_by_unit.values()) + list(excluded_groups.values())
+    total_litres = sum((g["litres"] for g in every_group), Decimal(0))
+    total_cost = sum((g["cost"] for g in every_group), Decimal(0))
+    tx_count = sum(g["count"] for g in every_group)
 
     vehicles_telemetry_unknown = vehicles_hours_unknown = 0
     vehicles_with_distance = vehicles_without_distance = 0
@@ -479,7 +482,7 @@ def calculate_fleet_efficiency(
         transaction_count=tx_count,
         dated_purchase_count=sum(g["purchases"] for g in fuel_by_unit.values()),
         refund_count=sum(g["refunds"] for g in fuel_by_unit.values()),
-        monthly_summary_rows=sum(g["summaries"] for g in fuel_by_unit.values()),
+        monthly_summary_rows=sum(g["summaries"] for g in every_group),
         vehicle_count=len(fuel_by_unit),
         matched_vehicle_count=len(fuel_by_unit),
         unmatched_vehicle_count=len(excluded_groups),

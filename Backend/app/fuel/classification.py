@@ -78,14 +78,6 @@ FUEL_SUMMARY = {
     "average_unit_price": DERIVED,
 }
 
-DAILY_FUEL = {
-    "litres": DERIVED,
-    "cost": DERIVED,
-    "dated_purchase_count": RECORDED,
-    "refund_count": RECORDED,
-    "transactions": RECORDED,
-}
-
 WASTE = {
     "total_idle_waste_litres": ESTIMATED,
     "total_idle_waste_cost": ESTIMATED,

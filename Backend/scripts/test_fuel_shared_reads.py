@@ -26,9 +26,12 @@ import app.fuel.db as fuel_db  # noqa: E402
 import app.fuel.routes as routes  # noqa: E402
 from app.utils.ttl_cache import InFlight  # noqa: E402
 
+# August monthly-summary rows: the fuel reporting source the shared scope classifies
 TXS = [
-    {"id": 1, "vehicle_identifier": "V-1", "transaction_date": "2026-08-03T10:00:00", "litres": 50.0, "total_cost": 150.0},
-    {"id": 2, "vehicle_identifier": "V-2", "transaction_date": "2026-08-04T10:00:00", "litres": 40.0, "total_cost": 120.0},
+    {"id": 1, "vehicle_identifier": "V-1", "transaction_date": "2026-08-31T00:00:00", "litres": 50.0, "total_cost": 150.0,
+     "date_basis": "reporting_month_end"},
+    {"id": 2, "vehicle_identifier": "V-2", "transaction_date": "2026-08-31T00:00:00", "litres": 40.0, "total_cost": 120.0,
+     "date_basis": "reporting_month_end"},
 ]
 UNITS = [{"id": 1, "nm": "V-1"}, {"id": 2, "nm": "V-2"}]
 

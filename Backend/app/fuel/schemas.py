@@ -257,36 +257,6 @@ class FuelTrendResponse(BaseModel):
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
 
 
-class DailyFuelItem(BaseModel):
-    date: str = Field(..., description="UAE calendar day (YYYY-MM-DD)")
-    coverage: str = Field(..., description="statement_covered: a committed dated statement confirmed as whole months covers the day for every vehicle in scope (other suppliers not established) | not_covered | future")
-    litres: Optional[float] = Field(None, description="Net dated litres; 0.0 only on a statement_covered day (a zero within the imported statements); null = unknown [Recorded]")
-    cost: Optional[float] = Field(None, description="Net dated cost (AED); null = unknown [Recorded]")
-    dated_purchase_count: Optional[int] = Field(None, description="Dated purchase rows (litres > 0); null = unknown [Recorded]")
-    refund_count: Optional[int] = Field(None, description="Dated refund adjustments; null = unknown [Recorded]")
-    transactions: Optional[int] = Field(None, description="All dated rows of the day; null = unknown [Recorded]")
-    units_covered: int = Field(0, description="Vehicles in scope whose statement coverage includes the day")
-    units_in_scope: int = Field(0, description="Wialon units with fuel rows (any fuel type) in the range")
-
-
-class DailyFuelResponse(BaseModel):
-    date_from: str
-    date_to: str
-    coverage_status: str = Field(..., description="statement_verified (every day statement_covered) | partial | unverified")
-    supplier_completeness: str = Field("not_established", description="Whether every supplier's fuel is represented: never established (no provider metadata on imports)")
-    coverage_note: str = Field("", description="What the coverage proves and does not prove")
-    covered_days: int = 0
-    total_days: int = 0
-    dated_row_count: int = Field(0, description="Dated rows in the KPI scope and range (monthly summaries excluded)")
-    units_in_scope: int = 0
-    coverage_metadata_available: bool = Field(False, description="False without FUEL_IMPORT_REPLACE: import coverage cannot be read, so no day is verified")
-    data: List[DailyFuelItem] = Field(default_factory=list)
-    monthly_summary_excluded: Optional[Dict[str, Any]] = Field(None, description="Monthly-summary rows in range: monthly totals, never placed on a day")
-    data_warnings: List[str] = Field(default_factory=list)
-    excluded_scope: Optional[Dict[str, Any]] = None
-    value_classification: Dict[str, str] = Field(default_factory=dict)
-
-
 class VehicleAnalyticsItem(BaseModel):
     vehicle_identifier: str = Field(..., description="Registration plate or vehicle identifier")
     litres: float = Field(..., description="Total fuel consumption in litres for this vehicle")
@@ -326,9 +296,9 @@ class VehicleDistanceResponse(BaseModel):
 
 
 class FleetEfficiencyResponse(BaseModel):
-    total_litres: float = Field(..., description="Net fuel purchased by vehicles matched to one Wialon unit (KPI scope) [Recorded]")
-    total_cost: float = Field(..., description="Net fuel expenditure of matched vehicles (KPI scope) [Recorded]")
-    transaction_count: int = Field(..., description="All source rows in the KPI scope: dated_purchase_count + refund_count + monthly_summary_rows (+ any legacy zero-litre rows) [Recorded]")
+    total_litres: float = Field(..., description="Fleet net fuel: vehicles matched to one Wialon unit plus unmapped records (unmatched_litres) [Recorded]")
+    total_cost: float = Field(..., description="Fleet net fuel expenditure: matched vehicles plus unmapped records (unmatched_cost) [Recorded]")
+    transaction_count: int = Field(..., description="All source rows in the fleet totals (KPI scope plus unmapped records): dated_purchase_count + refund_count + monthly_summary_rows (+ any legacy zero-litre rows) [Recorded]")
     dated_purchase_count: int = Field(0, description="Dated purchase rows (litres > 0, not monthly summaries): refuelling events [Recorded]")
     monthly_summary_rows: int = Field(0, description="Monthly-summary rows (statement totals for a month, not refuelling events) [Recorded]")
     refund_count: int = Field(0, description="Refund adjustments (negative litres) in the KPI scope [Recorded]")

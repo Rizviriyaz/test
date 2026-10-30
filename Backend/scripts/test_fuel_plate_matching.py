@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from offline_guard import OfflineGuard  # noqa: E402
-from test_fuel_scope import Api, tx  # noqa: E402
+from test_fuel_scope import Api, QM, summary, tx  # noqa: E402
 
 from app.fuel.db import FuelDataFetchError  # noqa: E402
 from app.fuel.scope import (  # noqa: E402
@@ -32,7 +32,6 @@ from app.fuel.wialon_distance import (  # noqa: E402
     MATCH_EXACT_NAME, MATCH_NUMBER_ONLY, match_fuel_vehicle_to_wialon, match_fuel_vehicle_with_basis,
 )
 
-Q = "date_from=2026-08-03&date_to=2026-08-05"
 UNIT_30561 = {"id": 30, "nm": "30561"}
 UNIT_FULL = {"id": 55, "nm": "7AUH55943"}
 UNITS = [UNIT_30561, UNIT_FULL]
@@ -42,6 +41,8 @@ ROWS = [
     tx(2, 1, "1-DXB-30561", "2026-08-04T09:00:00", 60.0, 180.0),
     tx(3, 1, "7-AUH-55943", "2026-08-04T10:00:00", 40.0, 120.0),
 ]
+# The same identifiers as August monthly summaries: what the fuel reporting routes classify
+SUMMARY_ROWS = [summary(r["id"], r["import_id"], r["vehicle_identifier"], r["litres"], r["total_cost"]) for r in ROWS]
 
 
 def _plate(unit_id, name, plate):
@@ -123,19 +124,19 @@ def test_registry_read_only_when_needed():
 
 def test_routes_use_registry_and_fail_loudly():
     registry = MagicMock(return_value=["13-AUH-30561", "1-DXB-30561", "7-AUH-55943"])
-    with Api(rows=ROWS, units=UNITS) as api, patch("app.fuel.routes.get_fuel_vehicle_identifiers", registry):
-        s = api.get(f"/api/fuel/analytics/summary?{Q}")["excluded_scope"]
+    with Api(rows=SUMMARY_ROWS, units=UNITS) as api, patch("app.fuel.routes.get_fuel_vehicle_identifiers", registry):
+        s = api.get(f"/api/fuel/analytics/summary?{QM}")["excluded_scope"]
         assert s["ambiguous"]["transaction_count"] == 2 and s["kpi"]["transaction_count"] == 1, s
-        groups = api.get(f"/api/fuel/analytics/excluded?{Q}")["data"]
+        groups = api.get(f"/api/fuel/analytics/excluded?{QM}")["data"]
         assert {g["vehicle_identifier"]: g["ambiguity_reason"] for g in groups} == {
             "13-AUH-30561": AMBIGUITY_PLATE_CODE_CONFLICT, "1-DXB-30561": AMBIGUITY_PLATE_CODE_CONFLICT}, groups
-        for path in (f"/api/fuel/analytics/vehicle-detail?vehicle_identifier=13-AUH-30561&{Q}",
-                     f"/api/fuel/analytics/distance?vehicle_identifier=1-DXB-30561&{Q}"):
+        for path in (f"/api/fuel/analytics/vehicle-detail?vehicle_identifier=13-AUH-30561&{QM}",
+                     f"/api/fuel/analytics/distance?vehicle_identifier=1-DXB-30561&{QM}"):
             r = api.client.get(path, headers={"Authorization": "Bearer offline-test-token"})
             assert r.status_code == 409 and "plate codes share that number" in r.json()["detail"], (path, r.text)
-    with Api(rows=ROWS, units=UNITS) as api, \
+    with Api(rows=SUMMARY_ROWS, units=UNITS) as api, \
             patch("app.fuel.routes.get_fuel_vehicle_identifiers", side_effect=FuelDataFetchError("down")):
-        r = api.client.get(f"/api/fuel/analytics/summary?{Q}", headers={"Authorization": "Bearer offline-test-token"})
+        r = api.client.get(f"/api/fuel/analytics/summary?{QM}", headers={"Authorization": "Bearer offline-test-token"})
         assert r.status_code == 503, r.text
     print("[PASS] H3: KPI routes exclude conflicted identifiers, the excluded list names the reason, detail/distance "
           "are 409, and a failed registry read is 503.")

@@ -17,7 +17,6 @@ from app.fuel.analytics import (
     VALID_GROUP_BY,
     VALID_SORT_FIELDS,
     VALID_SORT_ORDERS,
-    calculate_daily_fuel,
     calculate_fuel_summary,
     calculate_fuel_trend,
     calculate_fuel_type_analytics,
@@ -28,7 +27,6 @@ from app.fuel.db import (
     cached_analytics_read,
     fetch_fuel_transactions_for_analytics,
     fetch_import_coverage,
-    replace_enabled,
     get_fuel_imports_list,
     get_fuel_vehicle_identifiers,
     get_fuel_transactions_list,
@@ -44,8 +42,6 @@ from app.fuel.scope import (
     REASON_AMBIGUOUS,
     ScopeContext,
     UnitResolver,
-    apply_fuel_type,
-    build_excluded_scope,
     build_scope,
     resolve_effective_dates,
     summarize_excluded,
@@ -63,7 +59,6 @@ from app.fuel.schemas import (
     FuelTransactionItem,
     FuelTransactionsListResponse,
     FuelTrendResponse,
-    DailyFuelResponse,
     FuelTypeAnalyticsResponse,
     VehicleAnalyticsResponse,
     VehicleDistanceResponse,
@@ -617,10 +612,12 @@ def _auth_key(bearer_token: Optional[str]) -> Optional[str]:
 
 
 async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
-                       login_fn: Optional[Any] = None, units_fn: Optional[Any] = None) -> ScopeContext:
+                       login_fn: Optional[Any] = None, units_fn: Optional[Any] = None,
+                       summary_only: bool = True) -> ScopeContext:
     """
     Shared KPI scope for every analytics endpoint: fetch -> exact vehicle filter -> partition -> fuel type.
     Fuel read failures are 503 (no partial KPIs). Wialon is contacted only when there are transactions.
+    Fuel reporting uses monthly summaries only (summary_only); the statement-row listing passes False.
     """
     # One Fuel Performance load fires ~8 analytics requests at once with mostly identical filters: identical reads share
     # one Supabase read (kept ANALYTICS_READ_TTL_S, cleared by any fuel write) and one Wialon unit search (kept
@@ -656,6 +653,7 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
             lambda: get_fuel_vehicle_identifiers(bearer_token),
             lambda ids: _shared_reads.run(("coverage", _auth_key(bearer_token), tuple(sorted(ids))),
                                           lambda: fetch_import_coverage(ids, bearer_token)),
+            summary_only,
         )
     except FuelDataFetchError as exc:
         # The cause (which page, which failure, how many attempts) is logged by the read itself
@@ -753,7 +751,8 @@ async def list_fuel_transactions(
     bearer_token = _get_bearer_token(request)
     filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier,
                "fuel_type": fuel_type, "import_id": import_id}
-    scope = await _build_scope(filters, bearer_token)
+    # The statement-row listing (import verification), not fuel reporting: dated rows are listed as imported
+    scope = await _build_scope(filters, bearer_token, summary_only=False)
     # Newest first (as the previous database listing returned them); monthly summaries are listed by
     # /monthly-summaries with FUEL_MONTHLY_SUMMARY_TABLE
     dated, _ = _split_summaries(scope.matched)
@@ -879,57 +878,6 @@ async def get_fuel_analytics_trend(
     trend = await run_in_threadpool(calculate_fuel_trend, scope.matched, clean_group_by)
     trend.excluded_scope = scope.excluded_scope
     return trend
-
-
-MAX_DAILY_RANGE_DAYS = 62
-
-
-@router.get(
-    "/analytics/daily",
-    response_model=DailyFuelResponse,
-    summary="Daily dated fuel with statement coverage",
-    description="Every calendar day of the range with dated litres, cost, purchase and refund counts and its coverage. A day "
-                "without rows is 0 only when a committed dated import confirmed as covering whole months covers it for "
-                "every vehicle in scope (statement_covered); otherwise its values are null. Statement coverage does not "
-                "prove that every supplier's fuel was imported (supplier_completeness). Monthly summaries are never placed on days.",
-)
-async def get_fuel_analytics_daily(
-    request: Request,
-    date_from: str = Query(..., description="Start date (YYYY-MM-DD)"),
-    date_to: str = Query(..., description="End date (YYYY-MM-DD)"),
-    vehicle_identifier: Optional[str] = Query(None, description="Exact vehicle filter"),
-    fuel_type: Optional[str] = Query(None, description="Filter by fuel product type (coverage is judged on every fuel type)"),
-):
-    _validate_range(date_from, date_to)
-    if _period_days(date_from, date_to) > MAX_DAILY_RANGE_DAYS:
-        raise HTTPException(status_code=400, detail=f"The daily view covers at most {MAX_DAILY_RANGE_DAYS} days.")
-    bearer_token = _get_bearer_token(request)
-    # The scope without the fuel-type filter gives the vehicles a day must cover; the filter is applied in memory,
-    # exactly as build_scope applies it, so a fuel-type filter can never turn an uncovered day into a verified zero.
-    base = await _build_scope({"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier,
-                               "fuel_type": None}, bearer_token)
-    part, _ = apply_fuel_type(base.partition, fuel_type)
-    coverage_rows = base.partition.matched + base.partition.summary_overlap
-    warnings: List[str] = []
-    try:
-        meta = await run_in_threadpool(fetch_import_coverage, {r.get("import_id") for r in coverage_rows}, bearer_token)
-    except FuelDataFetchError:
-        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
-    if not replace_enabled():
-        warnings.append("Statement coverage cannot be verified: import coverage metadata needs "
-                        "Backend/sql/fuel_import_replacement.sql and FUEL_IMPORT_REPLACE=1. Days without rows are unknown.")
-    result = await run_in_threadpool(
-        calculate_daily_fuel, part.matched, coverage_rows, meta, date_from, date_to, get_uae_now().date(),
-    )
-    result.coverage_metadata_available = replace_enabled()
-    if fuel_type and str(fuel_type).strip() and not part.all_rows():
-        warnings.append(f"No fuel transactions of type '{fuel_type}' in the selected scope.")
-    result.data_warnings = list(base.warnings) + warnings
-    excluded = build_excluded_scope(part, [w for w in base.excluded_scope.get("warnings") or [] if w not in part.warnings])
-    excluded["warnings"] = list(dict.fromkeys(excluded["warnings"]))
-    result.excluded_scope = excluded
-    result.value_classification = classification.DAILY_FUEL
-    return result
 
 
 @router.get(
@@ -1103,13 +1051,14 @@ async def get_fleet_fuel_efficiency(
     dates = _resolve_effective_dates(scope.matched, date_from, date_to)
 
     if scope.is_empty or dates is None:
-        result = calculate_fleet_efficiency([], {}, [], idle_rate_lph, data_warnings=list(scope.warnings))
+        # Unmapped monthly records still count in the fleet fuel totals; nothing Wialon-based can be computed
+        result = calculate_fleet_efficiency(scope.unmapped, {}, scope.units, idle_rate_lph, data_warnings=list(scope.warnings))
     else:
         # Fuel purchased and cost need no telematics: without them only the Wialon-based values are unknown
         bundle, unavailable = await _telematics_bundle_or_unavailable(dates, scope.sid)
         result = await run_in_threadpool(
             calculate_fleet_efficiency,
-            scope.matched,
+            scope.matched + scope.unmapped,
             bundle["by_name"] if bundle else {},
             scope.units,
             idle_rate_lph,
@@ -1129,7 +1078,7 @@ async def get_fleet_fuel_efficiency(
     "/analytics/efficiency/vehicles",
     response_model=VehicleEfficiencyResponse,
     summary="Get per-vehicle fuel efficiency and performance rankings",
-    description="Paginated per-Wialon-unit records with driving/idling hours, estimated idle fuel, purchase-based L/100 km and cost/km. The default list is the KPI scope; status=not_tracked or ambiguous lists excluded identifiers instead.",
+    description="Paginated per-Wialon-unit records with driving/idling hours, estimated idle fuel, purchase-based L/100 km and cost/km. The default list is the KPI scope plus unmapped monthly records (status not_tracked / ambiguous, no Wialon values); status=not_tracked or ambiguous lists only those.",
 )
 async def get_vehicles_fuel_efficiency(
     request: Request,
@@ -1174,7 +1123,7 @@ async def get_vehicles_fuel_efficiency(
     unavailable: List[str] = []
 
     if status_clean in ("not_tracked", "ambiguous"):
-        # Excluded identifiers, listed for review (never in KPIs); no telematics needed.
+        # Unmapped identifiers only (in the fleet fuel totals, never in Wialon-based KPIs); no telematics needed.
         rows = scope.partition.unmatched + scope.partition.ambiguous
         items = await run_in_threadpool(calculate_vehicle_efficiency_records, rows, {}, scope.units, idle_rate_lph)
     else:
@@ -1191,6 +1140,11 @@ async def get_vehicles_fuel_efficiency(
                 duplicate_names=bundle["duplicate_names"] if bundle else None,
                 mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
             )
+        # Unmapped monthly records are part of the fleet fuel totals: listed with their mapping status
+        # (not_tracked / ambiguous) and no Wialon values, never left out of the list
+        if scope.unmapped:
+            items = items + await run_in_threadpool(
+                calculate_vehicle_efficiency_records, scope.unmapped, {}, scope.units, idle_rate_lph)
 
     result = await run_in_threadpool(
         paginate_and_sort_vehicle_efficiency, items, page, page_size, sort_field, sort_ord, status_clean, vehicle_identifier,

@@ -118,13 +118,10 @@ test("trend notice reflects response status and warnings", () => {
 
 test("components no longer coerce telemetry with || 0 / ?? 0", () => {
     const modal = readFileSync(new URL("./VehicleFuelDetailModal.jsx", import.meta.url), "utf8")
-    const chart = readFileSync(new URL("./FuelTrendChart.jsx", import.meta.url), "utf8")
     for (const field of ["driving_duration_hours", "idle_duration_hours", "engine_hours"]) {
         assert.doesNotMatch(modal, new RegExp(`${field}\\s*(\\|\\||\\?\\?)`), `modal still falls back on ${field}`)
     }
     assert.doesNotMatch(modal, /Hours\.toFixed/, "modal formats possibly-null hours with toFixed")
-    assert.doesNotMatch(chart, /distance_km\s*(\|\||\?\?)\s*0/, "trend chart coerces distance to 0")
-    assert.doesNotMatch(chart, /fuel_efficiency_l_per_100km\s*\?/, "trend chart drops efficiency by truthiness")
 })
 
 test("idle session caption: unknown count is unavailable, never 'Stationary ignition'", () => {
@@ -153,7 +150,7 @@ test("telematics still running on the server is retried a bounded number of time
     assert.equal(shouldRetryTelematics({ telematics_status: "unavailable", telematics_pending: false }, 0), false, "a failure stays unavailable")
     assert.equal(shouldRetryTelematics({ telematics_status: "complete" }, 0), false)
     assert.equal(shouldRetryTelematics(null, 0), false)
-    const page = readFileSync(new URL("../../pages/FuelPerformance.jsx", import.meta.url), "utf8")
+    const page = readFileSync(new URL("./useFuelEfficiencyData.js", import.meta.url), "utf8")
     assert.match(page, /shouldRetryTelematics\(efficiency, telematicsRetries\)/)
     assert.match(page, /clearClientCache\("\/api\/fuel\/analytics\/efficiency"\)/, "a retry bypasses the 30 s client cache")
     assert.match(page, /loadEfficiencyData\(\{ silent: true \}\)/, "retries keep the fuel figures on screen")

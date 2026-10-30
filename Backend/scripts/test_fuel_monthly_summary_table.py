@@ -585,7 +585,8 @@ def test_lists_report_summaries_by_month_only_with_the_flag():
         assert all(s["source_table"] == SUMMARY_TABLE for s in new_ms) and all("transaction_date" not in s for s in new_ms)
     detail_old, detail_new = legacy["detail"], table["detail"]
     assert detail_old["monthly_summaries"] == [] and any(r["date_basis"] == DATE_BASIS_MONTH_END for r in detail_old["transactions"])
-    assert detail_new["transactions"] and all(r["date_basis"] != DATE_BASIS_MONTH_END for r in detail_new["transactions"])
+    # Monthly-summary reporting: the vehicle detail lists no dated refuels, only the month's summaries
+    assert detail_new["transactions"] == [], detail_new["transactions"]
     assert sorted(s["reporting_month"] for s in detail_new["monthly_summaries"]) == ["2026-02", "2026-03"], detail_new["monthly_summaries"]
     assert _strip_ids(detail_old["vehicle_summary"]) == _strip_ids(detail_new["vehicle_summary"]), "same vehicle KPIs"
     print("[PASS] With the flag, transaction lists hold dated rows only and summaries are listed by reporting month.")
@@ -732,7 +733,7 @@ def test_alias_with_another_vehicle_key_never_replaces_silently():
           "summary take precedence for one Wialon unit, never counting both.")
 
 
-def test_daily_view_is_empty_when_only_monthly_summaries_exist():
+def test_only_monthly_summaries_report_without_invented_daily_activity():
     tables = {"fuel_transactions": [], SUMMARY_TABLE: [s for s in copied_layout()[SUMMARY_TABLE]
                                                         if s["reporting_month"] == "2026-02-01"],
               "fuel_imports": IMPORTS}
@@ -742,14 +743,11 @@ def test_daily_view_is_empty_when_only_monthly_summaries_exist():
     api = Api(units=UNITS)
     api.fetch = MagicMock(side_effect=lambda f, bearer_token=None: fuel_db.fetch_fuel_transactions_for_analytics(f, bearer_token))
     with patch.dict(os.environ, env), patch("app.fuel.db._fetch_all_pages", side_effect=PostgrestEmulator(tables)), api:
-        daily = api.get("/api/fuel/analytics/daily?date_from=2026-02-01&date_to=2026-02-28")
         trend = api.get("/api/fuel/analytics/trend?group_by=day&date_from=2026-02-01&date_to=2026-02-28")
         summary = api.get("/api/fuel/analytics/summary?date_from=2026-02-01&date_to=2026-02-28")
-    assert daily["dated_row_count"] == 0 and all(d["litres"] is None for d in daily["data"]), "no invented daily zeros"
-    assert daily["monthly_summary_excluded"]["rows"] >= 1
     assert all(not row.get("transaction_count") for row in trend["data"]), "no daily refuel events from a monthly total"
     assert summary["total_litres"] == 400.0 and summary["monthly_summary_rows"] == 1, summary
-    print("[PASS] Only monthly summaries: KPIs count the total, the daily view and day trend show no invented activity.")
+    print("[PASS] Only monthly summaries: KPIs count the total; the day trend shows no invented activity.")
 
 
 TESTS = [
@@ -772,7 +770,7 @@ TESTS = [
     test_commit_function_script_matches_the_backend_contract,
     test_expected_rows_and_replace_scope_match_what_the_backend_stored,
     test_alias_with_another_vehicle_key_never_replaces_silently,
-    test_daily_view_is_empty_when_only_monthly_summaries_exist,
+    test_only_monthly_summaries_report_without_invented_daily_activity,
 ]
 
 

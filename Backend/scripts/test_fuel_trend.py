@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
 os.environ["FUEL_IMPORT_REPLACE"] = ""
 
-from test_fuel_scope import AUTH, Q, Api, assert_reconciles, reset_fuel_read_caches, run  # noqa: E402
+from test_fuel_scope import AUTH, QM, SUMMARY_EXPECT, Api, assert_reconciles, reset_fuel_read_caches, run  # noqa: E402
 
 from app.fuel.analytics import calculate_fuel_trend  # noqa: E402
 
@@ -100,34 +100,35 @@ def test_bad_rows_and_group_by():
 
 
 def test_route_kpi_scope_and_reconciliation():
-    with Api() as api:
-        day = api.get(f"/api/fuel/analytics/trend?{Q}&group_by=day")
-        week = api.get(f"/api/fuel/analytics/trend?{Q}&group_by=WEEK")
-        summary = api.get(f"/api/fuel/analytics/summary?{Q}")
+    with Api() as api:  # August monthly summaries: the fuel reporting source
+        month = api.get(f"/api/fuel/analytics/trend?{QM}&group_by=month")
+        day = api.get(f"/api/fuel/analytics/trend?{QM}&group_by=day")
+        week = api.get(f"/api/fuel/analytics/trend?{QM}&group_by=WEEK")
+        summary = api.get(f"/api/fuel/analytics/summary?{QM}")
         reset_fuel_read_caches()  # nothing kept, so a database read by the bad request would be counted
         fetches_before_bad = api.fetch.call_count
-        bad = api.client.get(f"/api/fuel/analytics/trend?{Q}&group_by=year", headers=AUTH)
+        bad = api.client.get(f"/api/fuel/analytics/trend?{QM}&group_by=year", headers=AUTH)
         fetches_after_bad = api.fetch.call_count
         bundle_calls, trip_calls = api.bundle.call_count, api.trips.call_count
 
-    # KPI rows only (1, 2, 3, 4, 6): unmatched, ambiguous and the cross-import duplicate are excluded.
-    assert [(d["period"], d["litres"], d["cost"], d["transactions"]) for d in day["data"]] == [
-        ("2026-08-03", 260.0, 780.0, 3),
-        ("2026-08-04", 50.0, 150.0, 1),
-        ("2026-08-05", -10.0, -30.0, 1),
-    ], day["data"]
+    # KPI scope only (mapped summaries 1, 2, 4): unmatched, ambiguous and the cross-import duplicate are excluded.
+    assert [(d["period"][:7], d["litres"], d["cost"], d["transactions"]) for d in month["data"]] == [
+        ("2026-08", 300.0, 900.0, 3)], month["data"]
+    assert round(sum(d["litres"] for d in month["data"]), 2) == summary["total_litres"]
+    assert round(sum(d["cost"] for d in month["data"]), 2) == summary["total_cost"]
+    assert sum(d["transactions"] for d in month["data"]) == summary["transaction_count"]
+    # A monthly total is never placed on a day or week: no invented activity, the left-out summaries are reported
     assert week["group_by"] == "week"
-    assert [(d["period"], d["litres"], d["transactions"]) for d in week["data"]] == [("2026-08-03", 300.0, 5)]
     for body in (day, week):
-        assert_reconciles(body["excluded_scope"])
-        assert round(sum(d["litres"] for d in body["data"]), 2) == summary["total_litres"]
-        assert round(sum(d["cost"] for d in body["data"]), 2) == summary["total_cost"]
-        assert sum(d["transactions"] for d in body["data"]) == summary["transaction_count"]
+        assert body["data"] == [], body["data"]
+        assert body["monthly_summary_excluded"]["rows"] == 3 and body["monthly_summary_excluded"]["litres"] == 300.0
+    for body in (month, day, week):
+        assert_reconciles(body["excluded_scope"], SUMMARY_EXPECT)
 
     assert bad.status_code == 400 and "group_by" in bad.json()["detail"], bad.text
     assert fetches_after_bad == fetches_before_bad, "invalid group_by is rejected before any database read"
     assert bundle_calls == 0 and trip_calls == 0, "the purchase trend never runs Wialon reports"
-    print("[PASS] Route: KPI scope only, reconciles with summary, excluded_scope attached, 400 before DB, no reports.")
+    print("[PASS] Route: monthly KPI scope reconciles with summary; no day/week activity from monthly totals; 400 before DB; no reports.")
 
 
 def test_half_cent_rounding_matches_the_summary():

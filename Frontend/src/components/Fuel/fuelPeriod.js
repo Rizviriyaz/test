@@ -50,11 +50,6 @@ export function canGoNext(month, today) {
     return month < monthOf(today)
 }
 
-// A month from a URL, or null when it is malformed or later than the current month
-export function parseMonthParam(value, today) {
-    return isMonth(value) && value <= monthOf(today) ? value : null
-}
-
 // The `count` months ending at `month`, oldest first, and the date range covering them
 export function comparisonWindow(month, count = 6) {
     const months = Array.from({ length: count }, (_, i) => shiftMonth(month, i - count + 1))
@@ -77,33 +72,4 @@ export function latestMonthWithData(rows, today) {
         if (isMonth(month) && month <= current && count > 0 && (!latest || month > latest)) latest = month
     }
     return latest
-}
-
-// Matched rows in the KPI scope that are dated transactions (monthly-summary rows removed); null when unknown
-export function datedTransactionCount(scope) {
-    const total = Number(scope?.kpi?.transaction_count)
-    const summaries = Number(scope?.monthly_summary_rows)
-    if (!Number.isFinite(total) || !Number.isFinite(summaries)) return null
-    return Math.max(0, total - summaries)
-}
-
-export const DAILY_COVERAGE_REASONS = {
-    unknown: "Transaction counts unavailable for this period.",
-    no_dated_rows: "No dated transactions in this period. Monthly summaries have no daily dates.",
-}
-
-// Whether daily analysis is offered for a month, from /api/fuel/analytics/daily: only when the month has dated
-// (transaction-level) rows. dated_row_count excludes monthly-summary rows, so a month with summaries only has no daily
-// view and nothing is placed on its month-end reporting date. `reason` is a DAILY_COVERAGE_REASONS key.
-export function datedDailyAvailability(daily) {
-    if (!daily || typeof daily !== "object" || !Array.isArray(daily.data)) return { available: false, reason: "unknown" }
-    if (!(Number(daily.dated_row_count) > 0)) return { available: false, reason: "no_dated_rows" }
-    return { available: true, reason: null }
-}
-
-// Query string of a daily-dashboard link
-export function dailySearch(month, vehicle) {
-    const params = new URLSearchParams({ month })
-    if (vehicle) params.set("vehicle", vehicle)
-    return params.toString()
 }

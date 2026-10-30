@@ -1,11 +1,13 @@
 // Offline tests for fuel label helpers and frontend accuracy rules. Run: npm test (node --test).
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote, EXCLUDED_REASON_LABELS } from "./fuelLabels.js"
 import { compactTick, formatTrendPoint } from "./telemetryFormat.js"
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
+// The monthly page with its shared data hook (efficiency, rankings and idle-ranking loaders moved there)
+const monthlyDashboardSource = () => read("../../pages/FuelPerformance.jsx") + read("./useFuelEfficiencyData.js")
 
 test("sort labels: lower-is-better metrics list the worst first on desc", () => {
     assert.ok(LOWER_IS_BETTER.has("efficiency") && LOWER_IS_BETTER.has("cost_per_km"))
@@ -46,7 +48,7 @@ test("trend point keeps unknown cumulative efficiency null and statuses have lab
 test("hardcoded verification badges and measured-consumption wording are gone", () => {
     const kpi = read("./KpiCards.jsx")
     const modal = read("./VehicleFuelDetailModal.jsx")
-    const perf = read("../../pages/FuelPerformance.jsx")
+    const perf = monthlyDashboardSource()
     for (const banned of ["100% Invoiced", "Verified Wialon", ">Verified<"]) assert.ok(!kpi.includes(banned), banned)
     for (const banned of ["[Rec]", "[Calc]", "Wialon GPS verified"]) {
         assert.ok(!modal.includes(banned), banned)
@@ -58,16 +60,16 @@ test("hardcoded verification badges and measured-consumption wording are gone", 
 
 test("vehicle trend and idle-waster ranking keep unknown values unknown", () => {
     // The fleet-wide idle ranking drops vehicles whose estimate is unknown instead of ranking them as zero
-    assert.match(read("../../pages/FuelPerformance.jsx"), /estimated_idle_fuel_litres !== null/)
+    assert.match(monthlyDashboardSource(), /estimated_idle_fuel_litres !== null/)
     const waste = read("./FuelWasteIntelligence.jsx")
     assert.match(waste, /!isExcludedIdentifierItem\(item\)/)
-    const perf = read("../../pages/FuelPerformance.jsx")
+    const perf = monthlyDashboardSource()
     assert.match(perf, /clearClientCache\("\/api\/fuel\/"\)/)
     assert.match(perf, /all_transaction_count === 0/)
 })
 
 test("global filters never overwrite the local vehicle/search parameter", () => {
-    const src = read("../../pages/FuelPerformance.jsx")
+    const src = monthlyDashboardSource()
     // a local vehicle_identifier followed later in the same object by ...queryParams would be overwritten
     assert.doesNotMatch(src, /vehicle_identifier:[^\n]*\n(?:[^\n}]*\n)*?\s*\.\.\.queryParams,/)
 })
@@ -86,7 +88,7 @@ test("missing price, cost and fuel type render as unknown, never as blank or an 
     assert.doesNotMatch(modal, /fuel_type \|\| "/)
     assert.doesNotMatch(modal, /unit_price\?\.toFixed|total_cost\?\.toFixed/)
     assert.doesNotMatch(modal, /t\.(unit_price|total_cost) \?/, "a recorded 0 must not be hidden")
-    assert.doesNotMatch(read("../../pages/FuelPerformance.jsx"), /fuel_cost_per_km\?\.toFixed/)
+    assert.doesNotMatch(monthlyDashboardSource(), /fuel_cost_per_km\?\.toFixed/)
 })
 
 test("refund adjustments are labelled distinctly from purchases", () => {
@@ -101,11 +103,10 @@ test("axis ticks below 1000 are not collapsed to 0k", () => {
     assert.equal(compactTick(1500, "L"), "1.5k L")
     assert.equal(compactTick(25000), "25k")
     assert.equal(compactTick(null), "")
-    assert.doesNotMatch(read("./FuelTrendChart.jsx"), /\/ 1000\)\.toFixed\(0\)}k/)
 })
 
 test("failed or stale requests never leave the previous data on screen", () => {
-    const perf = read("../../pages/FuelPerformance.jsx")
+    const perf = monthlyDashboardSource()
     for (const ref of ["efficiencyRequestIdRef", "rankingsRequestIdRef", "idleWastersRequestIdRef"]) {
         assert.match(perf, new RegExp(`requestId !== ${ref}\\.current`), ref)
     }
@@ -176,19 +177,16 @@ test("matched-fleet views never present unmatched/ambiguous identifiers as fleet
     assert.doesNotMatch(board, /<option value="(not_tracked|ambiguous)"/)
 })
 
-test("monthly page: \"View Daily Transactions\" needs dated rows; idle ranking keeps unknown-distance vehicles", () => {
-    const page = read("../../pages/FuelPerformance.jsx")
-    assert.match(page, /getFuelDaily\(queryParams\)/)
-    assert.match(page, /datedDailyAvailability\(res\)\.available/)
-    assert.match(page, /const dailyEligible = checkDaily && dailyCheck\.key === dailyKey && dailyCheck\.available/)
-    assert.match(page, /View Daily Transactions/)
-    assert.match(page, /to=\{`\/fuel\/daily\?\$\{dailySearch\(selectedMonth, vehicle\)\}`\}/, "button opens the daily page for the month")
+test("monthly-only fuel reporting: no daily page, link or request; idle ranking keeps unknown-distance vehicles", () => {
+    const page = monthlyDashboardSource()
+    assert.doesNotMatch(page, /getFuelDaily|getFuelTransactions|View Daily Transactions|\/fuel\/daily/)
+    assert.equal(existsSync(new URL("../../pages/FuelDailyDashboard.jsx", import.meta.url)), false)
+    assert.doesNotMatch(read("../../api/fleetApi.js"), /analytics\/daily/)
+    // The old daily URL only redirects to the monthly dashboard
+    assert.match(read("../../App.jsx"), /path="\/fuel\/daily"\s*element=\{<Navigate to="\/fuel" replace \/>\}/)
     const idle = page.slice(page.indexOf("const loadIdleWasters"), page.indexOf("useEffect(", page.indexOf("const loadIdleWasters")))
     assert.match(idle, /sort_by: "estimated_idle_fuel"/)
     assert.ok(!/status: "matched"/.test(idle), "no_distance_data vehicles carry idle estimates and must stay ranked")
-    const daily = read("../../pages/FuelDailyDashboard.jsx")
-    assert.match(daily, /datedDailyAvailability\(res\)/)
-    assert.match(daily, /coverage_note/)
 })
 
 test("excluded panel: Overlaps tab lists dated rows a monthly summary superseded, labelled apart", () => {

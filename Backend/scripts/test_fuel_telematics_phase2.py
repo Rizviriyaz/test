@@ -36,11 +36,15 @@ import app.wialon_reports as wr  # noqa: E402
 from app.fuel.efficiency import calculate_fleet_efficiency, calculate_vehicle_efficiency_records  # noqa: E402
 from app.utils.ttl_cache import TTLCache  # noqa: E402
 from app.wialon import WialonAPIError  # noqa: E402
+from app.fuel.reporting_period import DATE_BASIS_MONTH_END  # noqa: E402
 
 UAE = timezone(timedelta(hours=4))
 AUTH = {"Authorization": "Bearer offline-test-token"}
 FAKE_USER = {"id": "00000000-0000-0000-0000-000000000001", "email": "t@ats.ae", "role": "admin"}
 CLOSED_FROM, CLOSED_TO = "2026-08-03", "2026-08-05"
+# Fuel routes report monthly summaries for whole months: route tests query the whole (closed) month
+MONTH_Q = "date_from=2026-08-01&date_to=2026-08-31"
+SUMMARY = {"transaction_date": "2026-08-31T00:00:00", "date_basis": DATE_BASIS_MONTH_END}
 
 
 class FakeClock:
@@ -145,12 +149,12 @@ def test_whole_report_failure_retries_is_not_cached_and_route_degrades():
         assert env.execs() == 2 * (1 + 2), env.execs()  # per call: trips once, engine twice (retry)
 
         client = TestClient(app)
-        txs = [{"vehicle_identifier": "UNIT-A", "litres": 50, "total_cost": 150, "transaction_date": "2026-08-03T10:00:00"}]
+        txs = [{"vehicle_identifier": "UNIT-A", "litres": 50, "total_cost": 150, **SUMMARY}]
         with patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
              patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=txs), \
              patch("app.fuel.routes.login", return_value="s"), \
              patch("app.fuel.routes.get_all_vehicles", return_value=UNITS):
-            r = client.get(f"/api/fuel/analytics/efficiency?date_from={CLOSED_FROM}&date_to={CLOSED_TO}", headers=AUTH)
+            r = client.get(f"/api/fuel/analytics/efficiency?{MONTH_Q}", headers=AUTH)
         # The route keeps the recorded fuel figures and marks telematics unavailable (null, never 0) instead of a 502
         assert r.status_code == 200, r.text
         body = r.json()
@@ -366,13 +370,12 @@ def test_detail_unreadable_values_are_none_and_failure_is_502():
 
 def test_detail_route_exposes_basis_and_status():
     client = TestClient(app)
-    rows = [{"id": 1, "import_id": 1, "transaction_date": "2026-08-03T10:00:00", "vehicle_identifier": "UNIT-A",
-             "litres": 60.0, "total_cost": 180.0}]
+    rows = [{"id": 1, "import_id": 1, "vehicle_identifier": "UNIT-A", "litres": 60.0, "total_cost": 180.0, **SUMMARY}]
     with Env(), patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
          patch("app.fuel.routes.login", return_value="s"), \
          patch("app.fuel.routes.get_all_vehicles", return_value=UNITS), \
          patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=rows):
-        r = client.get(f"/api/fuel/analytics/vehicle-detail?vehicle_identifier=UNIT-A&date_from={CLOSED_FROM}&date_to={CLOSED_TO}",
+        r = client.get(f"/api/fuel/analytics/vehicle-detail?vehicle_identifier=UNIT-A&{MONTH_Q}",
                        headers=AUTH)
     assert r.status_code == 200, r.text
     body = r.json()
@@ -401,16 +404,14 @@ def test_efficiency_endpoints_report_partial_status():
     tables = default_tables()
     tables[TEMPLATE_GROUP_ENGINE]["rows"][0]["c"][8] = "--:--"
     client = TestClient(app)
-    txs = [{"id": 1, "import_id": 1, "vehicle_identifier": "UNIT-A", "litres": 50.0, "total_cost": 150.0,
-            "transaction_date": "2026-08-03T10:00:00"},
-           {"id": 2, "import_id": 1, "vehicle_identifier": "UNIT-B", "litres": 80.0, "total_cost": 240.0,
-            "transaction_date": "2026-08-04T10:00:00"}]
+    txs = [{"id": 1, "import_id": 1, "vehicle_identifier": "UNIT-A", "litres": 50.0, "total_cost": 150.0, **SUMMARY},
+           {"id": 2, "import_id": 1, "vehicle_identifier": "UNIT-B", "litres": 80.0, "total_cost": 240.0, **SUMMARY}]
     with Env(engine=FakeReportEngine(tables=tables)), \
          patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
          patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=txs), \
          patch("app.fuel.routes.login", return_value="s"), \
          patch("app.fuel.routes.get_all_vehicles", return_value=UNITS):
-        q = f"date_from={CLOSED_FROM}&date_to={CLOSED_TO}"
+        q = MONTH_Q
         eff = client.get(f"/api/fuel/analytics/efficiency?{q}", headers=AUTH).json()
         veh = client.get(f"/api/fuel/analytics/efficiency/vehicles?{q}", headers=AUTH).json()
         waste = client.get(f"/api/fuel/analytics/waste?{q}", headers=AUTH).json()
@@ -427,13 +428,12 @@ def test_efficiency_endpoints_report_partial_status():
 
 def test_complete_data_reports_complete():
     client = TestClient(app)
-    txs = [{"id": 1, "import_id": 1, "vehicle_identifier": "UNIT-A", "litres": 50.0, "total_cost": 150.0,
-            "transaction_date": "2026-08-03T10:00:00"}]
+    txs = [{"id": 1, "import_id": 1, "vehicle_identifier": "UNIT-A", "litres": 50.0, "total_cost": 150.0, **SUMMARY}]
     with Env(), patch("app.main.authenticate_access_token", return_value=FAKE_USER), \
          patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=txs), \
          patch("app.fuel.routes.login", return_value="s"), \
          patch("app.fuel.routes.get_all_vehicles", return_value=UNITS):
-        eff = client.get(f"/api/fuel/analytics/efficiency?date_from={CLOSED_FROM}&date_to={CLOSED_TO}", headers=AUTH).json()
+        eff = client.get(f"/api/fuel/analytics/efficiency?{MONTH_Q}", headers=AUTH).json()
     assert eff["telematics_status"] == "complete" and eff["data_warnings"] == [], eff
     assert eff["total_idle_hours"] == 1.5 and eff["total_driving_hours"] == 4.5
     print("[PASS] Complete Wialon data reports telematics_status=complete with no warnings.")

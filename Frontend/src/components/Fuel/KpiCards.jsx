@@ -56,8 +56,12 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     const transactionCount = efficiencyData?.transaction_count
     const vehicleCount = efficiencyData?.vehicle_count
     const unmatchedCount = efficiencyData?.unmatched_vehicle_count
-    // Monthly-summary rows are statement totals, not refuels: counts are labelled as rows when any are in scope
-    const summaryRows = efficiencyData?.excluded_scope?.monthly_summary_rows
+    // Fleet totals include monthly records with no single Wialon unit (no distance or idle data): shown, never dropped
+    const unmappedLitres = Number(efficiencyData?.unmatched_litres) || 0
+    const unmappedCost = Number(efficiencyData?.unmatched_cost) || 0
+    const mappedLitres = totalLitres !== null && totalLitres !== undefined ? totalLitres - unmappedLitres : null
+    // Monthly-summary rows (mapped and unmapped) are statement totals, not refuels: counts are labelled as rows
+    const summaryRows = efficiencyData?.monthly_summary_rows
     const rowsLabel = transactionCountLabel(transactionCount, summaryRows)
     const trackedLitres = efficiencyData?.tracked_litres
     // Basis of the idle/driving fuel shares: litres of vehicles with distance or engine hours
@@ -96,17 +100,19 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     classificationBadge: "recorded",
                     resultText: `${formatNumber(totalLitres, 1)} Litres`,
                     dateRange: dateRangeStr,
-                    dataSource: "Fuel statement invoices (import statement logs, net of refunds)",
-                    formulaText: "Total Invoiced Litres (Purchases) - Refund Adjustments",
-                    natureText: "Directly aggregated from uploaded fuel statement invoices. Refunds and negative billing adjustments are deducted.",
+                    dataSource: "Monthly fuel statement summaries (net of refunds)",
+                    formulaText: "Monthly summaries of mapped vehicles + unmapped monthly records",
+                    natureText: "Aggregated from imported monthly fuel summaries. Records with no single Wialon unit are included and listed as unmapped; they have no distance or idle data.",
                     inputs: [
-                        { label: "Net Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Statement Aggregation" },
-                        { label: "Statement rows", value: rowsLabel, source: "Invoice Row Count" },
+                        { label: "Net Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Monthly Summary Aggregation" },
+                        { label: "Mapped to Wialon units", value: `${formatNumber(mappedLitres, 1)} L`, source: "Monthly summaries of matched vehicles" },
+                        { label: "Unmapped records", value: `${formatNumber(unmappedLitres, 1)} L`, source: "No or several Wialon units: no distance or idle data" },
+                        { label: "Statement rows", value: rowsLabel, source: "Monthly Summary Rows" },
                         { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoice Total Costs" },
                         { label: "Weighted Average Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
                     ],
                     calculationSteps: [
-                        "Net Litres = Sum(Purchase Transactions) - Sum(Refund Adjustments)",
+                        `Fleet Litres = ${formatNumber(mappedLitres, 1)} L mapped + ${formatNumber(unmappedLitres, 1)} L unmapped`,
                         `Result = ${formatNumber(totalLitres, 1)} L`,
                     ],
                 }
@@ -121,8 +127,9 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     formulaText: "Sum of All Invoiced Refuel Costs (AED)",
                     natureText: "Recorded financial expenditure directly from supplier statement invoices, reflecting net billing.",
                     inputs: [
-                        { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoice Cost Sum" },
-                        { label: "Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Invoice Litres Sum" },
+                        { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Monthly Summary Cost Sum" },
+                        { label: "Unmapped records", value: `AED ${formatCurrency(unmappedCost)}`, source: "Included; no single Wialon unit" },
+                        { label: "Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Monthly Summary Litres Sum" },
                         { label: "Effective Fuel Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
                         { label: "Statement rows", value: rowsLabel, source: "Invoice Rows" },
                     ],
@@ -250,7 +257,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         { label: "Matched Wialon Units", value: `${vehicleCount ?? "—"}`, source: "Wialon Unit Registry" },
                         { label: "Units with GPS Distance", value: `${vehiclesWithDistance ?? "—"}`, source: "Wialon Odometer Reports" },
                         { label: "Units with Engine-Hours Only", value: `${engineOnlyCount ?? "—"}`, source: "Wialon Engine Reports" },
-                        { label: "Unmatched Fuel Identifiers", value: `${unmatchedCount ?? "—"}`, source: "Excluded from KPIs (no or several Wialon units)" },
+                        { label: "Unmapped Fuel Identifiers", value: `${unmatchedCount ?? "—"}`, source: "In fuel totals; no distance or idle (no or several Wialon units)" },
                         { label: "Fuel Volume (Tracked Units)", value: `${formatNumber(trackedLitres, 1)} L`, source: "Matched Vehicle Invoices" },
                     ],
                     calculationSteps: [
@@ -274,7 +281,10 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             label: "Fuel Purchased",
             value: formatNumber(totalLitres, 1),
             unit: "L",
-            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : null,
+            note: [
+                avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : null,
+                unmappedLitres ? `incl. ${formatNumber(unmappedLitres, 1)} L unmapped` : null,
+            ].filter(Boolean).join(" · ") || null,
             provenance: "Recorded",
         },
         {
@@ -344,7 +354,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             unit: "refuelled",
             note: [
                 has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : null,
-                unmatchedCount ? `${unmatchedCount} unmatched` : null,
+                unmatchedCount ? `${unmatchedCount} unmapped` : null,
             ].filter(Boolean).join(" · ") || null,
             provenance: "Recorded",
             title: "Refuelled vehicles matched to one Wialon unit (not total fleet size)",

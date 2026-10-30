@@ -108,6 +108,7 @@ export function transactionCountLabel(count, summaryRows = 0) {
     if (count === null || count === undefined || count === "" || !Number.isFinite(Number(count))) return "—"
     const n = Number(count).toLocaleString("en-US")
     const summaries = Number(summaryRows) || 0
+    if (summaries > 0 && summaries >= Number(count)) return `${n} monthly summary rows`
     return summaries > 0 ? `${n} rows incl. ${summaries.toLocaleString("en-US")} monthly summary` : `${n} refuels`
 }
 

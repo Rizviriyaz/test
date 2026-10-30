@@ -54,6 +54,8 @@ MOCK_TRANSACTIONS = [
         "unit_price": 3.60,
     },
 ]
+# The same fuel as August monthly-summary rows: what the fuel reporting routes report (dated rows never are)
+MOCK_SUMMARIES = [dict(t, transaction_date="2026-08-31T00:00:00", date_basis="reporting_month_end") for t in MOCK_TRANSACTIONS]
 
 
 def run_unit_tests():
@@ -201,7 +203,7 @@ def run_api_endpoint_tests():
 
         # 10. Summary endpoint with mock DB
         print("\n--- Test 10: GET /api/fuel/analytics/summary ---")
-        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_TRANSACTIONS):
+        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_SUMMARIES):
             res_sum = client.get("/api/fuel/analytics/summary", headers=auth_headers)
             assert res_sum.status_code == 200
             data_sum = res_sum.json()
@@ -211,13 +213,15 @@ def run_api_endpoint_tests():
 
         # 11. Trend endpoint with mock DB & invalid group_by test
         print("\n--- Test 11: GET /api/fuel/analytics/trend & invalid parameter handling ---")
-        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_TRANSACTIONS):
-            # Valid group_by
-            res_trend = client.get("/api/fuel/analytics/trend?group_by=day", headers=auth_headers)
+        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_SUMMARIES):
+            # Valid group_by: monthly totals are reported by month, never placed on a day
+            res_trend = client.get("/api/fuel/analytics/trend?group_by=month", headers=auth_headers)
             assert res_trend.status_code == 200
             data_trend = res_trend.json()
-            assert data_trend["group_by"] == "day"
-            assert len(data_trend["data"]) == 3
+            assert data_trend["group_by"] == "month"
+            assert [(d["litres"], d["transactions"]) for d in data_trend["data"]] == [(270.0, 4)], data_trend["data"]
+            res_day = client.get("/api/fuel/analytics/trend?group_by=day", headers=auth_headers).json()
+            assert res_day["data"] == [] and res_day["monthly_summary_excluded"]["rows"] == 4
 
             # Invalid group_by
             res_bad_trend = client.get("/api/fuel/analytics/trend?group_by=year", headers=auth_headers)
@@ -227,7 +231,7 @@ def run_api_endpoint_tests():
 
         # 12. Vehicle analytics endpoint with mock DB & invalid params test
         print("\n--- Test 12: GET /api/fuel/analytics/vehicles & sorting/pagination ---")
-        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_TRANSACTIONS):
+        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_SUMMARIES):
             res_veh = client.get("/api/fuel/analytics/vehicles?page=1&page_size=2&sort_by=litres&sort_order=desc", headers=auth_headers)
             assert res_veh.status_code == 200
             data_veh = res_veh.json()
@@ -246,7 +250,7 @@ def run_api_endpoint_tests():
 
         # 13. Fuel-types endpoint with mock DB
         print("\n--- Test 13: GET /api/fuel/analytics/fuel-types ---")
-        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_TRANSACTIONS):
+        with patch("app.fuel.routes.fetch_fuel_transactions_for_analytics", return_value=MOCK_SUMMARIES):
             res_ft = client.get("/api/fuel/analytics/fuel-types", headers=auth_headers)
             assert res_ft.status_code == 200
             data_ft = res_ft.json()

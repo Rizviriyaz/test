@@ -31,17 +31,19 @@ from app.main import app  # noqa: E402
 import app.fuel.routes as fuel_routes  # noqa: E402
 import app.fuel.wialon_distance as wd  # noqa: E402
 from app.wialon import WialonAPIError  # noqa: E402
+from app.fuel.reporting_period import DATE_BASIS_MONTH_END  # noqa: E402
 
 AUTH = {"Authorization": "Bearer offline-test-token"}
 FAKE_USER = {"id": "00000000-0000-0000-0000-000000000001", "email": "t@ats.ae", "role": "admin"}
 PERIOD = "date_from=2026-08-01&date_to=2026-08-31"
 WAIT_S = 1
 MAX_RESPONSE_S = 6  # the wait plus generous headroom; the unbounded path took minutes
+# August monthly-summary rows: the fuel reporting source (dated rows are never reported)
 ROWS = [
-    {"id": 1, "import_id": 1, "transaction_date": "2026-08-03T10:00:00", "vehicle_identifier": "UNIT-A",
-     "litres": 60.0, "total_cost": 180.0, "fuel_type": "Diesel"},
-    {"id": 2, "import_id": 1, "transaction_date": "2026-08-12T10:00:00", "vehicle_identifier": "UNIT-B",
-     "litres": 40.0, "total_cost": 120.0, "fuel_type": "Diesel"},
+    {"id": 1, "import_id": 1, "transaction_date": "2026-08-31T00:00:00", "vehicle_identifier": "UNIT-A",
+     "litres": 60.0, "total_cost": 180.0, "fuel_type": "Diesel", "date_basis": DATE_BASIS_MONTH_END},
+    {"id": 2, "import_id": 1, "transaction_date": "2026-08-31T00:00:00", "vehicle_identifier": "UNIT-B",
+     "litres": 40.0, "total_cost": 120.0, "fuel_type": "Diesel", "date_basis": DATE_BASIS_MONTH_END},
 ]
 
 

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from test_fuel_scope import Api, Q, run  # noqa: E402
+from test_fuel_scope import Api, QM, run, summary  # noqa: E402
 
 from app.fuel import classification  # noqa: E402
 from app.fuel.efficiency import calculate_fleet_efficiency, calculate_vehicle_efficiency_records  # noqa: E402
@@ -73,15 +73,16 @@ def test_negative_net_unit_excluded_from_fleet_ratio():
 
 
 def test_mixed_fuel_types_under_filter():
+    # August monthly summaries per product: unit 1 bought DIESEL and SUPER in the month
     rows = [
-        {"id": 1, "import_id": 1, "vehicle_identifier": "7-AUH-55943", "transaction_date": "2026-08-03T08:00:00", "litres": 60.0, "total_cost": 180.0, "fuel_type": "DIESEL"},
-        {"id": 2, "import_id": 1, "vehicle_identifier": "7-AUH-55943", "transaction_date": "2026-08-04T08:00:00", "litres": 40.0, "total_cost": 120.0, "fuel_type": "SUPER"},
-        {"id": 3, "import_id": 1, "vehicle_identifier": "17-AUH-55943", "transaction_date": "2026-08-04T09:00:00", "litres": 50.0, "total_cost": 150.0, "fuel_type": "DIESEL"},
+        summary(1, 1, "7-AUH-55943", 60.0, 180.0, fuel="DIESEL"),
+        summary(2, 1, "7-AUH-55943", 40.0, 120.0, fuel="SUPER"),
+        summary(3, 1, "17-AUH-55943", 50.0, 150.0, fuel="DIESEL"),
     ]
     with Api(rows=rows) as api:
-        eff = api.get(f"/api/fuel/analytics/efficiency?{Q}&fuel_type=DIESEL")
-        veh = api.get(f"/api/fuel/analytics/efficiency/vehicles?{Q}&fuel_type=DIESEL")
-        unfiltered = api.get(f"/api/fuel/analytics/efficiency?{Q}")
+        eff = api.get(f"/api/fuel/analytics/efficiency?{QM}&fuel_type=DIESEL")
+        veh = api.get(f"/api/fuel/analytics/efficiency/vehicles?{QM}&fuel_type=DIESEL")
+        unfiltered = api.get(f"/api/fuel/analytics/efficiency?{QM}")
     assert eff["total_litres"] == 110.0  # recorded DIESEL purchases still counted
     assert eff["vehicles_fuel_type_mixed"] == 1 and eff["fuel_type_mixed_excluded_litres"] == 60.0
     assert eff["tracked_litres"] == 50.0 and eff["total_distance_km"] == 200.0 and eff["fuel_efficiency_l_per_100km"] == 25.0

@@ -66,6 +66,8 @@ NO_TRANSACTIONS_WARNING = (
     "No fuel transactions in the selected scope; KPIs are empty and Wialon was not queried."
 )
 NO_MATCHED_WARNING = "No fuel transactions resolve to a single Wialon unit; KPIs are empty."
+NO_SUMMARY_WARNING = ("No monthly-summary fuel records in the selected scope; monthly summaries are the fuel reporting "
+                      "source, so dated transactions are not used.")
 EMPTY_UNIT_LIST_WARNING = "Wialon returned no units; every transaction is reported as unmatched."
 
 MatchFn = Callable[[str, List[Dict[str, Any]]], Optional[Dict[str, Any]]]
@@ -188,6 +190,8 @@ class ScopePartition:
     warnings: List[str] = field(default_factory=list)
     partial_period_summary: List[Dict[str, Any]] = field(default_factory=list)
     summary_overlap: List[Dict[str, Any]] = field(default_factory=list)
+    # Monthly-summary reporting (build_scope summary_only): dated rows in range, counted but never used or classified
+    dated_not_reported: List[Dict[str, Any]] = field(default_factory=list)
 
     def excluded(self) -> List[Dict[str, Any]]:
         return (self.unmatched + self.ambiguous + self.suspected_duplicates + self.partial_period_summary
@@ -312,6 +316,7 @@ def build_excluded_scope(part: ScopePartition, extra_warnings: Optional[List[str
         "summary_dated_overlap": overlap,
         "overlap_conflicts": overlap_conflicts(part.summary_overlap),
         "monthly_summary_rows": sum(1 for r in part.matched if is_monthly_summary(r)),
+        "dated_not_reported": _totals(part.dated_not_reported),
         "excluded_transaction_count": excluded["transaction_count"],
         "excluded_litres": excluded["litres"],
         "excluded_cost": excluded["cost"],
@@ -583,7 +588,7 @@ def apply_fuel_type(part: ScopePartition, fuel_type: Optional[str]) -> Tuple[Sco
     keep = lambda rows: [r for r in rows if _fuel_type_matches(r, fuel_type)]
     filtered = ScopePartition(keep(part.matched), keep(part.unmatched), keep(part.ambiguous),
                               keep(part.suspected_duplicates), list(part.warnings), keep(part.partial_period_summary),
-                              keep(part.summary_overlap))
+                              keep(part.summary_overlap), part.dated_not_reported)
     in_scope = {r["_unit_id"] for r in filtered.matched}
     return filtered, mixed & in_scope
 
@@ -605,6 +610,12 @@ class ScopeContext:
         return self.partition.matched
 
     @property
+    def unmapped(self) -> List[Dict[str, Any]]:
+        """Valid fuel records whose identifier resolves to no or several Wialon units: in the fleet fuel totals, with
+        their mapping status, but never in distance, efficiency or idle values."""
+        return self.partition.unmatched + self.partition.ambiguous
+
+    @property
     def units(self) -> List[Dict[str, Any]]:
         return self.resolver.units
 
@@ -620,6 +631,7 @@ def build_scope(
     units_fn: Callable[[str], List[Dict[str, Any]]],
     registry_fn: Optional[Callable[[], Iterable[str]]] = None,
     coverage_fn: Optional[CoverageFn] = None,
+    summary_only: bool = False,
 ) -> ScopeContext:
     """
     fetch -> exact vehicle filter -> partition -> fuel-type filter. Wialon (login + unit list) is only
@@ -629,6 +641,9 @@ def build_scope(
     imported) is read only if a number-only match occurs; without it, conflicts are checked among fetched rows.
     `coverage_fn` (import ids -> import metadata) is read only when a unit-month has both monthly-summary and dated
     rows; without it no coverage can be confirmed (see resolve_summary_overlaps).
+    `summary_only` (fuel reporting): monthly summaries are the only fuel source. Dated rows are never used, combined
+    or used as a fallback; they are only counted in excluded_scope.dated_not_reported, so no summary/dated overlap
+    can arise.
     """
     vehicle_value = filters.get("vehicle_identifier")
     fuel_type = filters.get("fuel_type")
@@ -647,13 +662,23 @@ def build_scope(
         empty = ScopePartition()
         warn = [f"No fuel transactions match vehicle '{vehicle_value}' exactly."] + filter_warnings
         return ScopeContext(empty, resolver, sid, build_excluded_scope(empty, warn), warn, len(raw))
+    dated: List[Dict[str, Any]] = []
+    if summary_only:
+        dated = [r for r in rows if not is_monthly_summary(r)]
+        rows = [r for r in rows if is_monthly_summary(r)]
+        if not rows:
+            empty = ScopePartition(dated_not_reported=dated)
+            warn = [NO_SUMMARY_WARNING] + filter_warnings
+            return ScopeContext(empty, resolver, sid, build_excluded_scope(empty, warn), warn, len(raw))
     rows, partial, summary_warnings = split_partial_period_summaries(rows, filters.get("date_from"))
     after: List[Dict[str, Any]] = []
-    if replace_enabled():
+    # Summaries after the range only matter for superseding dated rows, which monthly-summary reporting never uses
+    if replace_enabled() and not summary_only:
         after_warnings, after = _summaries_after_range(db_filters, fetch_fn)
         summary_warnings += after_warnings
     base = partition_transactions(rows, resolver)
     base.partial_period_summary = partial
+    base.dated_not_reported = dated
     base.warnings.extend(summary_warnings)
     # Before the fuel-type filter: an overlap is a unit-month property, whatever fuel types its rows carry. Summaries
     # the range splits are not counted, but they still supersede their unit-month's dated rows.

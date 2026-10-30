@@ -1,15 +1,13 @@
 """Fuel Analytics Aggregation and Business Logic Module."""
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from app.fuel.reporting_period import confirmed_coverage_period, is_monthly_summary
-from app.fuel.scope import REASON_DATED_SUPERSEDED, _q2, tx_local_date, unit_key
+from app.fuel.reporting_period import is_monthly_summary
+from app.fuel.scope import _q2, tx_local_date, unit_key
 from app.fuel.schemas import (
-    DailyFuelItem,
-    DailyFuelResponse,
     FuelSummaryResponse,
     FuelTrendItem,
     FuelTrendResponse,
@@ -339,145 +337,3 @@ def calculate_fuel_type_analytics(transactions: List[Dict[str, Any]]) -> FuelTyp
 
     items.sort(key=lambda x: x.litres, reverse=True)
     return FuelTypeAnalyticsResponse(data=items)
-
-
-# ─── Daily fuel with explicit statement coverage ───────────────────────────────
-# Coverage is proven per imported statement, never per supplier: a confirmed statement shows that ITS rows for a vehicle
-# are complete for the period, but fuel bought from a supplier (card provider) whose statement was not imported is
-# invisible. fuel_imports stores no supplier/provider identity, so completeness across suppliers cannot be established
-# (it would need e.g. a provider column on fuel_imports and the expected providers per vehicle). The values are named
-# for what they prove: statement_covered / statement_verified, with supplier_completeness "not_established".
-COVERAGE_COVERED = "statement_covered"
-COVERAGE_NOT_COVERED = "not_covered"
-COVERAGE_FUTURE = "future"
-SUPPLIER_COMPLETENESS_NOT_ESTABLISHED = "not_established"
-COVERAGE_NOTE = ("Coverage means each vehicle's imported dated statement is confirmed complete for the day. Fuel from a "
-                 "supplier whose statement was not imported cannot be detected, so a zero day is a zero within the "
-                 "imported statements, not proof that no supplier sold fuel.")
-
-
-def unit_coverage_days(
-    rows: List[Dict[str, Any]], import_meta: Dict[int, Dict[str, Any]], first: date, last: date,
-) -> Dict[int, set]:
-    """
-    Wialon unit id -> the days of [first, last] its fuel statements are confirmed to cover: days inside the confirmed
-    period (reporting_period.confirmed_coverage_period) of an import that holds one of the unit's dated rows. Every
-    fuel type counts (a statement covers a vehicle, not a product). Monthly-summary rows never establish coverage, and
-    a unit-month with a monthly summary has no covered day: its fuel is a monthly total, so a day without dated rows
-    is unknown, never a zero. Dated rows a summary superseded establish nothing either.
-    """
-    covered: Dict[int, set] = defaultdict(set)
-    summary_months: Dict[int, set] = defaultdict(set)
-    for r in rows:
-        uid = r.get("_unit_id", r.get("_overlap_unit_id"))
-        d = tx_local_date(r.get("transaction_date"))
-        if uid is not None and d and is_monthly_summary(r):
-            summary_months[int(uid)].add(d[:7])
-    for r in rows:
-        uid = r.get("_unit_id", r.get("_overlap_unit_id"))
-        if uid is None or is_monthly_summary(r) or r.get("_exclusion_reason") == REASON_DATED_SUPERSEDED:
-            continue
-        try:
-            period = confirmed_coverage_period(import_meta.get(int(r.get("import_id"))))
-        except (TypeError, ValueError):
-            period = None
-        if period is None:
-            continue
-        day, end = max(period[0], first), min(period[1], last)
-        while day <= end:
-            if day.strftime("%Y-%m") not in summary_months[int(uid)]:
-                covered[int(uid)].add(day)
-            day += timedelta(days=1)
-    return covered
-
-
-def calculate_daily_fuel(
-    kpi_rows: List[Dict[str, Any]],
-    coverage_rows: List[Dict[str, Any]],
-    import_meta: Dict[int, Dict[str, Any]],
-    date_from: str,
-    date_to: str,
-    today: date,
-) -> DailyFuelResponse:
-    """
-    Every calendar day of [date_from, date_to] with dated litres, cost, purchase and refund counts (kpi_rows: the KPI
-    scope, fuel-type filter applied) and its coverage. coverage_rows are the scope's rows of every fuel type (matched
-    plus rows excluded as summary/dated overlaps): their units are the vehicles the day must cover. A day is covered
-    only when every such unit's statement is confirmed for it (unit_coverage_days); a later day than today is never
-    covered. A day without rows is a zero only when statement-covered; otherwise its values are null (unknown), never 0.
-    Statement coverage does not prove supplier completeness (see COVERAGE_NOTE).
-    Monthly-summary rows are never placed on a day: they are reported in monthly_summary_excluded.
-    """
-    first = datetime.strptime(date_from[:10], "%Y-%m-%d").date()
-    last = datetime.strptime(date_to[:10], "%Y-%m-%d").date()
-    units = {int(r.get("_unit_id", r.get("_overlap_unit_id"))) for r in coverage_rows
-             if r.get("_unit_id", r.get("_overlap_unit_id")) is not None}
-    covered_by_unit = unit_coverage_days(coverage_rows, import_meta, first, last)
-
-    per_day: Dict[date, Dict[str, Any]] = defaultdict(
-        lambda: {"litres": Decimal(0), "cost": Decimal(0), "purchases": 0, "refunds": 0, "rows": 0})
-    summaries: List[Dict[str, Any]] = []
-    for r in kpi_rows:
-        if is_monthly_summary(r):
-            summaries.append(r)
-            continue
-        d = tx_local_date(r.get("transaction_date"))
-        if not d:
-            continue
-        day = datetime.strptime(d, "%Y-%m-%d").date()
-        if not first <= day <= last:
-            continue
-        litres = Decimal(str(r.get("litres") or 0))
-        p = per_day[day]
-        p["litres"] += litres
-        p["cost"] += Decimal(str(r.get("total_cost") or 0))
-        p["rows"] += 1
-        if litres < 0:
-            p["refunds"] += 1
-        elif litres > 0:
-            p["purchases"] += 1
-
-    items: List[DailyFuelItem] = []
-    day = first
-    while day <= last:
-        if day > today:
-            status = COVERAGE_FUTURE
-            n_covered = 0
-        else:
-            n_covered = sum(1 for u in units if day in covered_by_unit.get(u, ()))
-            status = COVERAGE_COVERED if units and n_covered == len(units) else COVERAGE_NOT_COVERED
-        p = per_day.get(day)
-        known = p is not None or status == COVERAGE_COVERED
-        items.append(DailyFuelItem(
-            date=day.isoformat(),
-            coverage=status,
-            litres=_q2(p["litres"]) if p else (0.0 if known else None),
-            cost=_q2(p["cost"]) if p else (0.0 if known else None),
-            dated_purchase_count=p["purchases"] if p else (0 if known else None),
-            refund_count=p["refunds"] if p else (0 if known else None),
-            transactions=p["rows"] if p else (0 if known else None),
-            units_covered=n_covered,
-            units_in_scope=len(units),
-        ))
-        day += timedelta(days=1)
-
-    covered_days = sum(1 for i in items if i.coverage == COVERAGE_COVERED)
-    if covered_days == len(items):
-        overall = "statement_verified"
-    elif covered_days:
-        overall = "partial"
-    else:
-        overall = "unverified"
-    return DailyFuelResponse(
-        date_from=first.isoformat(),
-        date_to=last.isoformat(),
-        coverage_status=overall,
-        covered_days=covered_days,
-        total_days=len(items),
-        dated_row_count=sum(p["rows"] for p in per_day.values()),
-        units_in_scope=len(units),
-        data=items,
-        monthly_summary_excluded=monthly_summary_excluded(summaries),
-        supplier_completeness=SUPPLIER_COMPLETENESS_NOT_ESTABLISHED,
-        coverage_note=COVERAGE_NOTE,
-    )

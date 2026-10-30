@@ -4,9 +4,7 @@ Offline route-level regression tests: the fuel API routes wire the shared rules 
   - fleet idle fuel and cost agree across /efficiency, /efficiency/vehicles and /waste (the per-vehicle estimates)
   - the idle ranking keeps vehicles with known idle hours but unknown distance (no status filter needed)
   - /efficiency/trend passes the per-month mixed-fuel map: mixed-fuel exclusion follows the month
-  - _build_scope passes the import-coverage reader: confirmed coverage resolves an overlap, unconfirmed excludes it
-  - /waste reports an unresolved overlap as summary_dated_overlap, never as an unmatched vehicle
-  - /daily is statement_verified only with confirmed coverage of every past day
+  - fuel reporting uses monthly summaries only: dated rows are never combined with them or used as a fallback
 
 Wialon and Supabase are mocked (test_fuel_scope.Api); OfflineGuard blocks every outbound HTTP call.
 Run from Backend/:  python scripts/test_fuel_route_consistency.py
@@ -34,12 +32,16 @@ def tx(i, vid, date, litres, cost, fuel="DIESEL", imp=1, **extra):
             "total_cost": cost, "fuel_type": fuel, "invoice_number": f"INV-{i}", "odometer_km": None, **extra}
 
 
+def summary_tx(i, vid, litres, cost, fuel="DIESEL", month_end="2026-08-31", imp=1):
+    """A monthly-summary row (legacy layout) dated at its reporting month end: the fuel reporting source."""
+    return tx(i, vid, f"{month_end}T00:00:00", litres, cost, fuel=fuel, imp=imp, date_basis="reporting_month_end")
+
+
 def ts(y, m, d, hh=12):
     return int(datetime(y, m, d, hh, tzinfo=UAE).timestamp())
 
 
-IDLE_ROWS = [tx(1, "V-1", "2026-08-03T08:00:00", 100.0, 300.0), tx(2, "V-2", "2026-08-04T08:00:00", 60.0, 185.4),
-             tx(3, "V-3", "2026-08-05T08:00:00", 40.0, 121.0)]
+IDLE_ROWS = [summary_tx(1, "V-1", 100.0, 300.0), summary_tx(2, "V-2", 60.0, 185.4), summary_tx(3, "V-3", 40.0, 121.0)]
 IDLE_BUNDLE = {
     "by_name": {
         "V-1": {"mileage_km": 500.0, "driving_seconds": 36000, "idle_seconds": 3755, "engine_hours_seconds": 39755},
@@ -74,8 +76,8 @@ def test_fleet_idle_agrees_across_efficiency_rankings_and_waste():
 
 
 def test_trend_route_applies_month_specific_mixed_fuel():
-    rows = [tx(1, "V-1", "2026-08-05T08:00:00", 100.0, 300.0), tx(2, "V-1", "2026-08-06T08:00:00", 20.0, 70.0, fuel="SUPER"),
-            tx(3, "V-1", "2026-09-05T08:00:00", 80.0, 240.0)]
+    rows = [summary_tx(1, "V-1", 100.0, 300.0), summary_tx(2, "V-1", 20.0, 70.0, fuel="SUPER"),
+            summary_tx(3, "V-1", 80.0, 240.0, month_end="2026-09-30")]
     trips = {1: {"status": "complete", "error": None, "trips": [
         {"start_time": ts(2026, 8, 5), "end_time": ts(2026, 8, 5, 13), "distance_km": 500.0},
         {"start_time": ts(2026, 9, 5), "end_time": ts(2026, 9, 5, 13), "distance_km": 400.0}]}}
@@ -95,60 +97,28 @@ OVERLAP_ROWS = [tx(1, "V-1", "2026-08-31", 500.0, 1500.0, imp=9, date_basis="rep
                 tx(3, "V-2", "2026-08-11T08:00:00", 30.0, 90.0, imp=7, date_basis="transaction")]
 
 
-def test_monthly_summary_takes_precedence_whatever_the_coverage():
-    # The summary (500 L) wins over the unit-month's dated row (70 L); full-month dated coverage does not change that
+def test_reporting_uses_monthly_summaries_only():
+    # V-1 has a 500 L August summary and a 70 L dated row; V-2 has only a 30 L dated row. Reporting counts the summary
+    # alone (500 L): dated rows are never combined with it, and V-2's dated row is never a fallback. Coverage is
+    # irrelevant, so no summary/dated overlap can arise.
     for meta in ({7: FULL_AUG}, {}):
         with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
              patch("app.fuel.routes.fetch_import_coverage", return_value=meta):
+            api.bundle.return_value = IDLE_BUNDLE
             body = api.get(f"/api/fuel/analytics/summary?{AUG}")
-        assert body["total_litres"] == 530.0 and body["monthly_summary_rows"] == 1, body
-        overlap = body["excluded_scope"]["summary_dated_overlap"]
-        assert (overlap["transaction_count"], overlap["litres"]) == (1, 70.0), overlap
-    print("[PASS] Monthly summary takes precedence over the same unit-month's dated rows (530 L, never 600 L), "
-          "with or without confirmed dated coverage.")
-
-
-def test_waste_reports_overlap_not_as_unmatched():
-    with Api(rows=OVERLAP_ROWS, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-         patch("app.fuel.routes.fetch_import_coverage", return_value={}):
-        api.bundle.return_value = IDLE_BUNDLE
-        waste = api.get(f"/api/fuel/analytics/waste?{AUG}")
-    by_type = {}
-    for a in waste["anomalies"]:
-        by_type.setdefault(a["anomaly_type"], []).append(a)
-    assert "unmatched_vehicle" not in by_type, by_type.get("unmatched_vehicle")
-    (item,) = by_type["summary_dated_overlap"]
-    assert item["severity"] == "info" and item["details"]["month"] == "2026-08" and item["details"]["wialon_unit_id"] == 1
-    assert item["details"]["excluded_summary"]["litres"] == 0.0 and item["details"]["excluded_dated"]["litres"] == 70.0
-    assert item["details"]["resolution"] == "summary_used_dated_excluded" and "Superseded" in item["title"]
-    print("[PASS] /waste: one summary_dated_overlap info item (unit 1, 2026-08): dated rows excluded, summary kept; "
-          "never reported as unmatched.")
-
-
-def test_daily_route_verifies_only_confirmed_past_days():
-    rows = [tx(1, "V-1", "2026-08-03T08:00:00", 50.0, 150.0, imp=7), tx(2, "V-2", "2026-08-09T08:00:00", 20.0, 60.0, imp=7)]
-    first_last = {**FULL_AUG, "replace_scope": {**FULL_AUG["replace_scope"], "extended_to_full_months": False}}
-    cases = [({7: FULL_AUG}, "statement_verified", 31), ({7: first_last}, "unverified", 0), ({}, "unverified", 0)]
-    for meta, status, covered in cases:
-        with Api(rows=rows, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-             patch("app.fuel.routes.fetch_import_coverage", return_value=meta):
-            body = api.get(f"/api/fuel/analytics/daily?{AUG}")
-        assert (body["coverage_status"], body["covered_days"]) == (status, covered), (meta, body["coverage_status"])
-        empty_day = next(d for d in body["data"] if d["date"] == "2026-08-01")
-        assert empty_day["litres"] == (0.0 if covered else None), empty_day
-        assert body["supplier_completeness"] == "not_established"
-    # A month in progress: the import claims the whole month, but days after today can never be covered
-    fake_today = datetime(2026, 9, 20, 10, tzinfo=UAE)
-    sept = [tx(1, "V-1", "2026-09-01T08:00:00", 10.0, 30.0, imp=7)]
-    whole_sept = {**FULL_AUG, "replace_scope": {"period_from": "2026-09-01", "period_to": "2026-09-30", "extended_to_full_months": True}}
-    with Api(rows=sept, units=UNITS) as api, patch.dict(os.environ, {"FUEL_IMPORT_REPLACE": "1"}), \
-         patch("app.fuel.routes.fetch_import_coverage", return_value={7: whole_sept}), \
-         patch("app.fuel.routes.get_uae_now", return_value=fake_today):
-        body = api.get("/api/fuel/analytics/daily?date_from=2026-09-01&date_to=2026-09-30")
-    future = [d for d in body["data"] if d["date"] > "2026-09-20"]
-    assert len(future) == 10 and all(d["coverage"] == "future" and d["litres"] is None for d in future)
-    assert body["coverage_status"] == "partial" and body["covered_days"] == 20
-    print("[PASS] /daily: statement_verified only with confirmed whole-month coverage; otherwise rowless days are null; future days never covered.")
+            eff = api.get(f"/api/fuel/analytics/efficiency?{AUG}")
+            ranked = api.get(f"/api/fuel/analytics/efficiency/vehicles?{AUG}&page_size=100")
+            waste = api.get(f"/api/fuel/analytics/waste?{AUG}")
+        assert body["total_litres"] == 500.0 and body["monthly_summary_rows"] == 1, body
+        scope = body["excluded_scope"]
+        assert scope["summary_dated_overlap"]["transaction_count"] == 0 and scope["overlap_conflicts"] == []
+        assert (scope["dated_not_reported"]["transaction_count"], scope["dated_not_reported"]["litres"]) == (2, 100.0)
+        assert eff["total_litres"] == 500.0 and eff["vehicle_count"] == 1 and eff["unmatched_litres"] == 0.0
+        assert [v["vehicle_identifier"] for v in ranked["data"]] == ["V-1"], "V-2 has no monthly summary: not listed"
+        types = {a["anomaly_type"] for a in waste["anomalies"]}
+        assert "summary_dated_overlap" not in types and "unmatched_vehicle" not in types, types
+    print("[PASS] Reporting uses monthly summaries only (500 L, never 530/600 L); dated rows are counted as not "
+          "reported, never combined or used as a fallback; no overlap is reported.")
 
 
 def test_vehicle_detail_idle_estimate_uses_raw_seconds():
@@ -169,9 +139,7 @@ TESTS = [
     test_vehicle_detail_idle_estimate_uses_raw_seconds,
     test_fleet_idle_agrees_across_efficiency_rankings_and_waste,
     test_trend_route_applies_month_specific_mixed_fuel,
-    test_monthly_summary_takes_precedence_whatever_the_coverage,
-    test_waste_reports_overlap_not_as_unmatched,
-    test_daily_route_verifies_only_confirmed_past_days,
+    test_reporting_uses_monthly_summaries_only,
 ]
 
 if __name__ == "__main__":

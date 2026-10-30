@@ -397,11 +397,6 @@ export async function getFuelExcluded(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/excluded${buildFuelQueryString(params)}`, options, 30000)
 }
 
-// Every calendar day with dated fuel and its statement coverage (null values = unknown, never 0)
-export async function getFuelDaily(params = {}, options = {}) {
-    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/daily${buildFuelQueryString(params)}`, options, 30000)
-}
-
 export async function getFuelVehicleDistance(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/distance${buildFuelQueryString(params)}`, options, 30000)
 }
@@ -464,10 +459,6 @@ export async function getFuelWaste(params = {}, options = {}) {
 
 export async function getVehicleFuelDetail(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/vehicle-detail${buildFuelQueryString(params)}`, options, 30000)
-}
-
-export async function getFuelTransactions(params = {}, options = {}) {
-    return deduplicatedFetch(`${API_URL}/api/fuel/transactions${buildFuelQueryString(params)}`, options, 30000)
 }
 
 // Monthly-summary totals in the KPI scope, by reporting month (never by a refuelling date)

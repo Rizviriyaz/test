@@ -715,10 +715,10 @@ def _fuel_scope(date_from: str = None, date_to: str = None, vehicle_identifier: 
         raise ToolInputError("date_from must be on or before date_to")
     fuel_type = _fuel_type_arg(fuel_type)
 
-    # Same scope as the /api/fuel endpoints, including the fuel-type filter and the summary/dated overlap rule
+    # Same scope as the /api/fuel endpoints, including the fuel-type filter: monthly summaries are the only fuel source
     filters = {"date_from": date_from, "date_to": date_to, "vehicle_identifier": vehicle_identifier, "fuel_type": fuel_type}
     return build_scope(filters, fetch_fuel_transactions_for_analytics, lambda: login(), lambda sid: get_all_vehicles(sid),
-                       get_fuel_vehicle_identifiers, fetch_import_coverage)
+                       get_fuel_vehicle_identifiers, fetch_import_coverage, summary_only=True)
 
 
 DEFAULT_IDLE_RATE_LPH = 2.0
@@ -855,11 +855,12 @@ def tool_get_fleet_fuel_efficiency(date_from: str = None, date_to: str = None, f
     notes: list = []
     bundle, dates = _telematics_for(scope, date_from, date_to, notes)
     if dates is None:
-        eff = calculate_fleet_efficiency([], {}, [], rate)
+        eff = calculate_fleet_efficiency(scope.unmapped, {}, scope.units, rate)
     else:
-        # Without telematics only Wialon-based values are unknown (None), as in /analytics/efficiency
+        # Without telematics only Wialon-based values are unknown (None), as in /analytics/efficiency; unmapped monthly
+        # records count in the fleet fuel totals only
         eff = calculate_fleet_efficiency(
-            scope.matched, bundle["by_name"] if bundle else {}, scope.units, rate,
+            scope.matched + scope.unmapped, bundle["by_name"] if bundle else {}, scope.units, rate,
             telematics_status=bundle["status"] if bundle else "unavailable",
             data_warnings=list((bundle or {}).get("warnings") or []) + notes,
             duplicate_names=bundle["duplicate_names"] if bundle else None,

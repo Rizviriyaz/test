@@ -11,8 +11,8 @@ import { getVehicleFuelDetail } from "../../api/fleetApi"
 import VehicleStatusBadge from "./VehicleStatusBadge"
 import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber, idleSessionsLabel } from "./telemetryFormat"
 import ClassificationBadge from "./ClassificationBadge"
-import { fixedOrDash, fuelTypeLabel, isRefundAdjustment } from "./fuelLabels"
-import { formatReportingMonth, transactionDateLabel } from "./fuelImportState"
+import { fuelTypeLabel } from "./fuelLabels"
+import { formatReportingMonth } from "./fuelImportState"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -84,8 +84,7 @@ export default function VehicleFuelDetailModal({
     if (!vehicleIdentifier) return null
 
     const summary = data?.vehicle_summary
-    const txns = data?.transactions || []
-    // Monthly totals (stored without a refuelling date); listed apart from the dated refuels
+    // Monthly summaries are the fuel reporting source: statement totals for a whole month, not refuelling events
     const monthlySummaries = data?.monthly_summaries || []
     const activity = data?.activity_breakdown || {}
     const anomalies = data?.anomalies || []
@@ -164,7 +163,7 @@ export default function VehicleFuelDetailModal({
                             <div role="tablist" className="-mx-4 flex items-center gap-4 overflow-x-auto border-b border-slate-200 px-4 sm:-mx-5 sm:px-5">
                                 {[
                                     { id: "overview", label: "Performance Overview" },
-                                    { id: "transactions", label: `Transactions (${txns.length})` },
+                                    { id: "transactions", label: `Monthly statements (${monthlySummaries.length})` },
                                     { id: "activity", label: "Driving & Idling Activity" },
                                     { id: "anomalies", label: `Anomalies (${anomalies.length})` },
                                 ].map((t) => (
@@ -212,7 +211,7 @@ export default function VehicleFuelDetailModal({
                                                 {formatNumber(totalLitres, 1)} <span className="text-xs font-semibold text-slate-400">L</span>
                                             </span>
                                             <span className="mt-0.5 block text-xs text-slate-500">
-                                                {txns.length} refuel transactions
+                                                {monthlySummaries.length} monthly summary row(s)
                                             </span>
                                         </div>
 
@@ -357,69 +356,14 @@ export default function VehicleFuelDetailModal({
                                 </div>
                             )}
 
-                            {/* ─── TAB 2: TRANSACTIONS ─────────────────────────────── */}
+                            {/* ─── TAB 2: MONTHLY STATEMENTS ───────────────────────── */}
                             {activeTab === "transactions" && (
                                 <div className="space-y-4">
-                                    <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                                        <table className="w-full text-left text-xs">
-                                            <thead className="border-b border-slate-200 bg-slate-50 text-[11px] text-slate-500">
-                                                <tr>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium">Date & Time</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium">Site / Station</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium">Product</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Quantity (L)</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Unit Price</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Total (AED)</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium text-right">Odometer</th>
-                                                    <th scope="col" className="px-3.5 py-2 font-medium">Driver / Invoice</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody className="divide-y divide-slate-100">
-                                                {txns.length === 0 ? (
-                                                    <tr>
-                                                        <td colSpan={8} className="py-8 text-center text-xs text-slate-400">
-                                                            No transactions recorded for this vehicle in the selected period.
-                                                        </td>
-                                                    </tr>
-                                                ) : (
-                                                    txns.map((t) => (
-                                                        <tr key={t.id} className="hover:bg-slate-50/60 transition-colors">
-                                                            <td className="px-3.5 py-2.5 font-mono text-[11px] font-semibold text-slate-800 whitespace-nowrap">
-                                                                {transactionDateLabel(t)}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-slate-700 whitespace-nowrap">
-                                                                {t.station_name || "—"}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
-                                                                {fuelTypeLabel(t.fuel_type)}
-                                                                {isRefundAdjustment(t) && (
-                                                                    <span className="ml-1.5 rounded bg-amber-100 px-1 py-0.5 text-[10px] font-semibold text-amber-800">Refund</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-slate-900 whitespace-nowrap">
-                                                                {formatNumber(t.litres, 1)}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
-                                                                {t.unit_price != null ? `AED ${fixedOrDash(t.unit_price)}` : "—"}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-semibold text-emerald-800 whitespace-nowrap">
-                                                                {t.total_cost != null ? `AED ${formatNumber(t.total_cost, 2)}` : "—"}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-right font-mono text-slate-600 whitespace-nowrap">
-                                                                {t.odometer_km ? `${formatNumber(t.odometer_km, 0)} km` : (
-                                                                    <span className="text-amber-600 text-[10px] font-semibold">Missing</span>
-                                                                )}
-                                                            </td>
-                                                            <td className="px-3.5 py-2.5 text-slate-500 whitespace-nowrap text-[11px]">
-                                                                {t.driver_name || t.invoice_number || "—"}
-                                                            </td>
-                                                        </tr>
-                                                    ))
-                                                )}
-                                            </tbody>
-                                        </table>
-                                    </div>
-                                    {monthlySummaries.length > 0 && (
+                                    {monthlySummaries.length === 0 ? (
+                                        <p className="rounded-lg border border-slate-200 bg-white py-8 text-center text-xs text-slate-400">
+                                            No monthly summary recorded for this vehicle in the selected period.
+                                        </p>
+                                    ) : (
                                         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                                             <p className="border-b border-slate-200 bg-slate-50 px-3.5 py-2 text-[11px] text-slate-500">
                                                 Monthly summaries: statement totals for a whole month, not refuelling events

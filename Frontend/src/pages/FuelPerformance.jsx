@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef } from "react"
 import { createPortal } from "react-dom"
-import { Link } from "react-router-dom"
 import {
     UploadCloud,
     AlertTriangle,
@@ -9,19 +8,14 @@ import {
     X,
     Loader2,
     CalendarDays,
-    CalendarRange,
-    Info,
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
 import { EmptyState, ErrorBanner } from "../components/Common/StateViews"
 import { useFuelFilters } from "../context/useFuelFilters"
 import {
-    getFleetEfficiency,
-    getVehicleEfficiencyList,
     previewFuelImport,
     executeFuelImport,
     getFuelTrend,
-    getFuelDaily,
     clearClientCache,
 } from "../api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
@@ -29,14 +23,15 @@ import KpiCards from "../components/Fuel/KpiCards"
 import DrivingVsIdlingChart from "../components/Fuel/DrivingVsIdlingChart"
 import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
 import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
-import { excludedSummary, skippedRowsLabel } from "../components/Fuel/fuelLabels"
+import { skippedRowsLabel } from "../components/Fuel/fuelLabels"
 import FuelImportControls from "../components/Fuel/FuelImportControls"
 import DataCoverage from "../components/Fuel/DataCoverage"
 import { canConfirmImport, formatReportingDate, formatReportingMonth, importOptions, isReportingMonth, mappingForImport, showColumnChoices } from "../components/Fuel/fuelImportState"
-import { dailySearch, datedDailyAvailability, datedTransactionCount, isCurrentMonth, latestMonthWithData, monthLabel } from "../components/Fuel/fuelPeriod"
-import { fuelVehicleListParams } from "../utils/fleetRules"
+import { latestMonthWithData, monthLabel } from "../components/Fuel/fuelPeriod"
+import FuelNoticeList from "../components/Fuel/FuelNoticeList"
+import { fuelScopeNotices } from "../components/Fuel/fuelNotices"
+import useFuelEfficiencyData from "../components/Fuel/useFuelEfficiencyData"
 import { getUAETodayStr } from "../utils/datetime"
-import { TELEMATICS_RETRY_DELAY_MS, shouldRetryTelematics } from "../components/Fuel/telemetryFormat"
 
 const NO_IMPORT_CHOICES = { mapping: null, reportingMonth: "", mappingConfirmed: false, extendToFullMonths: false, singleDateMode: "" }
 
@@ -57,44 +52,16 @@ function previewPeriodLabel(preview) {
 export default function FuelPerformance() {
     const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, setVehicle } = useFuelFilters()
 
-    // Configurable Telematics Idle Rate (Litres/Hour)
-    const [idleRate, setIdleRate] = useState(2.0)
+    const {
+        idleRate, setIdleRate,
+        efficiency, loadingEfficiency, overviewError, loadEfficiencyData,
+        idleWasters, loadingIdleWasters, idleWastersError, loadIdleWasters,
+        vehiclesData, loadingRankings, rankingsError, loadRankingsData,
+        sortBy, setSortBy, sortOrder, setSortOrder, statusFilter, setStatusFilter,
+        searchQuery, setSearchQuery, page, setPage, pageSize,
+        telematicsPending, telematicsRetries,
+    } = useFuelEfficiencyData(queryParams)
     const [idleThreshold] = useState(5.0)
-
-    // Requests use the debounced rate, so dragging the slider does not fire a request per 0.1 L/h step
-    const [idleRateQuery, setIdleRateQuery] = useState(2.0)
-    useEffect(() => {
-        const t = setTimeout(() => setIdleRateQuery(idleRate), 300)
-        return () => clearTimeout(t)
-    }, [idleRate])
-
-    // Latest-request guards: a slower earlier response must never overwrite a newer one
-    const efficiencyRequestIdRef = useRef(0)
-    const rankingsRequestIdRef = useRef(0)
-    const idleWastersRequestIdRef = useRef(0)
-
-    // Fleet Efficiency & Overview Metrics
-    const [efficiency, setEfficiency] = useState(null)
-    const [loadingEfficiency, setLoadingEfficiency] = useState(true)
-    const [overviewError, setOverviewError] = useState(null)
-
-
-    // Fleet-wide idle fuel ranking (independent of the leaderboard's page, search, sort and status)
-    const [idleWasters, setIdleWasters] = useState([])
-    const [loadingIdleWasters, setLoadingIdleWasters] = useState(true)
-    const [idleWastersError, setIdleWastersError] = useState(null)
-
-    // Rankings & Leaderboard State
-    const [sortBy, setSortBy] = useState("efficiency")
-    const [sortOrder, setSortOrder] = useState("desc")
-    const [statusFilter, setStatusFilter] = useState("")
-    const [searchQuery, setSearchQuery] = useState("")
-    const [page, setPage] = useState(1)
-    const [pageSize] = useState(20)
-    const [vehiclesData, setVehiclesData] = useState({ data: [], total: 0, page: 1 })
-    const [loadingRankings, setLoadingRankings] = useState(true)
-    const [rankingsError, setRankingsError] = useState(null)
-
 
     // Latest month with data, looked up only when the selected month is empty: idle | loading | found | none | error
     const [latestMonth, setLatestMonth] = useState({ status: "idle", month: null })
@@ -116,129 +83,6 @@ export default function FuelPerformance() {
     const [importError, setImportError] = useState(null)
 
     const fileInputRef = useRef(null)
-
-    // 1. Fetch Fleet Efficiency Metrics
-    // `silent`: a background refresh (telematics retry) keeps the figures on screen instead of a loading state
-    const loadEfficiencyData = useCallback(async ({ silent = false } = {}) => {
-        const requestId = ++efficiencyRequestIdRef.current
-        try {
-            if (!silent) setLoadingEfficiency(true)
-            setOverviewError(null)
-            const res = await getFleetEfficiency({
-                ...queryParams,
-                idle_rate_lph: idleRateQuery,
-            })
-            if (requestId !== efficiencyRequestIdRef.current) return
-            setEfficiency(res)
-        } catch (err) {
-            if (requestId !== efficiencyRequestIdRef.current) return
-            setEfficiency(null)
-            setOverviewError(err.message || "Failed to load fleet efficiency metrics.")
-        } finally {
-            if (requestId === efficiencyRequestIdRef.current) setLoadingEfficiency(false)
-        }
-    }, [queryParams, idleRateQuery])
-
-    // 3. Fetch Vehicle Rankings
-    const loadRankingsData = useCallback(async ({ silent = false } = {}) => {
-        const requestId = ++rankingsRequestIdRef.current
-        try {
-            if (!silent) setLoadingRankings(true)
-            setRankingsError(null)
-            const res = await getVehicleEfficiencyList({
-                page,
-                page_size: pageSize,
-                sort_by: sortBy,
-                sort_order: sortOrder,
-                // Global filters first, so the local search box (and status/sort) is never overwritten by them. The
-                // global vehicle filter is exact (vehicle_filter, as the KPI cards); the search box stays a substring.
-                ...fuelVehicleListParams(queryParams, searchQuery),
-                status: statusFilter || undefined,
-                idle_rate_lph: idleRateQuery,
-            })
-            if (requestId !== rankingsRequestIdRef.current) return
-            setVehiclesData(res || { data: [], total: 0, page: 1 })
-        } catch (err) {
-            if (requestId !== rankingsRequestIdRef.current) return
-            setVehiclesData({ data: [], total: 0, page: 1 })
-            setRankingsError(err.message || "Failed to load vehicle rankings.")
-        } finally {
-            if (requestId === rankingsRequestIdRef.current) setLoadingRankings(false)
-        }
-    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
-
-    // 4. Fetch the fleet-wide idle fuel ranking: period and global filters only, never the leaderboard's
-    // page, search, sort or status
-    const loadIdleWasters = useCallback(async ({ silent = false } = {}) => {
-        const requestId = ++idleWastersRequestIdRef.current
-        try {
-            if (!silent) setLoadingIdleWasters(true)
-            setIdleWastersError(null)
-            const res = await getVehicleEfficiencyList({
-                page: 1,
-                page_size: 5,
-                sort_by: "estimated_idle_fuel",
-                sort_order: "desc",
-                // No status filter: vehicles with known idle hours but unknown distance (no_distance_data) carry the
-                // same idle estimate as the KPI; unknown estimates are dropped below, never ranked as 0
-                idle_rate_lph: idleRateQuery,
-                ...fuelVehicleListParams(queryParams),
-            })
-            if (requestId !== idleWastersRequestIdRef.current) return
-            // Without Wialon telematics there is no ranking: say so rather than "no idle fuel"
-            if (res?.telematics_status === "unavailable") {
-                setIdleWasters([])
-                setIdleWastersError(res.data_warnings?.[0] || "Wialon telematics unavailable.")
-                return
-            }
-            // Unknown estimates are not ranked
-            setIdleWasters((res?.data || []).filter(
-                (v) => v.estimated_idle_fuel_litres !== null && v.estimated_idle_fuel_litres !== undefined
-            ))
-        } catch (err) {
-            if (requestId !== idleWastersRequestIdRef.current) return
-            setIdleWasters([])
-            setIdleWastersError(err.message || "Failed to load the idle fuel ranking.")
-        } finally {
-            if (requestId === idleWastersRequestIdRef.current) setLoadingIdleWasters(false)
-        }
-    }, [queryParams, idleRateQuery])
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
-        loadEfficiencyData()
-        loadIdleWasters()
-    }, [loadEfficiencyData, loadIdleWasters])
-
-    // Wialon reports still running on the server (telematics_pending): ask again, silently and a bounded number of
-    // times, so real distance, driving and idle values replace the placeholders. The server runs one report per period
-    // and caches it, so a retry joins it instead of starting another. Counted per filter set.
-    const telematicsKey = `${new URLSearchParams(queryParams).toString()}|${idleRateQuery}`
-    const [telematicsRetry, setTelematicsRetry] = useState({ key: null, count: 0 })
-    const telematicsRetries = telematicsRetry.key === telematicsKey ? telematicsRetry.count : 0
-    const telematicsPending = !loadingEfficiency && shouldRetryTelematics(efficiency, telematicsRetries)
-    useEffect(() => {
-        if (!telematicsPending) return undefined
-        const timer = setTimeout(() => {
-            setTelematicsRetry({ key: telematicsKey, count: telematicsRetries + 1 })
-            clearClientCache("/api/fuel/analytics/efficiency")
-            loadEfficiencyData({ silent: true })
-            loadRankingsData({ silent: true })
-            loadIdleWasters({ silent: true })
-        }, TELEMATICS_RETRY_DELAY_MS)
-        return () => clearTimeout(timer)
-    }, [telematicsPending, telematicsKey, telematicsRetries, loadEfficiencyData, loadRankingsData, loadIdleWasters])
-
-    const [pageFilters, setPageFilters] = useState(queryParams)
-    if (pageFilters !== queryParams) {
-        setPageFilters(queryParams)
-        setPage(1)
-    }
-
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change
-        loadRankingsData()
-    }, [loadRankingsData])
 
     useEffect(() => {
         if (!isImportModalOpen) return undefined
@@ -322,20 +166,8 @@ export default function FuelPerformance() {
     const today = getUAETodayStr()
     const monthMode = period === "month"
     const summaryRows = Number(scope?.monthly_summary_rows) || 0
-    // "View Daily Transactions" is offered only when /analytics/daily reports dated (transaction-level) rows for the month
-    // (see datedDailyAvailability); it is checked only for a month with dated rows in the KPI scope
-    const checkDaily = monthMode && !loadingEfficiency && (datedTransactionCount(scope) || 0) > 0
-    const dailyKey = checkDaily ? new URLSearchParams(queryParams).toString() : null
-    const [dailyCheck, setDailyCheck] = useState({ key: null, available: false })
-    useEffect(() => {
-        if (!dailyKey) return undefined
-        let active = true
-        getFuelDaily(queryParams)
-            .then((res) => { if (active) setDailyCheck({ key: dailyKey, available: datedDailyAvailability(res).available }) })
-            .catch(() => { if (active) setDailyCheck({ key: dailyKey, available: false }) })
-        return () => { active = false }
-    }, [dailyKey, queryParams])
-    const dailyEligible = checkDaily && dailyCheck.key === dailyKey && dailyCheck.available
+    // Monthly summaries are the only fuel reporting source: dated statement rows in the period are counted, never shown
+    const datedNotReported = Number(scope?.dated_not_reported?.transaction_count) || 0
 
     // When the selected month is empty, find the latest month with matched fuel data (fuel-only monthly trend; no
     // Wialon reports). Months whose rows are all unmatched are not offered: their KPIs would be empty too.
@@ -357,43 +189,7 @@ export default function FuelPerformance() {
         return () => { active = false }
     }, [lookupLatest, vehicle])
 
-    // Concise data notices, most relevant first
-    const notices = []
-    if (monthMode && isCurrentMonth(selectedMonth, today)) {
-        notices.push({ key: "mtd", tone: "info", text: `${monthLabel(selectedMonth)} is in progress: month-to-date figures.` })
-    }
-    if (summaryRows > 0) {
-        notices.push({ key: "summary", tone: "info", text: `Includes ${summaryRows} monthly-summary row(s): statement totals, not dated refuels.` })
-    }
-    const summaryRangeWarnings = (Array.isArray(scope?.warnings) ? scope.warnings : []).filter((w) => /monthly-summary/i.test(w))
-    summaryRangeWarnings.forEach((w, i) => notices.push({ key: `range-${i}`, tone: "warn", text: w }))
-    const partialSummaries = excludedSummary(scope)?.partialSummaries || 0
-    if (partialSummaries > 0 && summaryRangeWarnings.length === 0) {
-        notices.push({ key: "partial", tone: "warn", text: `${partialSummaries} monthly-summary row(s) excluded: the range does not cover their whole month.` })
-    }
-    // Unit-months with both a monthly summary and dated rows (no confirmed full-month coverage): excluded, never summed
-    const overlapConflicts = (Array.isArray(scope?.overlap_conflicts) ? scope.overlap_conflicts : [])
-        .filter((c) => c?.resolution === "excluded_coverage_unconfirmed")
-    if (overlapConflicts.length > 0) {
-        notices.push({
-            key: "overlap",
-            tone: "warn",
-            text: `${overlapConflicts.length} vehicle-month(s) excluded: monthly-summary and dated rows overlap without confirmed full-month coverage.`,
-            title: overlapConflicts.map((c) => `${c.wialon_unit_name || c.wialon_unit_id} ${c.month}`).join("\n"),
-        })
-    }
-    const telematicsWarnings = Array.isArray(efficiency?.data_warnings) ? efficiency.data_warnings : []
-    // "unavailable": Wialon reports failed or did not answer in time; fuel figures are shown, telematics values are "—"
-    if (efficiency?.telematics_status === "partial" || efficiency?.telematics_status === "unavailable") {
-        notices.push({
-            key: "telematics",
-            tone: "warn",
-            text: telematicsPending
-                ? "Wialon reports are still running. Distance, driving and idle values will appear automatically."
-                : `Wialon telematics ${efficiency.telematics_status === "unavailable" ? "unavailable" : "incomplete"}${telematicsWarnings[0] ? `: ${telematicsWarnings[0]}` : "."}`,
-            title: telematicsWarnings.join("\n"),
-        })
-    }
+    const notices = fuelScopeNotices({ efficiency, selectedMonth, today, monthMode, telematicsPending })
 
     return (
         <AppShell>
@@ -402,15 +198,6 @@ export default function FuelPerformance() {
                 idleRate={idleRate}
                 setIdleRate={setIdleRate}
                 onOpenImport={openImportModal}
-                actions={dailyEligible ? (
-                    <Link
-                        to={`/fuel/daily?${dailySearch(selectedMonth, vehicle)}`}
-                        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-brand/40 bg-white px-2.5 text-xs font-medium text-brand transition-colors hover:bg-brand-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
-                    >
-                        <CalendarRange className="h-3.5 w-3.5" />
-                        View Daily Transactions
-                    </Link>
-                ) : null}
             />
 
             <div className="space-y-3 sm:space-y-4">
@@ -418,24 +205,18 @@ export default function FuelPerformance() {
                     <ErrorBanner message={overviewError} onRetry={loadEfficiencyData} />
                 )}
 
-                {notices.length > 0 && (
-                    <ul role="status" className="space-y-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-xs">
-                        {notices.map((n) => (
-                            <li key={n.key} className={`flex items-start gap-2 ${n.tone === "warn" ? "text-amber-900" : "text-slate-600"}`} title={n.title}>
-                                {n.tone === "warn"
-                                    ? <AlertTriangle className="mt-px h-3.5 w-3.5 shrink-0 text-amber-600" />
-                                    : <Info className="mt-px h-3.5 w-3.5 shrink-0 text-slate-400" />}
-                                <span className="min-w-0">{n.text}</span>
-                            </li>
-                        ))}
-                    </ul>
-                )}
+                <FuelNoticeList notices={notices} />
 
                 {hasNoData ? (
                     <EmptyState
                         icon={CalendarDays}
                         title={`No fuel data for ${periodLabel}`}
-                        message={vehicle ? `Filter: ${vehicle}` : undefined}
+                        message={[
+                            vehicle ? `Filter: ${vehicle}` : null,
+                            datedNotReported > 0
+                                ? `${datedNotReported.toLocaleString("en-US")} dated transaction row(s) exist, but fuel is reported from monthly summaries only.`
+                                : null,
+                        ].filter(Boolean).join(" ") || undefined}
                         action={monthMode ? (
                             latestMonth.status === "loading" ? (
                                 <span className="text-xs text-slate-400">Finding the latest month with data…</span>
