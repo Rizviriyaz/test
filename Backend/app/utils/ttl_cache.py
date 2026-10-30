@@ -4,6 +4,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import Future
+from contextlib import contextmanager
 from typing import Any, Callable, Dict, Hashable, Optional, Tuple
 
 
@@ -99,6 +100,32 @@ class TTLCache:
         with self._lock:
             self._data.clear()
 
+    @contextmanager
+    def _key_state(self, key: Hashable):
+        """Hold key's single-flight lock; the per-key state is dropped once no caller is waiting."""
+        with self._lock:
+            state = self._states.setdefault(key, _KeyState())
+            state.waiters += 1
+        try:
+            with state.lock:
+                yield state
+        finally:
+            with self._lock:
+                state.waiters -= 1
+                if state.waiters == 0 and self._states.get(key) is state:
+                    del self._states[key]
+
+    def _compute_and_set(self, state: _KeyState, key: Hashable, compute: Callable[[], Any],
+                         ttl_for: Callable[[Any], float]) -> Any:
+        try:
+            value = compute()
+        except BaseException as exc:
+            state.error, state.error_at = exc, self._now()
+            raise
+        state.error = None
+        self.set(key, value, ttl_for(value))
+        return value
+
     def get_or_compute(
         self,
         key: Hashable,
@@ -109,26 +136,25 @@ class TTLCache:
         hit = self.get(key)
         if hit is not None:
             return hit
-        with self._lock:
-            state = self._states.setdefault(key, _KeyState())
-            state.waiters += 1
-        try:
-            with state.lock:
-                hit = self.get(key)
-                if hit is not None:
-                    return hit
-                if state.error is not None and self._now() - state.error_at < self.error_share_seconds:
-                    raise state.error
-                try:
-                    value = compute()
-                except BaseException as exc:
-                    state.error, state.error_at = exc, self._now()
-                    raise
-                state.error = None
-                self.set(key, value, ttl_for(value))
-                return value
-        finally:
-            with self._lock:
-                state.waiters -= 1
-                if state.waiters == 0 and self._states.get(key) is state:
-                    del self._states[key]
+        with self._key_state(key) as state:
+            hit = self.get(key)
+            if hit is not None:
+                return hit
+            if state.error is not None and self._now() - state.error_at < self.error_share_seconds:
+                raise state.error
+            return self._compute_and_set(state, key, compute, ttl_for)
+
+    def refresh(
+        self,
+        key: Hashable,
+        compute: Callable[[], Any],
+        ttl_for: Callable[[Any], float],
+    ) -> Any:
+        """
+        Recompute key now and cache the result for ttl_for(value) seconds, keeping the current entry served until it
+        is replaced. It runs under the key's single-flight lock, so a get_or_compute miss meanwhile (the entry expired
+        during the refresh) waits for this result instead of computing its own. A failure is not cached: the current
+        entry stays until its own expiry, and callers already queued receive the same exception, as in get_or_compute.
+        """
+        with self._key_state(key) as state:
+            return self._compute_and_set(state, key, compute, ttl_for)

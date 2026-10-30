@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback, useRef } from "react"
+import { Suspense, useEffect, useMemo, useState, useCallback, useRef } from "react"
 import {
     Truck,
     MapPin,
@@ -26,7 +26,7 @@ import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
 import AnalyticsChart from "../components/Analytics/AnalyticsChart"
 import IdleMapModal from "../components/Analytics/IdleMapModal"
-import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import { LazyVehicleDetailDrawer as VehicleDetailDrawer } from "../components/Vehicles/lazyVehicleDetailDrawer"
 import { LocationName } from "../utils/reverseGeocode"
 
 import { formatUAEDateTime, formatUAETime } from "../utils/datetime"
@@ -359,7 +359,7 @@ export default function IdleAnalytics() {
     )
 
     const selectedGroupData = useMemo(() => {
-        if (!selectedGroupId) return null
+        if (selectedGroupId == null) return null
         const gData = byGroup.find((g) => g.group_id === selectedGroupId)
         // The group's members (group totals are group-membership totals, so a multi-group vehicle appears in each)
         const gVehicles = byVehicle.filter((v) => groupIdsOf(v).includes(String(selectedGroupId)))
@@ -424,12 +424,14 @@ export default function IdleAnalytics() {
                 <>
                     {mapEvent && <IdleMapModal event={mapEvent} onClose={() => setMapEvent(null)} />}
                     {drawerVehicle && (
-                        <VehicleDetailDrawer
-                            vehicle={drawerVehicleWithLive}
-                            idleEvents={rangePreset === "today" && !showingSummary ? analytics?.events : null}
-                            idleEventsComplete={drawerEventsComplete}
-                            onClose={() => setDrawerVehicle(null)}
-                        />
+                        <Suspense fallback={null}>
+                            <VehicleDetailDrawer
+                                vehicle={drawerVehicleWithLive}
+                                idleEvents={rangePreset === "today" && !showingSummary ? analytics?.events : null}
+                                idleEventsComplete={drawerEventsComplete}
+                                onClose={() => setDrawerVehicle(null)}
+                            />
+                        </Suspense>
                     )}
                 </>
             }
@@ -690,7 +692,7 @@ export default function IdleAnalytics() {
                                 title="Customer Groups"
                                 flush
                                 actions={
-                                    selectedGroupId ? (
+                                    selectedGroupId != null ? (
                                         <button
                                             type="button"
                                             onClick={() => { setSelectedGroupId(null); setDrillVehicleId(null); }}
@@ -863,7 +865,7 @@ export default function IdleAnalytics() {
                                     unit="min"
                                     height={260}
                                     onItemClick={(d) => {
-                                        if (d?.activePayload?.[0]?.payload?.group_id) {
+                                        if (d?.activePayload?.[0]?.payload?.group_id != null) {
                                             setSelectedGroupId(d.activePayload[0].payload.group_id)
                                         }
                                     }}

@@ -33,7 +33,7 @@ from offline_guard import OfflineGuard  # noqa: E402
 from test_fuel_import_replacement import (  # noqa: E402
     BASE_DIR, DATED_HEADERS, DATED_MAP, SUMMARY_HEADERS, SUMMARY_MAP, USER, FakeReplaceDB, replace_env, xlsx,
 )
-from test_fuel_scope import Api  # noqa: E402
+from test_fuel_scope import Api, reset_fuel_read_caches  # noqa: E402
 
 import app.fuel.db as fuel_db  # noqa: E402
 from app.fuel.db import FuelCommitError  # noqa: E402
@@ -782,6 +782,7 @@ if __name__ == "__main__":
     try:
         for t in TESTS:
             try:
+                reset_fuel_read_caches()
                 t()
             except Exception:
                 failures += 1

@@ -193,14 +193,25 @@ def match_fuel_vehicle_to_wialon(
 
 # ─── Report execution helpers ──────────────────────────────────────────────────
 
+# Wialon errors that a repeat of the same request cannot fix: 2 invalid service, 4 invalid input, 7 access denied,
+# 8 invalid user/password; 1004 (LIMIT msgs_activity): a rerun would load the same messages again
+_NON_RETRYABLE_WIALON_ERRORS = frozenset({2, 4, 7, 8, WIALON_LIMIT_MSGS_ACTIVITY})
+WIALON_INVALID_SESSION = 1
+
+
 def _run_report_with_retry(report_fn: Callable[..., Any], sid: str, *args, **kwargs) -> Tuple[Any, str]:
-    """Run a report; on WialonAPIError re-login once and retry. A second failure propagates (HTTP 502).
-    Wialon error 1004 (LIMIT msgs_activity) propagates at once: a new session would load the same messages again."""
+    """Run a report; on WialonAPIError retry it once. A second failure propagates (HTTP 502).
+    Only an invalid session (error 1, which the gateway's own refresh did not cure) gets a new session; a timeout or
+    other transient failure is retried on the current session, and errors a rerun cannot fix propagate at once."""
     try:
         return report_fn(sid, *args, **kwargs), sid
     except WialonAPIError as exc:
-        if _wialon_error_code(exc) == WIALON_LIMIT_MSGS_ACTIVITY:
+        code = _wialon_error_code(exc)
+        if code in _NON_RETRYABLE_WIALON_ERRORS:
             raise
+        if code != WIALON_INVALID_SESSION:
+            # The gateway sends a refreshed session's current id, so this reuses whatever session is live
+            return report_fn(sid, *args, **kwargs), sid
         # Re-login (the same named session, or the shared one) while holding that session's report lock so
         # no other thread's in-flight report (which reads its result rows from the session) has it replaced mid-report.
         with _report_lock_for(sid):
@@ -390,6 +401,21 @@ def get_fleet_telematics_bundle(
     Raises WialonAPIError when a report fails after one re-login retry.
     """
     return _TELEMATICS_CACHE.get_or_compute(
+        (date_from, date_to),
+        lambda: _build_fleet_telematics_bundle(date_from, date_to, sid),
+        lambda bundle: _ttl_for_bundle(date_to, bundle),
+    )
+
+
+def refresh_fleet_telematics_bundle(date_from: str, date_to: str, sid: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Rebuild the range's bundle now, the same way get_fleet_telematics_bundle builds it, and replace its cache entry
+    (the refresh-ahead of a range ending today). It runs under the range's single-flight lock, so a
+    get_fleet_telematics_bundle call that misses meanwhile (e.g. the trend chain after the entry expired) joins this
+    rebuild instead of starting another. A failure propagates and leaves the current entry in place until it expires
+    on its own TTL.
+    """
+    return _TELEMATICS_CACHE.refresh(
         (date_from, date_to),
         lambda: _build_fleet_telematics_bundle(date_from, date_to, sid),
         lambda bundle: _ttl_for_bundle(date_to, bundle),

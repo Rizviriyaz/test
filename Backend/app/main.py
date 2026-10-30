@@ -21,13 +21,14 @@ from app.utils.status_config import CONN_DELAYED_SECONDS
 from app.utils.rate_limit import enforce_rate_limit
 from app.utils.ttl_cache import TTLCache
 
-from app.wialon import EVENTS_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
+from app.wialon import EVENTS_SESSION, VEHICLE_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
     execute_wialon_unit_engine_report,
     execute_wialon_group_engine_idle_report,
     engine_row_unstable_incomplete,
+    narrow_engine_idle_result,
     resolve_all_units_group_id,
 )
 from app.normalize import (
@@ -68,10 +69,8 @@ async def lifespan(app):
         logging.info("Wialon session established at startup")
     except Exception as exc:
         logging.warning("Wialon login failed at startup; it will be retried on the next request: %s", exc)
-    else:
-        # The alerts scan is the slowest cold load; start it now in the background (never blocks startup)
-        from app.fleet_analytics import prewarm_fleet_alerts
-        prewarm_fleet_alerts()
+    # Alerts are not pre-built here: no page reads them (only the AI chat tool, on demand), and the scan loads 24 h of
+    # messages for every unit (measured 36.8 s, 107 message loads), counting toward Wialon's message-load limit
     yield
 
 
@@ -380,17 +379,23 @@ def health_check():
     }
 
 
+# Live fleet positions: the Dashboard and Tracking pages poll /api/vehicles every 10 s (frontend client cache 8 s).
+# A read is shared for 8 s: under the poll interval, so one viewer still gets a new read on every poll, while
+# other tabs and users polling in between reuse it instead of each reading Wialon again.
+LIVE_FLEET_TTL_SECONDS = 8
+
+
 @app.get("/api/vehicles")
 @timed_calculation("/api/vehicles")
 def get_vehicles():
-    hit = cached("fleet-vehicles-live", ttl_seconds=5)
+    hit = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
     if hit:
         return hit
 
     try:
         # Overlapping polls (several tabs or users) wait for the read already running and reuse its result
         with _single_flight("fleet-vehicles-live"):
-            hit = cached("fleet-vehicles-live", ttl_seconds=5)
+            hit = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
             if hit:
                 return hit
 
@@ -408,7 +413,9 @@ def get_vehicles():
 
             result = {
                 "count": len(fleet),
-                "vehicles": fleet
+                "vehicles": fleet,
+                # When this fleet was read from Wialon (UTC epoch seconds): a shared read is up to LIVE_FLEET_TTL_SECONDS old
+                "retrieved_at": now_timestamp(),
             }
             set_cache("fleet-vehicles-live", result)
             return result
@@ -419,7 +426,7 @@ def get_vehicles():
 
 @app.get("/api/vehicles/{vehicle_id}")
 def get_vehicle_details(vehicle_id: int):
-    cached_fleet_res = cached("fleet-vehicles-live", ttl_seconds=5)
+    cached_fleet_res = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
     fleet = cached_fleet_res.get("vehicles") if cached_fleet_res else None
 
     if not fleet:
@@ -427,7 +434,7 @@ def get_vehicle_details(vehicle_id: int):
         vehicles = get_all_vehicles(sid)
         calculated_data = get_calculated_data(sid, vehicles)
         fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
-        set_cache("fleet-vehicles-live", {"count": len(fleet), "vehicles": fleet})
+        set_cache("fleet-vehicles-live", {"count": len(fleet), "vehicles": fleet, "retrieved_at": now_timestamp()})
 
     vehicle = next(
         (
@@ -546,7 +553,18 @@ def get_vehicle_trips(
     if hit:
         return hit
 
-    sid = login()
+    # Overlapping identical requests (several tabs, a remount) wait for the report already running and reuse its
+    # cached result instead of each running the same Wialon report
+    with _single_flight(cache_key):
+        hit = cached(cache_key, ttl_seconds=60)
+        if hit:
+            return hit
+        return _compute_vehicle_trips(vehicle_id, hours, eff_from, eff_to, cache_key)
+
+
+def _compute_vehicle_trips(vehicle_id, hours, eff_from, eff_to, cache_key):
+    # Own Wialon session (VEHICLE_SESSION): the report never holds the shared report lock Dashboard reports wait on
+    sid = login(session=VEHICLE_SESSION)
 
     # The report returns {"trips": [...]} or raises WialonAPIError (mapped to 502); it never returns None.
     native_rep = execute_wialon_unit_trips_report(sid, vehicle_id, eff_from, eff_to)
@@ -1696,11 +1714,60 @@ def get_fleet_idle_analytics(
             if hit:
                 return hit
         return _compute_with_last_good(cache_key, lambda: _compute_fleet_idle_analytics(
-            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key
+            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key,
+            window_spec=window_spec, reuse_report=not (refresh or skip_cache),
         ), "/api/idle/fleet-analytics")
 
 
-def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key):
+def _engine_report_key(window_spec, report_group_id):
+    return f"engine-idle-report-{window_spec}-grp-{report_group_id}"
+
+
+def _engine_report_covers(entry, include_events, event_vehicle_names):
+    """Whether a shared engine report entry holds the rows and events a run with these arguments would read."""
+    if not include_events:
+        return True
+    if not entry["include_events"]:
+        return False
+    return entry["scope"] is None or (event_vehicle_names is not None and set(event_vehicle_names) <= entry["scope"])
+
+
+def _shared_engine_report(window_spec, report_group_id, include_events, event_vehicle_names):
+    """
+    A cached Engine Hours report of this window and report group that covers the request, as (result narrowed to the
+    request, entry, seconds it stays fresh); else None. The summary (no events) and a single vehicle's events are a
+    subset of a fleet-wide events run, so they reuse it instead of running the same report again. It is reused only
+    for the rest of the TTL it was read with, and the response states that report's window and retrieval time.
+    """
+    if not window_spec:
+        return None
+    raw = _cache.get(_engine_report_key(window_spec, report_group_id))
+    if not raw or not isinstance(raw.get("data"), dict):
+        return None
+    fresh_for = (raw.get("ttl") or 0) - (time.time() - raw["time"])
+    entry = raw["data"]
+    if fresh_for <= 0 or not _engine_report_covers(entry, include_events, event_vehicle_names):
+        return None
+    return narrow_engine_idle_result(entry["result"], include_events, event_vehicle_names), entry, fresh_for
+
+
+def _keep_engine_report(window_spec, report_group_id, rep_res, include_events, event_vehicle_names,
+                        from_time, to_time, retrieved_at, ttl):
+    """Share a report just read (same TTL as the response built from it), unless a broader one is still fresh."""
+    if not window_spec:
+        return
+    key = _engine_report_key(window_spec, report_group_id)
+    scope = None if event_vehicle_names is None else frozenset(event_vehicle_names)
+    existing = cached(key, ttl_seconds=ttl)
+    if existing and _engine_report_covers(existing, include_events, scope) and not _engine_report_covers(
+            {"include_events": include_events, "scope": scope}, existing["include_events"], existing["scope"]):
+        return
+    set_cache(key, {"result": rep_res, "include_events": include_events, "scope": scope,
+                    "from_time": from_time, "to_time": to_time, "retrieved_at": retrieved_at}, ttl_seconds=ttl)
+
+
+def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key,
+                                  window_spec=None, reuse_report=False):
     """Build the /api/idle/fleet-analytics payload from Wialon and cache it under cache_key when complete."""
     sid = login()
 
@@ -1762,14 +1829,22 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     report_group_id = resolve_all_units_group_id(sid, raw_groups)
     # Members of the report group: one without a row is a (transient) report gap, a non-member a permanent one
     report_group_members = set(next((g.get("u") or [] for g in raw_groups if g.get("id") == report_group_id), []))
-    rep_res = execute_wialon_group_engine_idle_report(
-        report_sid,
-        eff_from,
-        eff_to,
-        group_id=report_group_id,
-        include_events=include_events,
-        event_vehicle_names=event_vehicle_names,
-    )
+    shared = _shared_engine_report(window_spec, report_group_id, include_events, event_vehicle_names) if reuse_report else None
+    shared_fresh_for = None
+    if shared is not None:
+        # Rows (and events) of a report already read for this window: this result covers that report's window and
+        # is as old as it is
+        rep_res, shared_entry, shared_fresh_for = shared
+        eff_from, eff_to, current_ts = shared_entry["from_time"], shared_entry["to_time"], shared_entry["retrieved_at"]
+    else:
+        rep_res = execute_wialon_group_engine_idle_report(
+            report_sid,
+            eff_from,
+            eff_to,
+            group_id=report_group_id,
+            include_events=include_events,
+            event_vehicle_names=event_vehicle_names,
+        )
 
     if rep_res is None:
         raise HTTPException(
@@ -2141,9 +2216,15 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         or any(bv["vehicle_id"] in report_group_members and bv["vehicle_name"] not in report_name_counts
                for bv in by_vehicle)
     )
-    set_cache(cache_key, response_payload,
-              ttl_seconds=TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete
-              else closed_window_ttl(eff_to, IDLE_ANALYTICS_TTL_SECONDS))
+    response_ttl = (TRANSIENT_PARTIAL_TTL_SECONDS if transient_incomplete
+                    else closed_window_ttl(eff_to, IDLE_ANALYTICS_TTL_SECONDS))
+    if shared_fresh_for is not None:
+        # Built from a shared report: expires with it, so reuse never makes data older than its own TTL allows
+        response_ttl = min(response_ttl, shared_fresh_for)
+    elif rep_res is not None:
+        _keep_engine_report(window_spec, report_group_id, rep_res, include_events, event_vehicle_names,
+                            eff_from, eff_to, current_ts, response_ttl)
+    set_cache(cache_key, response_payload, ttl_seconds=response_ttl)
     return response_payload
 
 

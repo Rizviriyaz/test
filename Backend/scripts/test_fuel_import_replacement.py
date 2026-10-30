@@ -91,7 +91,11 @@ class FakeReplaceDB:
         return [{"id": r["id"], "source_row_number": r["source_row_number"], "transaction_date": r["transaction_date"],
                  "staged": r.get("staged")} for r in self.rows if r["import_id"] == import_id]
 
-    def commit(self, import_id, supersede_ids, expected_rows, bearer_token=None, deadline=None):
+    def commit(self, import_id, supersede_ids, expected_rows, bearer_token=None, deadline=None,
+               supersede_summary_ids=None):
+        # The importer passes supersede_summary_ids with FUEL_MONTHLY_SUMMARY_TABLE; this fake holds no
+        # fuel_monthly_summaries table, so a non-empty list must fail the test rather than be silently ignored
+        assert not supersede_summary_ids, f"FakeReplaceDB cannot supersede monthly summaries {supersede_summary_ids}"
         self.commit_calls.append((import_id, list(supersede_ids), expected_rows))
         if self.commit_mode == "refuse":
             raise FuelCommitError("rejected by the database (HTTP 400)")

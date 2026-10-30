@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from offline_guard import OfflineGuard  # noqa: E402
+from test_fuel_scope import reset_fuel_read_caches  # noqa: E402
 from wialon_report_fixtures import (  # noqa: E402
     BASE_TS, GROUP_ENGINE_HEADER, GROUPS, TEMPLATE_GROUP_ENGINE, TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_ENGINE,
     TEMPLATE_UNIT_TRIPS, UNITS, FakeReportEngine, default_tables, group_engine_row, group_engine_subrow,
@@ -136,9 +137,10 @@ def test_whole_report_failure_retries_is_not_cached_and_route_degrades():
                 raise AssertionError("expected WialonAPIError")
             except WialonAPIError:
                 pass
-        # the engine report runs on the fuel session (login(session=...)); each failing call re-logs in once
+        # the engine report fails with Wialon error 5 (not a session error): it is retried once on its current
+        # session, without forcing a new login
         forced = [c for c in env.login.call_args_list if c.kwargs.get("force")]
-        assert len(forced) == 2, env.login.call_args_list
+        assert forced == [], env.login.call_args_list
         # failure not cached: second call executed the reports again
         assert env.execs() == 2 * (1 + 2), env.execs()  # per call: trips once, engine twice (retry)
 
@@ -154,7 +156,7 @@ def test_whole_report_failure_retries_is_not_cached_and_route_degrades():
         body = r.json()
         assert body["total_litres"] == 50.0 and body["telematics_status"] == "unavailable", body
         assert body["total_distance_km"] is None and body["total_idle_hours"] is None, body
-    print("[PASS] A report failing after one forced re-login is never cached; the route answers with fuel data and telematics unavailable.")
+    print("[PASS] A report failing after its one retry (no new session for a non-session error) is never cached; the route answers with fuel data and telematics unavailable.")
 
 
 def test_empty_engine_report_is_partial_not_zero():
@@ -198,8 +200,9 @@ def test_paging_reads_past_old_caps():
     assert len(g["vehicles"][0]["events"]) == 450 and len(g["events"]) == 450
     assert len(g["events_without_subrows"]) == 1202 and all(v["total_idle_seconds"] == 1200 for v in g["vehicles"][1:])
     sub_windows = [(p["indexFrom"], p["indexTo"]) for s, p in engine.calls if s == "report/get_result_subrows"]
-    # the batched first page (0-199) holds fewer than the row's 450 sub-rows, so the row is then paged in full
-    assert sub_windows == [(0, 199), (0, 199), (200, 399), (400, 599)], sub_windows
+    # the batched first page (0-199) is full but short of the row's 450 sub-rows: paging resumes after it
+    # (200-399, 400-599) without reading page 0 again
+    assert sub_windows == [(0, 199), (200, 399), (400, 599)], sub_windows
     assert u["total_idle_seconds"] == 150 * 120 and u["total_engine_seconds"] == 150 * 600  # old cap: 101 rows
     assert u["total_in_motion_seconds"] == 150 * 480
     print("[PASS] 1,203 group rows, 150 unit-engine rows and 450 idle sub-rows all read (old caps 501/101/201 gone).")
@@ -504,8 +507,16 @@ def test_cache_shares_failure_with_queued_waiters_and_cleans_state():
 
 
 def test_forced_relogin_happens_under_report_lock():
+    class SessionExpired(FakeReportEngine):
+        # The engine report keeps answering Wialon error 1 (invalid session): the only error that forces a new login
+        def __call__(self, svc, params, sid=None, **kw):
+            if svc == "report/exec_report" and params.get("reportTemplateId") == TEMPLATE_GROUP_ENGINE:
+                self.calls.append((svc, params))
+                return {"error": 1}
+            return super().__call__(svc, params, sid=sid, **kw)
+
     seen = []
-    with Env(engine=FakeReportEngine(fail_exec={TEMPLATE_GROUP_ENGINE})) as env:
+    with Env(engine=SessionExpired()) as env:
         env.login.side_effect = lambda force=False, session=None: (force and seen.append(wr._report_lock.locked())) or "fresh-sid"
         try:
             wd.get_fleet_telematics_bundle(CLOSED_FROM, CLOSED_TO, sid="s")
@@ -579,6 +590,7 @@ if __name__ == "__main__":
     try:
         for t in TESTS:
             try:
+                reset_fuel_read_caches()
                 t()
             except Exception:
                 failures += 1

@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useState, useMemo } from "react"
-import { Link } from "react-router-dom"
+import { useCallback, useEffect, useRef, useState, useMemo } from "react"
+import { createPortal } from "react-dom"
 import {
     Truck,
     AlertTriangle,
     X,
-    ArrowUpRight,
     ArrowUpDown,
     ChevronUp,
     ChevronDown,
@@ -13,25 +12,15 @@ import {
     Wifi,
     Navigation,
     ShieldAlert,
-    Clock,
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
 import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
-import FleetStatusBadge from "../components/Common/FleetStatusBadge"
 import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
-import {
-    getFleetHealthAnalytics,
-    peekFleetHealthAnalytics,
-    getVehicleDetails,
-    getVehicleHistory,
-} from "../api/fleetApi"
+import { getFleetHealthAnalytics, peekFleetHealthAnalytics } from "../api/fleetApi"
 import { formatUAETime, formatUAEDateTime } from "../utils/datetime"
 import { isHealthyVehicle } from "../utils/fleetRules"
-import { isValidCoordinate } from "../utils/coordinates"
-import { normalizeVehicleStatus } from "../utils/vehicleStatus"
-import { formatKm } from "../utils/knownTotals"
 
 // ── Utilities & Parsers ────────────────────────────────────────────────────────
 
@@ -72,36 +61,41 @@ function parseSatellites(sats) {
     return { count: n, isValid: true, isSentinel: false, label: `${n} sats` }
 }
 
-const batteryBadge = (battery = {}) => {
+const vehicleLabel = (v) => v.registration_plate || v.plate || v.vehicle_name || `Unit ${v.vehicle_id}`
+
+// Vehicle type is the unit's Wialon group (as the original table showed it), including "General Fleet"
+const vehicleType = (v) => v.group || null
+
+const hasScore = (v) => typeof v?.health_score === "number" && Number.isFinite(v.health_score)
+
+// Device health is the backend's battery classification; nothing is recalculated here
+const deviceHealth = (battery = {}) => {
     const s = String(battery.status || "").toUpperCase()
-    const voltage = battery.voltage
-    const last = battery.stale ? " · last reported" : ""
-    if (s === "HEALTHY") return { label: `${fmt(voltage, 1)} V`, note: `Healthy${last}`, tone: "good" }
-    if (s === "WARNING" && battery.system_type === "Unknown") return { label: `${fmt(voltage, 1)} V`, note: `Unclassified${last}`, tone: "warn" }
-    if (s === "WARNING") return { label: `${fmt(voltage, 1)} V`, note: `Low${last}`, tone: "warn" }
-    if (s === "CRITICAL") return { label: `${fmt(voltage, 1)} V`, note: `Critical${last}`, tone: "bad" }
-    return { label: voltage != null ? `${fmt(voltage, 1)} V` : "No data", note: null, tone: "none" }
+    if (s === "HEALTHY") return { label: "Healthy", tone: "good" }
+    if (s === "WARNING" && battery.system_type === "Unknown") return { label: "Unclassified voltage", tone: "warn" }
+    if (s === "WARNING") return { label: "Low battery", tone: "warn" }
+    if (s === "CRITICAL") return { label: "Critical battery", tone: "bad" }
+    return { label: "Unknown", tone: "none" }
 }
 
-const gpsBadge = (status, sats, positionAge) => {
-    const s = String(status || "").toUpperCase()
-    // Last seen Moving with an old GPS fix although messages are recent: the satellites describe that old fix
-    if (s === "STALE") return { label: `Fix ${fmtAgo(positionAge)}`, note: "Stale", tone: "warn" }
+const gpsFix = (gps = {}) => {
+    const s = String(gps.status || "").toUpperCase()
+    if (s === "STALE") return { label: "Stale fix", tone: "warn" }
+    const satInfo = parseSatellites(gps.satellites)
+    // A 255 or out-of-range count means the tracker had no valid fix, whatever quality was derived from it
+    if (satInfo.isSentinel || (satInfo.count !== null && !satInfo.isValid)) return { label: "No valid fix", tone: "bad" }
+    if (satInfo.count === 0) return { label: "No lock", tone: "warn" }
+    if (s === "EXCELLENT") return { label: "Excellent", tone: "good" }
+    if (s === "GOOD") return { label: "Good", tone: "good" }
+    if (s === "WEAK") return { label: "Weak", tone: "warn" }
+    return { label: "Unknown", tone: "none" }
+}
 
+const satelliteText = (sats) => {
     const satInfo = parseSatellites(sats)
-    if (satInfo.isSentinel) {
-        return { label: "Invalid fix", note: "255 sentinel", tone: "bad" }
-    }
-    if (!satInfo.isValid && satInfo.count !== 0) {
-        return { label: "No GPS", note: null, tone: "none" }
-    }
-    if (satInfo.count === 0) {
-        return { label: "0 sats", note: "No lock", tone: "warn" }
-    }
-    if (s === "EXCELLENT") return { label: `${satInfo.count} sats`, note: "Excellent", tone: "good" }
-    if (s === "GOOD") return { label: `${satInfo.count} sats`, note: "Good", tone: "good" }
-    if (s === "WEAK") return { label: `${satInfo.count} sats`, note: "Weak", tone: "warn" }
-    return { label: satInfo.count ? `${satInfo.count} sats` : "No GPS", note: null, tone: "none" }
+    if (satInfo.isValid) return String(satInfo.count)
+    if (satInfo.count !== null) return "Invalid reading"
+    return "Not available"
 }
 
 const connBadge = (status) => {
@@ -236,6 +230,163 @@ function Signal({ label, note, tone }) {
     )
 }
 
+function DetailRow({ label, children }) {
+    return (
+        <div className="flex items-start justify-between gap-4 py-2">
+            <dt className="shrink-0 text-slate-500">{label}</dt>
+            <dd className="min-w-0 text-right font-medium text-slate-900">{children}</dd>
+        </div>
+    )
+}
+
+function NotAvailable() {
+    return <span className="font-normal text-slate-400">Not available</span>
+}
+
+// Current vs last-reported tag for a group of readings, with the time the reading was taken
+function ReadingTag({ historical, ts }) {
+    return historical ? (
+        <span className="text-[11px] font-medium text-amber-800">
+            Last reported{ts ? ` · ${formatUAEDateTime(ts)}` : ""}
+        </span>
+    ) : (
+        <span className="text-[11px] font-medium text-emerald-700">Current</span>
+    )
+}
+
+function DetailSection({ icon: Icon, title, tag, children }) {
+    return (
+        <section>
+            <div className="flex items-center justify-between gap-2 border-b border-slate-100 pb-1.5">
+                <h3 className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-700">
+                    <Icon className="h-3.5 w-3.5 text-brand" aria-hidden="true" />
+                    {title}
+                </h3>
+                {tag}
+            </div>
+            <dl className="divide-y divide-slate-100">{children}</dl>
+        </section>
+    )
+}
+
+function VehicleHealthModal({ vehicle, onClose }) {
+    const closeRef = useRef(null)
+
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            if (e.key === "Escape") onClose()
+        }
+        window.addEventListener("keydown", handleKeyDown)
+        closeRef.current?.focus()
+        return () => window.removeEventListener("keydown", handleKeyDown)
+    }, [onClose])
+
+    const bat = vehicle.battery || {}
+    const gps = vehicle.gps || {}
+    const conn = vehicle.connectivity || {}
+    const connStatus = String(conn.status || "").toUpperCase()
+    // Delayed/offline telemetry means every reading below is the last one received, not a live value
+    const telemetryHistorical = connStatus === "DELAYED" || connStatus === "OFFLINE"
+    const gpsHistorical = telemetryHistorical || String(gps.status || "").toUpperCase() === "STALE"
+    const sc = scoreTone(vehicle.health_score)
+    const type = vehicleType(vehicle)
+    const device = deviceHealth(bat)
+    const fix = gpsFix(gps)
+
+    return createPortal(
+        <div
+            className="fixed inset-0 z-[9999] flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-[2px] animate-in fade-in duration-200"
+            onClick={onClose}
+        >
+            <div
+                className="relative flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="health-modal-title"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-3.5">
+                    <div className="min-w-0">
+                        <h2 id="health-modal-title" className="truncate font-mono text-base font-bold text-slate-900">
+                            {vehicleLabel(vehicle)}
+                        </h2>
+                        <p className="truncate text-xs text-slate-500">{type || "Vehicle type not available"}</p>
+                    </div>
+                    <button
+                        ref={closeRef}
+                        type="button"
+                        onClick={onClose}
+                        className="-mr-1.5 shrink-0 rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                        aria-label="Close vehicle details"
+                    >
+                        <X className="h-4 w-4" />
+                    </button>
+                </div>
+
+                <div className="space-y-4 overflow-y-auto px-5 py-4 text-xs">
+                    <DetailSection icon={Truck} title="Vehicle overview">
+                        <DetailRow label="Vehicle number">
+                            <span className="font-mono">{vehicleLabel(vehicle)}</span>
+                        </DetailRow>
+                        <DetailRow label="Vehicle type">{type || <NotAvailable />}</DetailRow>
+                        <DetailRow label="Overall health">
+                            {hasScore(vehicle) ? (
+                                <span className={`font-bold tabular-nums ${sc.text}`}>{vehicle.health_score}%</span>
+                            ) : (
+                                <span className="font-normal text-slate-400">Unknown</span>
+                            )}
+                        </DetailRow>
+                        <DetailRow label="Connectivity">
+                            <Signal {...connBadge(conn.status)} />
+                        </DetailRow>
+                        <DetailRow label="Last reported">
+                            {conn.last_message_ts ? (
+                                <>
+                                    <span className="tabular-nums">{formatUAEDateTime(conn.last_message_ts)}</span>
+                                    <span className="block text-[11px] font-normal text-slate-500">
+                                        {fmtAgo(conn.seconds_since_update)}
+                                    </span>
+                                </>
+                            ) : (
+                                <NotAvailable />
+                            )}
+                        </DetailRow>
+                    </DetailSection>
+
+                    <DetailSection
+                        icon={Battery}
+                        title="Device information"
+                        tag={bat.voltage != null && <ReadingTag historical={telemetryHistorical} ts={conn.last_message_ts} />}
+                    >
+                        <DetailRow label="Battery voltage">
+                            {bat.voltage != null ? <span className="font-mono">{fmt(bat.voltage, 2)} V</span> : <NotAvailable />}
+                        </DetailRow>
+                        <DetailRow label="Device health">
+                            {device.tone === "none" ? <NotAvailable /> : <Signal label={device.label} tone={device.tone} />}
+                        </DetailRow>
+                    </DetailSection>
+
+                    <DetailSection
+                        icon={Navigation}
+                        title="GPS information"
+                        tag={gps.satellites != null && <ReadingTag historical={gpsHistorical} ts={gps.position_timestamp || conn.last_message_ts} />}
+                    >
+                        <DetailRow label="Satellites">
+                            <span className={parseSatellites(gps.satellites).isValid ? "font-mono" : "font-normal text-slate-400"}>
+                                {satelliteText(gps.satellites)}
+                            </span>
+                        </DetailRow>
+                        <DetailRow label="GPS fix">
+                            {fix.tone === "none" ? <NotAvailable /> : <Signal label={fix.label} tone={fix.tone} />}
+                        </DetailRow>
+                    </DetailSection>
+                </div>
+            </div>
+        </div>,
+        document.body
+    )
+}
+
 const FILTERS = [
     { id: "all", label: "All" },
     { id: "healthy", label: "Healthy" },
@@ -261,25 +412,15 @@ export default function VehicleHealth() {
     const [sortField, setSortField] = useState("health_score")
     const [sortDirection, setSortDirection] = useState("asc") // asc = lowest score (urgent) first
 
-    // Vehicle details slide-out panel state
+    // Vehicle details modal state
     const [selectedVehicleId, setSelectedVehicleId] = useState(null)
-    const [drawerTab, setDrawerTab] = useState("overview") // overview | diagnostics | info | history
-    const [vehicleDetails, setVehicleDetails] = useState(null)
-    const [vehicleHistory, setVehicleHistory] = useState(null)
-    const [loadingHistory, setLoadingHistory] = useState(false)
 
-    const openDrawer = useCallback((vehicleId) => {
+    const openDetails = useCallback((vehicleId) => {
         setSelectedVehicleId(vehicleId)
-        setDrawerTab("overview")
-        setVehicleDetails(null)
-        setVehicleHistory(null)
-        setLoadingHistory(true)
     }, [])
 
-    const closeDrawer = useCallback(() => {
+    const closeDetails = useCallback(() => {
         setSelectedVehicleId(null)
-        setVehicleDetails(null)
-        setVehicleHistory(null)
     }, [])
 
     useEffect(() => {
@@ -314,40 +455,6 @@ export default function VehicleHealth() {
         if (!selectedVehicleId) return null
         return vehicles.find(v => v.vehicle_id === selectedVehicleId) || null
     }, [vehicles, selectedVehicleId])
-
-    // Load extra metadata and diagnostic history when side panel opens
-    useEffect(() => {
-        if (!selectedVehicleId) return undefined
-        let active = true
-
-        getVehicleDetails(selectedVehicleId)
-            .then(res => {
-                if (active && res) setVehicleDetails(res.vehicle || res)
-            })
-            .catch(() => {})
-
-        getVehicleHistory(selectedVehicleId, { hours: 24 })
-            .then(res => {
-                if (active && res) setVehicleHistory(res)
-            })
-            .catch(() => {})
-            .finally(() => {
-                if (active) setLoadingHistory(false)
-            })
-
-        return () => { active = false }
-    }, [selectedVehicleId])
-
-    // Close drawer on Escape key
-    useEffect(() => {
-        const handleKeyDown = (e) => {
-            if (e.key === "Escape") closeDrawer()
-        }
-        if (selectedVehicleId) {
-            window.addEventListener("keydown", handleKeyDown)
-        }
-        return () => window.removeEventListener("keydown", handleKeyDown)
-    }, [selectedVehicleId, closeDrawer])
 
     // Offline and Delayed separate counts
     const offlineVehiclesCount = useMemo(() => {
@@ -463,14 +570,6 @@ export default function VehicleHealth() {
                 const nameA = a.registration_plate || a.vehicle_name || String(a.vehicle_id)
                 const nameB = b.registration_plate || b.vehicle_name || String(b.vehicle_id)
                 cmp = nameA.localeCompare(nameB)
-            } else if (sortField === "battery") {
-                const vA = a.battery?.voltage ?? -1
-                const vB = b.battery?.voltage ?? -1
-                cmp = vA - vB
-            } else if (sortField === "gps") {
-                const sA = parseSatellites(a.gps?.satellites).count ?? -1
-                const sB = parseSatellites(b.gps?.satellites).count ?? -1
-                cmp = sA - sB
             } else if (sortField === "connectivity") {
                 const cA = a.connectivity?.status || ""
                 const cB = b.connectivity?.status || ""
@@ -765,10 +864,10 @@ export default function VehicleHealth() {
                                     return (
                                         <div
                                             key={v.vehicle_id}
-                                            onClick={() => openDrawer(v.vehicle_id)}
+                                            onClick={() => openDetails(v.vehicle_id)}
                                             role="button"
                                             tabIndex={0}
-                                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") openDrawer(v.vehicle_id) }}
+                                            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetails(v.vehicle_id) } }}
                                             className="group relative flex flex-col justify-between rounded-lg border border-slate-200 bg-slate-50/50 p-3 transition-all hover:border-brand/60 hover:bg-white hover:shadow-sm cursor-pointer text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
                                         >
                                             <div>
@@ -799,7 +898,7 @@ export default function VehicleHealth() {
                                             <div className="mt-3 flex items-center justify-between border-t border-slate-200/60 pt-2 text-[10px] text-slate-500">
                                                 <span title="Battery">{bat.voltage != null ? `${fmt(bat.voltage, 1)}V` : "No Bat"}</span>
                                                 <span>·</span>
-                                                <span title="GPS">{gps.satellites != null ? `${gps.satellites}sats` : "No GPS"}</span>
+                                                <span title="GPS">{parseSatellites(gps.satellites).isValid ? `${gps.satellites}sats` : "No GPS"}</span>
                                                 <span>·</span>
                                                 <span title="Connectivity" className={conn.status === "OFFLINE" ? "text-rose-700 font-semibold" : conn.status === "DELAYED" ? "text-amber-800 font-semibold" : "text-emerald-700"}>
                                                     {conn.status === "STABLE" ? "Online" : conn.status || "—"}
@@ -876,148 +975,93 @@ export default function VehicleHealth() {
                     ) : (
                         <>
                             <div className="overflow-x-auto">
-                                <table className="w-full min-w-[960px] text-xs">
+                                <table className="w-full min-w-[560px] text-xs">
                                     <thead>
                                         <tr className="border-b border-slate-200 bg-slate-50 text-left text-[11px] font-semibold text-slate-600">
-                                            <th scope="col" className="px-4 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("vehicle")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
+                                            {[
+                                                { field: "vehicle", label: "Vehicle", className: "px-4" },
+                                                { field: "health_score", label: "Health", className: "px-3" },
+                                                { field: "connectivity", label: "Connectivity", className: "px-3" },
+                                                { field: "last_seen", label: "Last Reported", className: "px-4" },
+                                            ].map((col) => (
+                                                <th
+                                                    key={col.field}
+                                                    scope="col"
+                                                    className={`${col.className} py-2.5`}
+                                                    aria-sort={sortField === col.field ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}
                                                 >
-                                                    Vehicle {sortIndicator("vehicle")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-3 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("health_score")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-                                                >
-                                                    Health Score {sortIndicator("health_score")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-3 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("battery")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-                                                >
-                                                    Battery {sortIndicator("battery")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-3 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("gps")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-                                                >
-                                                    GPS / Satellites {sortIndicator("gps")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-3 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("connectivity")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-                                                >
-                                                    Connectivity {sortIndicator("connectivity")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-3 py-2.5">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSort("last_seen")}
-                                                    className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
-                                                >
-                                                    Last Seen {sortIndicator("last_seen")}
-                                                </button>
-                                            </th>
-                                            <th scope="col" className="px-4 py-2.5">
-                                                Primary Issue
-                                            </th>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleSort(col.field)}
+                                                        className="group inline-flex items-center gap-1.5 font-semibold text-slate-700 hover:text-slate-900 cursor-pointer"
+                                                    >
+                                                        {col.label} {sortIndicator(col.field)}
+                                                    </button>
+                                                </th>
+                                            ))}
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-100">
                                         {sortedVehicles.map((v) => {
-                                            const bat = v.battery || {}
-                                            const gps = v.gps || {}
                                             const conn = v.connectivity || {}
                                             const sc = scoreTone(v.health_score)
-                                            const issue = getPrimaryIssue(v)
+                                            const type = vehicleType(v)
                                             const isSelected = selectedVehicleId === v.vehicle_id
 
                                             return (
                                                 <tr
                                                     key={v.vehicle_id}
-                                                    onClick={() => openDrawer(v.vehicle_id)}
-                                                    className={`transition-colors cursor-pointer hover:bg-slate-50/90 ${
+                                                    onClick={() => openDetails(v.vehicle_id)}
+                                                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetails(v.vehicle_id) } }}
+                                                    tabIndex={0}
+                                                    aria-label={`View health details for ${vehicleLabel(v)}`}
+                                                    className={`group transition-colors cursor-pointer hover:bg-slate-50/90 focus-visible:outline-none focus-visible:bg-slate-50 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/40 ${
                                                         isSelected ? "bg-brand-light/70" : ""
                                                     }`}
                                                 >
-                                                    {/* Vehicle Column */}
-                                                    <td className="max-w-[220px] px-4 py-2.5">
-                                                        <p className="truncate font-mono text-[13px] font-bold text-slate-900 hover:text-brand transition-colors">
-                                                            {v.registration_plate || v.plate || v.vehicle_name || `Unit ${v.vehicle_id}`}
+                                                    {/* Vehicle number and type */}
+                                                    <td className="max-w-[260px] px-4 py-2">
+                                                        <p className="truncate font-mono text-[13px] font-bold text-slate-900 group-hover:text-brand transition-colors">
+                                                            {vehicleLabel(v)}
                                                         </p>
-                                                        <p className="truncate text-[11px] text-slate-500">
-                                                            {v.vehicle_name ? `${v.vehicle_name} · ` : ""}{v.group || `ID ${v.vehicle_id}`}
+                                                        <p className={`truncate text-[11px] ${type ? "text-slate-500" : "text-slate-400"}`}>
+                                                            {type || "Type not available"}
                                                         </p>
                                                     </td>
 
-                                                    {/* Health Score Column */}
-                                                    <td className="px-3 py-2.5">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={`w-9 text-right font-bold tabular-nums ${sc.text}`}>
-                                                                {v.health_score ?? 0}%
-                                                            </span>
-                                                            <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-100">
-                                                                <div
-                                                                    className={`h-full rounded-full ${sc.bar}`}
-                                                                    style={{ width: `${Math.min(100, Math.max(0, v.health_score ?? 0))}%` }}
-                                                                />
+                                                    {/* Overall health */}
+                                                    <td className="px-3 py-2">
+                                                        {hasScore(v) ? (
+                                                            <div className="flex items-center gap-2">
+                                                                <span className={`w-9 text-right font-bold tabular-nums ${sc.text}`}>
+                                                                    {v.health_score}%
+                                                                </span>
+                                                                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-slate-100">
+                                                                    <div
+                                                                        className={`h-full rounded-full ${sc.bar}`}
+                                                                        style={{ width: `${Math.min(100, Math.max(0, v.health_score))}%` }}
+                                                                    />
+                                                                </div>
                                                             </div>
-                                                        </div>
+                                                        ) : (
+                                                            <span className="text-slate-400">Unknown</span>
+                                                        )}
                                                     </td>
 
-                                                    {/* Battery Column */}
-                                                    <td className="px-3 py-2.5">
-                                                        <Signal {...batteryBadge(bat)} />
-                                                    </td>
-
-                                                    {/* GPS / Satellites Column */}
-                                                    <td className="px-3 py-2.5">
-                                                        <Signal {...gpsBadge(gps.status, gps.satellites, gps.seconds_since_position)} />
-                                                    </td>
-
-                                                    {/* Connectivity Column */}
-                                                    <td className="px-3 py-2.5">
+                                                    {/* Connectivity */}
+                                                    <td className="px-3 py-2">
                                                         <Signal {...connBadge(conn.status)} />
                                                     </td>
 
-                                                    {/* Last Seen Column */}
-                                                    <td className="whitespace-nowrap px-3 py-2.5 tabular-nums text-slate-600">
-                                                        <span title={conn.last_message_ts ? formatUAEDateTime(conn.last_message_ts) : "—"}>
-                                                            {fmtAgo(conn.seconds_since_update)}
-                                                        </span>
-                                                    </td>
-
-                                                    {/* Primary Issue Column */}
-                                                    <td className="max-w-[240px] px-4 py-2.5">
-                                                        {issue.tone === "good" ? (
-                                                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700">
-                                                                <span className="h-1.5 w-1.5 rounded-full bg-status-moving" />
-                                                                None · All healthy
-                                                            </span>
+                                                    {/* Last reported */}
+                                                    <td className="whitespace-nowrap px-4 py-2 tabular-nums">
+                                                        {conn.last_message_ts ? (
+                                                            <>
+                                                                <span className="text-slate-800">{formatUAEDateTime(conn.last_message_ts)}</span>
+                                                                <span className="block text-[11px] text-slate-500">{fmtAgo(conn.seconds_since_update)}</span>
+                                                            </>
                                                         ) : (
-                                                            <span className={`inline-flex items-center gap-1 truncate rounded px-2 py-0.5 text-[11px] font-medium border ${
-                                                                issue.tone === "bad"
-                                                                    ? "border-rose-200 bg-rose-50 text-rose-800"
-                                                                    : "border-amber-200 bg-amber-50 text-amber-800"
-                                                            }`}>
-                                                                <AlertTriangle className="h-3 w-3 shrink-0" />
-                                                                <span className="truncate">{issue.label}</span>
-                                                            </span>
+                                                            <span className="text-slate-400">Not available</span>
                                                         )}
                                                     </td>
                                                 </tr>
@@ -1033,463 +1077,15 @@ export default function VehicleHealth() {
                                     Showing <span className="font-semibold text-slate-900 tabular-nums">{sortedVehicles.length}</span> of{" "}
                                     <span className="font-semibold text-slate-900 tabular-nums">{vehicles.length}</span> fleet vehicles
                                 </div>
-                                <span className="text-[11px] text-slate-400">Click any row to view full diagnostics</span>
+                                <span className="text-[11px] text-slate-400">Click a row to view vehicle details</span>
                             </div>
                         </>
                     )}
                 </section>
             </div>
 
-            {/* 5. Vehicle Details Slide-Out Panel */}
-            {activeVehicle && (
-                <div
-                    className="fixed inset-0 z-50 overflow-hidden"
-                    role="dialog"
-                    aria-modal="true"
-                    aria-labelledby="slideout-vehicle-title"
-                >
-                    {/* Backdrop */}
-                    <div
-                        className="fixed inset-0 bg-slate-900/40 backdrop-blur-xs transition-opacity"
-                        onClick={closeDrawer}
-                        aria-hidden="true"
-                    />
-
-                    <div className="fixed inset-y-0 right-0 flex max-w-full pl-10 pointer-events-none">
-                        <div className="pointer-events-auto w-screen max-w-md sm:max-w-lg bg-white shadow-2xl flex flex-col border-l border-slate-200">
-                            {/* Panel Header */}
-                            <div className="flex items-start justify-between border-b border-slate-200 px-5 py-4 bg-slate-50/70">
-                                <div className="min-w-0 pr-3">
-                                    <div className="flex items-center gap-2">
-                                        <h2
-                                            id="slideout-vehicle-title"
-                                            className="font-mono text-base font-bold text-slate-900 truncate"
-                                        >
-                                            {activeVehicle.registration_plate || activeVehicle.plate || activeVehicle.vehicle_name || `Unit ${activeVehicle.vehicle_id}`}
-                                        </h2>
-                                        <FleetStatusBadge status={activeVehicle.status} size="xs" />
-                                    </div>
-                                    <p className="mt-0.5 truncate text-xs text-slate-500">
-                                        {activeVehicle.vehicle_name ? `${activeVehicle.vehicle_name} · ` : ""}
-                                        Group: {activeVehicle.group || "General Fleet"} · ID: {activeVehicle.vehicle_id}
-                                    </p>
-                                </div>
-
-                                <div className="flex items-center gap-2">
-                                    <div className={`rounded px-2 py-0.5 text-xs font-bold border ${scoreTone(activeVehicle.health_score).badge}`}>
-                                        {activeVehicle.health_score ?? 0}% Health
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={closeDrawer}
-                                        className="rounded-md p-1.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                                        aria-label="Close vehicle details"
-                                    >
-                                        <X className="h-4 w-4" />
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Section Navigation Tabs */}
-                            <div className="flex border-b border-slate-200 bg-white px-5 pt-2 text-xs font-medium">
-                                {[
-                                    { id: "overview", label: "Overview" },
-                                    { id: "diagnostics", label: "Diagnostics" },
-                                    { id: "info", label: "Vehicle Info" },
-                                    { id: "history", label: "History" },
-                                ].map((tab) => (
-                                    <button
-                                        key={tab.id}
-                                        type="button"
-                                        onClick={() => setDrawerTab(tab.id)}
-                                        className={`border-b-2 px-3 py-2 cursor-pointer transition-colors ${
-                                            drawerTab === tab.id
-                                                ? "border-brand text-brand font-semibold"
-                                                : "border-transparent text-slate-500 hover:text-slate-800"
-                                        }`}
-                                    >
-                                        {tab.label}
-                                    </button>
-                                ))}
-                            </div>
-
-                            {/* Panel Scrollable Content */}
-                            <div className="flex-1 overflow-y-auto p-5 text-xs">
-                                {/* SECTION 1: OVERVIEW */}
-                                {drawerTab === "overview" && (
-                                    <div className="space-y-4">
-                                        <div className="rounded-lg border border-slate-200 bg-slate-50/60 p-3">
-                                            <div className="flex items-center justify-between mb-2">
-                                                <span className="font-semibold text-slate-800">Health Status</span>
-                                                <span className={`font-bold ${scoreTone(activeVehicle.health_score).text}`}>
-                                                    {scoreTone(activeVehicle.health_score).label} ({activeVehicle.health_score ?? 0}%)
-                                                </span>
-                                            </div>
-                                            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                                                <div
-                                                    className={`h-full rounded-full ${scoreTone(activeVehicle.health_score).bar}`}
-                                                    style={{ width: `${Math.min(100, Math.max(0, activeVehicle.health_score ?? 0))}%` }}
-                                                />
-                                            </div>
-                                            <p className="mt-2 text-[11px] text-slate-500">
-                                                Transparent score evaluated from real-time power, GPS satellite geometry, and telemetry packet freshness.
-                                            </p>
-                                        </div>
-
-                                        <dl className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Vehicle ID</dt>
-                                                <dd className="font-mono font-medium text-slate-900">{activeVehicle.vehicle_id}</dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Name</dt>
-                                                <dd className="font-medium text-slate-900">{activeVehicle.vehicle_name || "—"}</dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Hardware / Type</dt>
-                                                <dd className="font-medium text-slate-900">
-                                                    {vehicleDetails?.hardware_type || vehicleDetails?.type || activeVehicle.type || "Commercial Fleet Unit"}
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Assigned Group</dt>
-                                                <dd className="font-medium text-slate-900">{activeVehicle.group || "General Fleet"}</dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Connectivity</dt>
-                                                <dd><Signal {...connBadge(activeVehicle.connectivity?.status)} /></dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Last Seen</dt>
-                                                <dd className="text-right">
-                                                    <span className="font-medium text-slate-900 tabular-nums">
-                                                        {activeVehicle.connectivity?.last_message_ts ? formatUAEDateTime(activeVehicle.connectivity.last_message_ts) : "—"}
-                                                    </span>
-                                                    <span className="block text-[11px] text-slate-500">
-                                                        {fmtAgo(activeVehicle.connectivity?.seconds_since_update)}
-                                                    </span>
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Primary Diagnostic Issue</dt>
-                                                <dd className="text-right">
-                                                    <span className={`font-semibold ${
-                                                        getPrimaryIssue(activeVehicle).tone === "bad"
-                                                            ? "text-rose-700"
-                                                            : getPrimaryIssue(activeVehicle).tone === "warn"
-                                                            ? "text-amber-800"
-                                                            : "text-emerald-700"
-                                                    }`}>
-                                                        {getPrimaryIssue(activeVehicle).label}
-                                                    </span>
-                                                </dd>
-                                            </div>
-                                        </dl>
-                                    </div>
-                                )}
-
-                                {/* SECTION 2: DIAGNOSTICS */}
-                                {drawerTab === "diagnostics" && (
-                                    <div className="space-y-4">
-                                        {/* Battery Block */}
-                                        <div className="rounded-lg border border-slate-200 bg-white p-3.5 shadow-xs">
-                                            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                                                <div className="flex items-center gap-1.5 font-semibold text-slate-800">
-                                                    <Battery className="h-4 w-4 text-brand" />
-                                                    <span>Battery & Power Subsystem</span>
-                                                </div>
-                                                <Signal {...batteryBadge(activeVehicle.battery)} />
-                                            </div>
-
-                                            <dl className="mt-2.5 divide-y divide-slate-100 text-xs">
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Main Battery Voltage</dt>
-                                                    <dd className="font-mono font-bold text-slate-900">
-                                                        {activeVehicle.battery?.voltage != null ? `${fmt(activeVehicle.battery.voltage, 2)} V` : "No data"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">System Classification</dt>
-                                                    <dd className="font-medium text-slate-800">
-                                                        {activeVehicle.battery?.system_type || "Unknown"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Internal Backup Battery</dt>
-                                                    <dd className="font-mono text-slate-800">
-                                                        {activeVehicle.battery?.internal_voltage ? `${fmt(activeVehicle.battery.internal_voltage, 2)} V` : "—"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Telemetry Freshness</dt>
-                                                    <dd className="font-medium text-slate-800">
-                                                        {activeVehicle.battery?.stale ? (
-                                                            <span className="text-amber-800">Last reported (device offline/delayed)</span>
-                                                        ) : (
-                                                            <span className="text-emerald-700">Live active reading</span>
-                                                        )}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Reading Timestamp</dt>
-                                                    <dd className="tabular-nums text-slate-700">
-                                                        {activeVehicle.connectivity?.last_message_ts ? formatUAEDateTime(activeVehicle.connectivity.last_message_ts) : "—"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Source</dt>
-                                                    <dd className="text-slate-500">Wialon CAN-Bus / Sensor Telemetry</dd>
-                                                </div>
-                                            </dl>
-                                        </div>
-
-                                        {/* GPS Block */}
-                                        <div className="rounded-lg border border-slate-200 bg-white p-3.5 shadow-xs">
-                                            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                                                <div className="flex items-center gap-1.5 font-semibold text-slate-800">
-                                                    <Navigation className="h-4 w-4 text-brand" />
-                                                    <span>GPS & Satellites Subsystem</span>
-                                                </div>
-                                                <Signal {...gpsBadge(activeVehicle.gps?.status, activeVehicle.gps?.satellites, activeVehicle.gps?.seconds_since_position)} />
-                                            </div>
-
-                                            <dl className="mt-2.5 divide-y divide-slate-100 text-xs">
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Satellite Count</dt>
-                                                    <dd className="font-mono font-bold text-slate-900">
-                                                        {parseSatellites(activeVehicle.gps?.satellites).label}
-                                                    </dd>
-                                                </div>
-                                                {parseSatellites(activeVehicle.gps?.satellites).isSentinel && (
-                                                    <div className="rounded bg-rose-50 p-2 text-rose-800 text-[11px]">
-                                                        Value 255 detected: tracker protocol sentinel byte indicating invalid GPS fix.
-                                                    </div>
-                                                )}
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Signal Quality</dt>
-                                                    <dd className="font-semibold text-slate-800">
-                                                        {activeVehicle.gps?.status || "UNKNOWN"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Fix Validity</dt>
-                                                    <dd className="text-slate-800">
-                                                        {activeVehicle.gps?.status === "STALE" ? (
-                                                            <span className="text-amber-800 font-medium">Stale Fix ({fmtAgo(activeVehicle.gps?.seconds_since_position)} old)</span>
-                                                        ) : isValidCoordinate(activeVehicle.gps?.latitude, activeVehicle.gps?.longitude) ? (
-                                                            <span className="text-emerald-700 font-medium">Valid 3D Fix</span>
-                                                        ) : (
-                                                            <span className="text-slate-400">No Valid Coordinate Fix</span>
-                                                        )}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">HDOP / Precision</dt>
-                                                    <dd className="tabular-nums text-slate-800">
-                                                        {activeVehicle.gps?.hdop != null ? `HDOP ${activeVehicle.gps.hdop}` : "—"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Position Fix Timestamp</dt>
-                                                    <dd className="tabular-nums text-slate-700">
-                                                        {activeVehicle.gps?.position_timestamp ? formatUAEDateTime(activeVehicle.gps.position_timestamp) : "—"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Source</dt>
-                                                    <dd className="text-slate-500">Wialon GPS Receiver Telemetry</dd>
-                                                </div>
-                                            </dl>
-                                        </div>
-
-                                        {/* Connectivity Block */}
-                                        <div className="rounded-lg border border-slate-200 bg-white p-3.5 shadow-xs">
-                                            <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                                                <div className="flex items-center gap-1.5 font-semibold text-slate-800">
-                                                    <Wifi className="h-4 w-4 text-brand" />
-                                                    <span>Cellular Telemetry Link</span>
-                                                </div>
-                                                <Signal {...connBadge(activeVehicle.connectivity?.status)} />
-                                            </div>
-
-                                            <dl className="mt-2.5 divide-y divide-slate-100 text-xs">
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Connection State</dt>
-                                                    <dd className="font-semibold text-slate-900">
-                                                        {activeVehicle.connectivity?.status || "UNKNOWN"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Telemetry Freshness</dt>
-                                                    <dd className="tabular-nums text-slate-800 font-medium">
-                                                        {fmtAgo(activeVehicle.connectivity?.seconds_since_update)}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Status Description</dt>
-                                                    <dd className="text-slate-800">
-                                                        {activeVehicle.connectivity?.status === "OFFLINE" ? (
-                                                            <span className="text-rose-700 font-medium">No messages received for &gt; 12 hours</span>
-                                                        ) : activeVehicle.connectivity?.status === "DELAYED" ? (
-                                                            <span className="text-amber-800 font-medium">Messages delayed (&gt; 10 minutes)</span>
-                                                        ) : (
-                                                            <span className="text-emerald-700 font-medium">Connection active and healthy</span>
-                                                        )}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Last Message Timestamp</dt>
-                                                    <dd className="tabular-nums text-slate-700">
-                                                        {activeVehicle.connectivity?.last_message_ts ? formatUAEDateTime(activeVehicle.connectivity.last_message_ts) : "—"}
-                                                    </dd>
-                                                </div>
-                                                <div className="flex justify-between py-1.5">
-                                                    <dt className="text-slate-500">Source</dt>
-                                                    <dd className="text-slate-500">Tracker Cellular Link / Wialon Gateway</dd>
-                                                </div>
-                                            </dl>
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* SECTION 3: VEHICLE INFORMATION */}
-                                {drawerTab === "info" && (
-                                    <div className="space-y-4">
-                                        <dl className="divide-y divide-slate-100 rounded-lg border border-slate-200 bg-white">
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Plate Number</dt>
-                                                <dd className="font-mono font-bold text-slate-900">
-                                                    {activeVehicle.registration_plate || activeVehicle.plate || "—"}
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Current Status</dt>
-                                                <dd className="flex items-center gap-1.5">
-                                                    <FleetStatusBadge status={activeVehicle.status} size="xs" />
-                                                    <span className="text-[11px] text-slate-500 font-medium capitalize">
-                                                        ({normalizeVehicleStatus(activeVehicle).toLowerCase()})
-                                                    </span>
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Current Speed</dt>
-                                                <dd className="font-mono text-slate-900">{activeVehicle.speed ?? 0} km/h</dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Ignition State</dt>
-                                                <dd className="font-medium text-slate-900">
-                                                    {activeVehicle.ignition === true ? "On (Running)" : activeVehicle.ignition === false ? "Off (Stopped)" : "Unknown"}
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">GPS Coordinates</dt>
-                                                <dd className="font-mono text-slate-800 text-right">
-                                                    {isValidCoordinate(activeVehicle.gps?.latitude, activeVehicle.gps?.longitude) ? (
-                                                        <span>
-                                                            {Number(activeVehicle.gps.latitude).toFixed(4)}°, {Number(activeVehicle.gps.longitude).toFixed(4)}°
-                                                        </span>
-                                                    ) : (
-                                                        <span className="text-slate-400">No valid fix</span>
-                                                    )}
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Odometer / Mileage</dt>
-                                                <dd className="tabular-nums font-medium text-slate-900">
-                                                    {formatKm(vehicleDetails?.mileage ?? vehicleDetails?.odometer ?? activeVehicle.mileage ?? activeVehicle.odometer) ?? "—"}
-                                                </dd>
-                                            </div>
-                                            <div className="flex justify-between px-3.5 py-2.5">
-                                                <dt className="text-slate-500">Engine Hours</dt>
-                                                <dd className="tabular-nums font-medium text-slate-900">
-                                                    {vehicleDetails?.engine_hours ? `${vehicleDetails.engine_hours} h` : "—"}
-                                                </dd>
-                                            </div>
-                                        </dl>
-
-                                        {/* Live Tracking Link */}
-                                        <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-                                            <h3 className="font-semibold text-slate-800 mb-1">Live Map Tracking</h3>
-                                            <p className="text-[11px] text-slate-500 mb-3">
-                                                Follow this vehicle live on the interactive fleet tracking map.
-                                            </p>
-                                            {isValidCoordinate(activeVehicle.gps?.latitude, activeVehicle.gps?.longitude) ? (
-                                                <Link
-                                                    to={`/tracking?vehicleId=${encodeURIComponent(activeVehicle.vehicle_id)}`}
-                                                    className="inline-flex items-center gap-1.5 rounded-md bg-brand px-3 py-2 text-xs font-semibold text-white shadow-xs hover:bg-brand/90 transition-colors cursor-pointer"
-                                                >
-                                                    Open in Live Tracking
-                                                    <ArrowUpRight className="h-3.5 w-3.5" />
-                                                </Link>
-                                            ) : (
-                                                <div className="rounded border border-slate-200 bg-white p-2.5 text-[11px] text-slate-500">
-                                                    Live tracking unavailable: No valid GPS coordinates reported for this unit.
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-
-                                {/* SECTION 4: HISTORY */}
-                                {drawerTab === "history" && (
-                                    <div className="space-y-3">
-                                        <div className="flex items-center justify-between pb-1 border-b border-slate-100">
-                                            <h3 className="font-semibold text-slate-800">24-Hour Telemetry History</h3>
-                                            <span className="text-[11px] text-slate-400">Timestamped Wialon readings</span>
-                                        </div>
-
-                                        {loadingHistory ? (
-                                            <LoadingState label="Reading historical diagnostic telemetry…" className="rounded-lg border-0 py-8" />
-                                        ) : vehicleHistory?.telemetry && vehicleHistory.telemetry.length > 0 ? (
-                                            <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                                                <table className="w-full text-[11px]">
-                                                    <thead>
-                                                        <tr className="border-b border-slate-200 bg-slate-50 text-left font-semibold text-slate-600">
-                                                            <th className="px-3 py-2">Timestamp</th>
-                                                            <th className="px-2 py-2">Status</th>
-                                                            <th className="px-2 py-2">Speed</th>
-                                                            <th className="px-2 py-2">Battery</th>
-                                                            <th className="px-2 py-2">Sats</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody className="divide-y divide-slate-100">
-                                                        {vehicleHistory.telemetry.slice(0, 20).map((pt, idx) => (
-                                                            <tr key={idx} className="hover:bg-slate-50">
-                                                                <td className="whitespace-nowrap px-3 py-1.5 tabular-nums text-slate-700">
-                                                                    {formatUAETime(pt.timestamp)}
-                                                                </td>
-                                                                <td className="px-2 py-1.5">
-                                                                    <FleetStatusBadge status={pt.status} size="xs" />
-                                                                </td>
-                                                                <td className="px-2 py-1.5 tabular-nums text-slate-600">
-                                                                    {pt.speed != null ? `${pt.speed} km/h` : "—"}
-                                                                </td>
-                                                                <td className="px-2 py-1.5 tabular-nums text-slate-600">
-                                                                    {pt.sensors?.battery_voltage != null ? `${Number(pt.sensors.battery_voltage).toFixed(1)} V` : "—"}
-                                                                </td>
-                                                                <td className="px-2 py-1.5 tabular-nums text-slate-600">
-                                                                    {pt.location?.satellites != null ? pt.location.satellites : "—"}
-                                                                </td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        ) : (
-                                            <EmptyState
-                                                icon={Clock}
-                                                title="No diagnostic history available"
-                                                description="No timestamped telemetry messages or diagnostic readings were recorded for this vehicle in the last 24 hours."
-                                                className="rounded-lg border border-slate-200 bg-slate-50/50 py-8"
-                                            />
-                                        )}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/* 5. Vehicle Details Modal */}
+            {activeVehicle && <VehicleHealthModal vehicle={activeVehicle} onClose={closeDetails} />}
         </AppShell>
     )
 }

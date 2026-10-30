@@ -35,11 +35,19 @@ EVENTS_SESSION = "events"
 FUEL_SESSION = "fuel"
 FUEL_ENGINE_SESSION = "fuel_engine"
 FUEL_TRIPS_SESSION = "fuel_trips"
+# Single-vehicle trips reports of the vehicle detail drawer (refreshed every minute while it is open) run on their own
+# session, so they never hold the shared report lock that Dashboard mileage and trips reports wait on.
+VEHICLE_SESSION = "vehicle"
 _named_sids = {}
 # Every session id ever issued for a named session (bounded by the number of re-logins), so a stale id
 # that hits error 1 is refreshed as the session it belonged to, never as the shared SID.
 _sid_owner = {}
 _SID_OWNER_MAX = 64
+# Session ids replaced by a forced re-login -> the session they belonged to (None: the shared SID). Callers keep the
+# id they got from login() for a whole request, so after a refresh their next calls would each hit error 1 and retry;
+# wialon_request sends the session's current id instead. Bounded like _sid_owner.
+_retired_sids = {}
+_RETIRED_SIDS_MAX = 64
 
 import threading
 
@@ -82,10 +90,35 @@ def seconds_since_limit_hit():
     return None if hit is None else time.monotonic() - hit
 
 
+_NOT_RETIRED = object()
+
+
+def _live_sid(sid):
+    """
+    `sid`, or the current id of its session when a forced re-login has replaced it. When that session has no current
+    id (its re-login failed), `sid` itself is kept: a named session's request is never sent with the shared SID; the
+    old id meets error 1 and the error-1 handling logs that same session in again.
+    """
+    # One lookup: a separate membership test and read could race with eviction in _retire_sid
+    session = _retired_sids.get(sid, _NOT_RETIRED)
+    if session is _NOT_RETIRED:
+        return sid
+    current = SID if session is None else _named_sids.get(session)
+    return current or sid
+
+
+def _retire_sid(old_sid, session):
+    """Record that `old_sid` was replaced (caller holds _login_lock)."""
+    if old_sid:
+        _retired_sids[old_sid] = session
+        while len(_retired_sids) > _RETIRED_SIDS_MAX:
+            del _retired_sids[next(iter(_retired_sids))]
+
+
 def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout=30):
     global SID, _limit_hit_at
 
-    current_sid = sid or SID
+    current_sid = _live_sid(sid) or SID
 
     data = {
         "svc": svc,
@@ -110,7 +143,10 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
                 "PERF wialon end request_id=%s service=%s duration_ms=%.1f attempt=%s outcome=transport_error",
                 request_trace_id.get(), svc, (time.perf_counter() - request_started) * 1000, attempt + 1,
             )
-            if attempt == max_retries - 1:
+            # A report that ran past its whole read timeout is not re-executed: each further attempt would wait the
+            # full timeout again (up to 3 x 120 s) for a report Wialon may still be building. Connection failures
+            # (nothing was processed) and timeouts of other services keep their retries.
+            if attempt == max_retries - 1 or (svc == "report/exec_report" and isinstance(e, requests.exceptions.ReadTimeout)):
                 raise WialonAPIError(f"Wialon transport failure for {svc}") from e
             time.sleep(0.3 * (attempt + 1))
             continue
@@ -129,15 +165,19 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
         if error_code == WIALON_LIMIT_MSGS_ACTIVITY:
             _limit_hit_at = time.monotonic()
 
-        # Handle Wialon Error 1003 (LIMIT api_concurrent) with backoff
+        # Handle Wialon Error 1003 (LIMIT api_concurrent) with backoff; after the last attempt the error is returned
+        # at once (no backoff before giving up)
         if isinstance(res_json, dict) and res_json.get("error") == 1003:
-            time.sleep(0.25 * (attempt + 1))
+            if attempt < max_retries - 1:
+                time.sleep(0.25 * (attempt + 1))
             continue
 
         # Handle Wialon Error 1 (Invalid session) automatically
         if isinstance(res_json, dict) and res_json.get("error") == 1 and not is_retry and svc != "token/login":
             with _login_lock:
-                session = _sid_owner.get(current_sid)
+                # A retired id remembers its named session even after _sid_owner evicted it, so it is never refreshed
+                # (or answered) as the shared SID
+                session = _sid_owner.get(current_sid) or _retired_sids.get(current_sid)
                 if session is not None:
                     if _named_sids.get(session) == current_sid:
                         logging.warning("Wialon %s session invalid (error 1). Refreshing session...", session)
@@ -164,7 +204,8 @@ def current_sid():
 
 def session_name(sid):
     """The named session `sid` was issued for (e.g. EVENTS_SESSION), or None for the shared SID."""
-    return _sid_owner.get(sid)
+    # A retired id keeps its session after _sid_owner evicted it, so its report lock stays that session's lock
+    return _sid_owner.get(sid) or _retired_sids.get(sid)
 
 
 def login(force=False, session=None):
@@ -192,11 +233,13 @@ def login(force=False, session=None):
         )
 
         if "error" in login_data:
+            _retire_sid(SID, None)
             SID = None
             raise WialonAPIError(
                 f"Wialon login failed: {login_data}"
             )
 
+        _retire_sid(SID, None)
         SID = login_data.get("eid")
 
         return SID
@@ -218,12 +261,13 @@ def _login_named(session, force=False):
         )
 
         if not isinstance(login_data, dict) or "error" in login_data or not login_data.get("eid"):
-            _named_sids.pop(session, None)
+            _retire_sid(_named_sids.pop(session, None), session)
             raise WialonAPIError(
                 f"Wialon login failed for {session} session: {login_data}"
             )
 
         new_sid = login_data["eid"]
+        _retire_sid(existing, session)
         _named_sids[session] = new_sid
         _sid_owner[new_sid] = session
         # Stale ids only matter for requests already in flight; keep the most recent ones

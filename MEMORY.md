@@ -93,11 +93,11 @@ It also joins Supabase fuel transactions with Wialon distance to produce fuel ef
 
 ## 8. Current Limitations & Technical Debt
 
-- **Per-process state**: caches, Wialon sessions and report locks live in memory. Use a single process, or move caches to Redis before scaling out.
-- **Cold loads**: the fleet alerts build takes about 30 s cold. It is pre-warmed at startup, but a restart still leaves a short window of cold caches.
+- **Per-process state**: caches, Wialon sessions and report locks live in memory. On Vercel (several possible instances) the bounds are 30 s for fuel figures after an import, 60 s for the fuel unit list and 120 s for today's telematics per instance; move caches to Redis before needing tighter cross-instance freshness.
+- **Cold loads**: the fleet alerts build takes about 30-37 s cold. It is no longer pre-built at startup (no page reads alerts; the AI chat tool builds them on demand), so the first alerts question after a restart waits for it.
 - **Groq limits**: tool results are truncated to about 12k characters to stay under the account's 8,000 tokens-per-minute request budget (HTTP 413 was measured live before the cap).
 - **Proposed fuel dedup**: `Backend/sql/proposed_fuel_dedup.sql` has not been applied by code.
-- **Deployment config is not in the repo**: there is no `render.yaml` or `vercel.json`. SPA deep-link rewrites on Vercel must be confirmed in the dashboard.
+- **Deployment config**: the root `vercel.json` defines one Vercel project with `backend` (FastAPI, Vercel Function, 300 s max duration) and `frontend` (Vite, SPA rewrite) services. There is no `render.yaml`. Neither has been confirmed against a live deployment.
 - **Geofences**: evaluated client-side only.
 
 ---

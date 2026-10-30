@@ -10,6 +10,7 @@ import { AuthProvider } from "./context/AuthContext"
 import { FuelFilterProvider } from "./context/FuelFilterContext"
 import { useAuth } from "./context/useAuth"
 import ProtectedRoute from "./components/Auth/ProtectedRoute"
+import { loadVehicleDetailDrawer } from "./components/Vehicles/lazyVehicleDetailDrawer"
 
 const Landing = lazy(() => import("./pages/Landing"))
 const Login = lazy(() => import("./pages/Login"))
@@ -36,13 +37,14 @@ const VehicleHealth = lazy(operationalPages.health)
 const AiAssistantWidget = lazy(() => import("./components/AI/AiAssistantWidget"))
 
 // Once signed in, load the other pages' code in the background so moving between pages never replaces the whole
-// screen (navigation included) with the Suspense fallback. Code only: no data is fetched.
+// screen (navigation included) with the Suspense fallback, and the vehicle drawer opens without waiting for its code.
+// Code only: no data is fetched.
 function PrefetchOperationalPages() {
     const { isAuthenticated } = useAuth()
     useEffect(() => {
         if (!isAuthenticated) return undefined
         const timer = setTimeout(() => {
-            Object.values(operationalPages).forEach(load => { load().catch(() => {}) })
+            [...Object.values(operationalPages), loadVehicleDetailDrawer].forEach(load => { load().catch(() => {}) })
         }, 1500)
         return () => clearTimeout(timer)
     }, [isAuthenticated])

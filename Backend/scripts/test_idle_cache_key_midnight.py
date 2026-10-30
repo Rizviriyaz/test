@@ -41,7 +41,7 @@ def idle_key(at, include_events=False, **params):
     """(cache_key, eff_from) the endpoint uses at UAE time `at`; the cache is bypassed and nothing is computed."""
     seen = {}
 
-    def record(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key):
+    def record(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key, **kwargs):
         seen.update(key=cache_key, eff_from=eff_from)
         return {}
 

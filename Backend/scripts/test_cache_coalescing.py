@@ -115,7 +115,9 @@ def test_vehicles_single_flight():
     ]):
         results = _run_concurrently(main.get_vehicles)
     assert search.call_count == 1, f"expected one Wialon read, got {search.call_count}"
-    assert all(r == {"count": 2, "vehicles": FLEET} for r in results), results
+    # Every caller gets the one shared read, which states when it was read (additive retrieved_at)
+    assert all({k: r[k] for k in ("count", "vehicles")} == {"count": 2, "vehicles": FLEET} for r in results), results
+    assert len({r["retrieved_at"] for r in results}) == 1 and isinstance(results[0]["retrieved_at"], int), results
     print("[PASS] /api/vehicles: overlapping cold requests share one Wialon read")
 
 
@@ -454,6 +456,71 @@ def test_fleet_discovery_shared_between_builders():
     print("[PASS] Fleet discovery: one groups/units/calc_last read shared by builders within 5 s")
 
 
+def test_ttlcache_refresh_is_single_flight_with_get_or_compute():
+    from app.utils.ttl_cache import TTLCache
+
+    clock = [100.0]
+    cache = TTLCache(clock=lambda: clock[0])
+    cache.set("k", "OLD", 10)
+    computes, release = [], threading.Event()
+
+    def slow(value):
+        def compute():
+            computes.append(value)
+            release.wait(5)
+            return value
+        return compute
+
+    refresher = threading.Thread(target=lambda: cache.refresh("k", slow("NEW"), lambda v: 10))
+    refresher.start()
+    while not computes:
+        time.sleep(0.01)
+    assert cache.get("k") == "OLD", "the current entry is served while it refreshes"
+    clock[0] += 11  # the entry expires during the refresh
+    results = [None] * 4
+
+    def miss(i):
+        results[i] = cache.get_or_compute("k", slow("DUPLICATE"), lambda v: 10)
+
+    misses = [threading.Thread(target=miss, args=(i,)) for i in range(4)]
+    for t in misses:
+        t.start()
+    time.sleep(0.2)
+    release.set()
+    refresher.join(5)
+    for t in misses:
+        t.join(5)
+    assert computes == ["NEW"], ("misses during a refresh join it instead of computing", computes)
+    assert results == ["NEW"] * 4 and cache.get("k") == "NEW", results
+    assert cache._states == {}, "per-key state dropped once nobody waits"
+    print("[PASS] TTLCache.refresh: the old entry is served meanwhile; 4 misses after it expired join the refresh (1 compute)")
+
+
+def test_ttlcache_refresh_failure_keeps_entry_and_is_not_cached():
+    from app.utils.ttl_cache import TTLCache
+
+    clock = [100.0]
+    cache = TTLCache(clock=lambda: clock[0])
+    cache.set("k", "OLD", 10)
+
+    def failing():
+        raise RuntimeError("Wialon down")
+
+    try:
+        cache.refresh("k", failing, lambda v: 10)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("a failed refresh must raise")
+    assert cache.get("k") == "OLD", "a failed refresh leaves the current entry in place"
+    clock[0] += 11
+    assert cache.get("k") is None, "and it still expires on its own TTL"
+    assert cache.get_or_compute("k", lambda: "FRESH", lambda v: 10) == "FRESH", "the next miss computes again"
+    assert cache.refresh("k", lambda: "ZERO-TTL", lambda v: 0) == "ZERO-TTL" and cache.get("k") == "FRESH", \
+        "a refresh whose TTL is 0 stores nothing, as set() does"
+    print("[PASS] TTLCache.refresh: a failure is raised, not cached, keeps the old entry until its own expiry")
+
+
 def main_entry():
     guard = OfflineGuard().start()
     tests = [
@@ -472,6 +539,8 @@ def main_entry():
         test_snapshot_failure_not_cached,
         test_stale_mileage_keeps_snapshot_read_time,
         test_fleet_discovery_shared_between_builders,
+        test_ttlcache_refresh_is_single_flight_with_get_or_compute,
+        test_ttlcache_refresh_failure_keeps_entry_and_is_not_cached,
     ]
     passed = 0
     try:

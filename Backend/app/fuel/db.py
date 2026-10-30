@@ -1,10 +1,13 @@
 """Supabase PostgREST database service for Fuel Management operations."""
 
+import contextvars
 import logging
 import os
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -485,6 +488,28 @@ def _get_page(url: str, params: Dict[str, str], headers: Dict[str, str], what: s
     raise AssertionError("unreachable")
 
 
+# Pages after the first are read in parallel (at most this many at once, well inside the pool of 16 connections)
+PARALLEL_PAGE_WORKERS = 4
+
+
+def _page_rows(url: str, params: Dict[str, str], headers: Dict[str, str], what: str, page: int,
+               read_started: float, deadline: Optional[float]) -> Tuple[List[Dict[str, Any]], Optional[int], float]:
+    """One page as (rows, total reported by Content-Range or None, seconds spent parsing), or FuelDataFetchError."""
+    response = _get_page(url, params, headers, what, page, read_started, deadline)
+    if not response.ok:
+        logger.error("Error reading %s: HTTP %s", what, response.status_code)
+        raise FuelDataFetchError(f"Could not read {what} completely (HTTP {response.status_code}).")
+    try:
+        parse_started = time.perf_counter()
+        chunk = response.json()
+        parse_s = time.perf_counter() - parse_started
+    except ValueError:
+        raise FuelDataFetchError(f"Invalid response while reading {what}.") from None
+    if not isinstance(chunk, list):
+        raise FuelDataFetchError(f"Unexpected response while reading {what}.")
+    return chunk, _parse_content_range_total(response.headers.get("content-range")), parse_s
+
+
 def _fetch_all_pages(
     url: str,
     params: Dict[str, str],
@@ -496,54 +521,104 @@ def _fetch_all_pages(
     Read every row matching params, PAGE_SIZE at a time, or raise FuelDataFetchError (also when `deadline` passes).
     Completion is decided by the exact count PostgREST reports (Prefer: count=exact), never by a
     short page, so a server max-rows cap below PAGE_SIZE cannot silently truncate the result.
-    Without a usable count, it keeps paging until an empty page.
+
+    The first page gives the total and the server's real page size; the remaining offsets are then known, so those
+    pages are read in parallel at the same offsets, with the same order and limit, as a sequential read. Every page
+    is counted (Prefer: count=exact) and must report the first page's total, hold exactly the rows its offset implies,
+    and repeat no row id. Otherwise rows were added or removed during the read (a later page could silently lose a
+    row): the whole read is repeated once, and if it is still inconsistent it fails rather than return a shifted result.
+    Without a usable count, it keeps paging sequentially until an empty page.
     """
-    page_headers = dict(headers)
-    page_headers["Prefer"] = "count=exact"
-    page_params = dict(params)
-    rows: List[Dict[str, Any]] = []
-    total: Optional[int] = None
     read_started = time.perf_counter()
-    parse_s = 0.0
-    page = 0
-
-    while True:
-        page += 1
-        page_params["offset"] = str(len(rows))
-        response = _get_page(url, page_params, page_headers, what, page, read_started, deadline)
-        if not response.ok:
-            logger.error("Error reading %s: HTTP %s", what, response.status_code)
-            raise FuelDataFetchError(f"Could not read {what} completely (HTTP {response.status_code}).")
+    for attempt in (1, 2):
         try:
-            parse_started = time.perf_counter()
-            chunk = response.json()
-            parse_s += time.perf_counter() - parse_started
-        except ValueError:
-            raise FuelDataFetchError(f"Invalid response while reading {what}.") from None
-        if not isinstance(chunk, list):
-            raise FuelDataFetchError(f"Unexpected response while reading {what}.")
+            rows, pages, first_page_s, parse_s = _read_all_pages_once(url, params, headers, what, deadline, read_started)
+        except _InconsistentRead as exc:
+            if attempt == 2:
+                logger.error("Supabase read of %s stayed inconsistent after a full re-read: %s", what, exc)
+                raise FuelDataFetchError(f"Could not read {what} completely ({exc}).") from None
+            logger.warning("PERF supabase_read reread request_id=%s what=%s reason=%s",
+                           request_trace_id.get(), what, exc)
+            continue
+        total_s = time.perf_counter() - read_started
+        logger.log(
+            logging.INFO if total_s >= 5 else logging.DEBUG,
+            "PERF supabase_read done request_id=%s what=%s attempt=%d pages=%d rows=%d total_ms=%.0f "
+            "first_page_ms=%.0f parse_ms=%.0f",
+            request_trace_id.get(), what, attempt, pages, len(rows), total_s * 1000, first_page_s * 1000,
+            parse_s * 1000,
+        )
+        return rows
+    raise AssertionError("unreachable")
 
-        reported = _parse_content_range_total(response.headers.get("content-range"))
-        if reported is not None:
-            total = reported
 
-        if not chunk:
-            if total is not None and len(rows) < total:
-                raise FuelDataFetchError(
-                    f"Could not read {what} completely ({len(rows)} of {total} rows; data changed during read)."
-                )
-            break
-        rows.extend(chunk)
-        if total is not None and len(rows) >= total:
-            break
+class _InconsistentRead(Exception):
+    """The rows changed while a paged read was running (counts, page sizes or row ids do not add up)."""
 
-    total_s = time.perf_counter() - read_started
-    logger.log(
-        logging.INFO if total_s >= 5 else logging.DEBUG,
-        "PERF supabase_read done request_id=%s what=%s pages=%d rows=%d total_ms=%.0f parse_ms=%.0f",
-        request_trace_id.get(), what, page, len(rows), total_s * 1000, parse_s * 1000,
-    )
-    return rows
+
+def _read_all_pages_once(
+    url: str, params: Dict[str, str], headers: Dict[str, str], what: str, deadline: Optional[float],
+    read_started: float,
+) -> Tuple[List[Dict[str, Any]], int, float, float]:
+    """One complete paged read as (rows, pages, first page seconds, parse seconds); _InconsistentRead if it is shifted."""
+    count_headers = dict(headers)
+    count_headers["Prefer"] = "count=exact"
+    started = time.perf_counter()
+
+    rows, total, parse_s = _page_rows(url, {**params, "offset": "0"}, count_headers, what, 1, read_started, deadline)
+    rows = list(rows)
+    page = 1
+    first_page_s = time.perf_counter() - started
+
+    if total is None:
+        # No count: page sequentially until an empty page (as before)
+        while rows:
+            page += 1
+            chunk, _, chunk_parse = _page_rows(url, {**params, "offset": str(len(rows))}, count_headers, what, page,
+                                               read_started, deadline)
+            parse_s += chunk_parse
+            if not chunk:
+                break
+            rows.extend(chunk)
+    elif len(rows) < total:
+        if not rows:
+            raise _InconsistentRead(f"0 of {total} rows; data changed during read")
+        stride = len(rows)
+        offsets = list(range(stride, total, stride))
+        pages: Dict[int, List[Dict[str, Any]]] = {}
+        totals: Dict[int, Optional[int]] = {}
+        with ThreadPoolExecutor(max_workers=min(PARALLEL_PAGE_WORKERS, len(offsets))) as pool:
+            futures = {
+                offset: pool.submit(contextvars.copy_context().run, _page_rows, url, {**params, "offset": str(offset)},
+                                    count_headers, what, index + 2, read_started, deadline)
+                for index, offset in enumerate(offsets)
+            }
+            try:
+                for offset, future in futures.items():
+                    chunk, page_total, chunk_parse = future.result()
+                    pages[offset], totals[offset] = chunk, page_total
+                    parse_s += chunk_parse
+            except BaseException:
+                for future in futures.values():
+                    future.cancel()
+                raise
+        page += len(offsets)
+        changed = sorted({t for t in totals.values() if t != total}, key=lambda t: -1 if t is None else t)
+        if changed:
+            raise _InconsistentRead(f"row count changed during read: {total} then {changed}")
+        if any(len(pages[offset]) != min(stride, total - offset) for offset in offsets):
+            received = len(rows) + sum(len(chunk) for chunk in pages.values())
+            raise _InconsistentRead(f"{received} of {total} rows; data changed during read")
+        for offset in offsets:
+            rows.extend(pages[offset])
+
+    if total is not None and len(rows) != total:
+        raise _InconsistentRead(f"{len(rows)} of {total} rows; data changed during read")
+    if rows and isinstance(rows[0], dict) and "id" in rows[0]:
+        ids = [r.get("id") for r in rows]
+        if len(set(ids)) != len(ids):
+            raise _InconsistentRead("a row repeated; data changed during read")
+    return rows, page, first_page_s, parse_s
 
 
 def fetch_import_rows(
@@ -712,8 +787,11 @@ def commit_fuel_import(
     except requests.RequestException as exc:
         if _not_sent(exc):
             raise FuelCommitError("the commit request could not be sent") from None
+        clear_fuel_read_caches()  # the commit may have been applied
         logger.error("Commit of fuel import #%s: outcome unknown (%s)", import_id, type(exc).__name__)
         return None
+    # Committed, refused or unknown: cached analytics reads may no longer show the visible dataset
+    clear_fuel_read_caches()
     if response.ok:
         try:
             body = response.json()
@@ -916,6 +994,7 @@ def _insert_batches(
             errors.append(error)
     if transactions:
         clear_vehicle_identifier_cache()
+        clear_fuel_read_caches()
     return stored, unresolved, errors
 
 
@@ -1240,6 +1319,42 @@ def get_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[str
 
 def clear_vehicle_identifier_cache() -> None:
     _IDENTIFIER_CACHE.clear()
+
+
+# Analytics reads of the visible fuel dataset, kept briefly so one Fuel Performance load and quick month changes reuse
+# them. Every write bumps _write_generation and clears the cache. Each kept read carries the generation it started
+# in, and a request accepts only a read that started no earlier than the request itself: a read from before a write
+# (even one stored in the instant after the clear) is never served afterwards, so no request is answered with rows
+# older than the last write in this process.
+ANALYTICS_READ_TTL_S = 30
+_ANALYTICS_READ_CACHE = TTLCache(max_entries=16)
+_write_generation = 0
+_write_generation_lock = threading.Lock()
+
+
+def cached_analytics_read(key: Any, read: Any) -> Any:
+    """read() once per key for ANALYTICS_READ_TTL_S (concurrent callers share it); failures propagate, never cached."""
+    # The table layout flags change what a read returns, so a read is reused only under the same layout
+    full_key = (key, (schema_v2_enabled(), replace_enabled(), summary_table_enabled()))
+    wanted = _write_generation
+    for _ in range(2):
+        generation, rows = _ANALYTICS_READ_CACHE.get_or_compute(
+            full_key,
+            lambda: (_write_generation, read()),  # the generation is taken before the read starts
+            lambda entry: ANALYTICS_READ_TTL_S if entry[0] == _write_generation else 0,
+        )
+        if generation >= wanted:
+            return rows
+        # Read before a write this request already follows: drop it and read again
+        _ANALYTICS_READ_CACHE.pop(full_key)
+    return read()
+
+
+def clear_fuel_read_caches() -> None:
+    global _write_generation
+    with _write_generation_lock:
+        _write_generation += 1
+    _ANALYTICS_READ_CACHE.clear()
 
 
 def build_fingerprint(

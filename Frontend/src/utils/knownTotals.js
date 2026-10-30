@@ -54,6 +54,16 @@ export function isPartialReport(payload) {
     return false
 }
 
+// Outcome of one Dashboard poll for yesterday's reports, from its Promise.allSettled results: the first `todayCount`
+// entries are today's requests, every later entry is one of yesterday's. Yesterday is loaded only when every one of
+// its requests succeeded (a failed one is retried on the next poll); `complete` is false when any of them is partial
+// or stale (retried later).
+export function yesterdayLoadOutcome(results, todayCount) {
+    const yesterday = results.slice(todayCount)
+    if (yesterday.length === 0 || !yesterday.every(r => r.status === "fulfilled")) return { loaded: false, complete: false }
+    return { loaded: true, complete: yesterday.every(r => !isPartialReport(r.value)) }
+}
+
 // Driving seconds per unit for one period, as Map(vehicle_id string -> seconds | null), over the idle-analytics
 // rows accepted by includeVehicle(id). Each unit's Engine Hours "In motion" value is used as reported; it is not
 // checked against Trips report mileage, which Wialon measures differently. The backend sends null when the value

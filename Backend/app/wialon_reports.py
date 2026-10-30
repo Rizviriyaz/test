@@ -394,7 +394,8 @@ def _subrow_key(subrow: Any) -> str:
 
 
 def _fetch_all_subrows(
-    sid: str, row_index: int, what: str, table_index: int = 0, expected_count: Optional[int] = None
+    sid: str, row_index: int, what: str, table_index: int = 0, expected_count: Optional[int] = None,
+    first_page: Optional[List[Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     """
     Read every sub-row (e.g. discrete idle intervals) of one report row, page by page.
@@ -407,17 +408,21 @@ def _fetch_all_subrows(
     and paging stops at a page that brings nothing new or ignores the range. `expected_count` is the row's
     sub-row count ("d"); when given, complete=True only if exactly that many distinct sub-rows were read.
     Without it, only a short page proves the end of the list.
+    `first_page` is page 0 when it was already read (e.g. by a core/batch call): it is used instead of reading it again.
     """
     subrows: List[Dict[str, Any]] = []
     seen = set()
     for page_no in range(REPORT_SUBROWS_MAX_PAGES):
         start = page_no * REPORT_SUBROWS_CHUNK
-        page = wialon_request(
-            "report/get_result_subrows",
-            {"tableIndex": table_index, "rowIndex": row_index,
-             "indexFrom": start, "indexTo": start + REPORT_SUBROWS_CHUNK - 1},
-            sid=sid,
-        )
+        if page_no == 0 and first_page is not None:
+            page = first_page
+        else:
+            page = wialon_request(
+                "report/get_result_subrows",
+                {"tableIndex": table_index, "rowIndex": row_index,
+                 "indexFrom": start, "indexTo": start + REPORT_SUBROWS_CHUNK - 1},
+                sid=sid,
+            )
         if not isinstance(page, list):
             logging.warning("Wialon %s sub-rows unavailable for row %s: %s", what, row_index, page)
             return subrows, False
@@ -493,8 +498,45 @@ def _fetch_rows_subrows(
                 if len(distinct) == expected:
                     out[idx] = (distinct, True)
                     continue
-            out[idx] = _fetch_all_subrows(sid, idx, what, table_index=table_index, expected_count=expected)
+            # A full batched page is page 0 of this row (indexFrom 0, the range honoured): paging resumes after it
+            # instead of re-reading it. A short or empty one for a row with more sub-rows is not trusted and re-read.
+            full_page = isinstance(page, list) and len(page) == REPORT_SUBROWS_CHUNK
+            out[idx] = _fetch_all_subrows(sid, idx, what, table_index=table_index, expected_count=expected,
+                                          first_page=page if full_page else None)
     return out
+
+
+def narrow_engine_idle_result(
+    result: Dict[str, Any], include_events: bool, event_vehicle_names: Optional[Collection[str]] = None
+) -> Dict[str, Any]:
+    """
+    The result execute_wialon_group_engine_idle_report returns for (include_events, event_vehicle_names), derived from
+    a result of the same report group and window whose events cover every unit in that scope. Rows are the report's
+    own rows either way; a unit outside the scope gets exactly what a run that skipped its events gives it (no events,
+    idle_events None, longest_idle_seconds 0, no "idle_events" gap).
+    """
+    def in_scope(name: str) -> bool:
+        return include_events and (event_vehicle_names is None or name in event_vehicle_names)
+
+    vehicles = []
+    events = []
+    for uv in result.get("vehicles", []):
+        if in_scope(uv["vehicle_name"]):
+            vehicles.append(uv)
+            events.extend(uv.get("events") or [])
+        else:
+            vehicles.append(dict(
+                uv, idle_events=None, longest_idle_seconds=0, events=[],
+                incomplete_fields=[f for f in uv.get("incomplete_fields") or [] if f != "idle_events"],
+            ))
+    return dict(
+        result,
+        vehicles=vehicles,
+        events=events,
+        event_location_unverified=any(not ev["location_verified"] for ev in events),
+        events_incomplete=[n for n in result.get("events_incomplete") or [] if in_scope(n)],
+        events_without_subrows=[n for n in result.get("events_without_subrows") or [] if in_scope(n)],
+    )
 
 
 def execute_wialon_unit_trips_report(

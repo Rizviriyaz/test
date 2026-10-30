@@ -72,7 +72,7 @@ The frontend never talks to Wialon or Groq, and it uses Supabase only for sign-i
   - `fleet_analytics.py`: `/api/fleet/*` builders.
   - `ai/`: assistant loop and tools.
   - `auth.py`: token validation.
-- **Lifespan**: at startup the app attempts `login(force=True)`. On success it pre-warms the fleet alerts build in the background. That is the slowest cold load, measured at about 30 s, and it never blocks startup. If Wialon login fails, startup continues and login is retried lazily on the next request, so `/api/health` and fuel-only routes stay available.
+- **Lifespan**: at startup the app attempts `login(force=True)`. It does not pre-build the fleet alerts: no page reads them (only the AI chat tool, on demand), and the cold scan (measured 36.8 s, 107 message loads) counts toward Wialon's message-load limit. If Wialon login fails, startup continues and login is retried lazily on the next request, so `/api/health` and fuel-only routes stay available.
 - **Concurrency**: `ThreadPoolExecutor` for per-vehicle fan-out. Request trace IDs are propagated into workers (`performance_diagnostics.map_with_request_context`).
 - **Errors**:
   - `WialonAPIError` is mapped to 502 `"Wialon upstream request failed"`.
@@ -90,7 +90,9 @@ All caches are per-process, bounded, thread-safe `TTLCache` instances (`app/util
 | Fleet analytics (same retention rule) | `fleet_analytics.py` | Alerts: fresh 180 s, background refresh-ahead after 120 s, 30 s retry back-off after a failed refresh. Health, utilization, trips (180 s for an open window), safety, groups: concurrent identical calls run once and share the result or exception. One groups / units / calc_last read is shared by builders for 5 s. |
 | Group Trips snapshot | `fleet_analytics.py` (`group_trips_snapshot`) | One report run per report group and window, shared by `/api/dashboard/mileage` and `/api/fleet/trips` (timeframe, date and exact windows; `hours=N` trips run their own report). 60 s open, 1800 s closed, 30 s with unreadable cells or guessed columns. Both results report its window and `retrieved_at` and never outlive it; a failure is never cached. |
 | Validated tokens (1024 entries) | `auth.py` | 300 s; reused up to 600 s only while Supabase is unreachable, never past the JWT `exp`. Concurrent validations of one token share one Supabase round trip and its outcome. |
-| Fuel telematics bundles | `fuel/wialon_distance.py` | 120 s for ranges ending today, 3600 s for closed ranges, 30 s for incomplete bundles (`FUEL_TELEMATICS_TTL_*`) |
+| Fuel telematics bundles | `fuel/wialon_distance.py` | 120 s for ranges ending today, 3600 s for closed ranges, 30 s for incomplete bundles (`FUEL_TELEMATICS_TTL_*`). Every request for a range (routes and AI fuel tools) shares one build on the fuel telematics executor, and a cached range answers without an executor worker (`fuel/routes.py`). A complete bundle of a range ending today that is at least 75% of its live TTL old is still served and refreshed once in the background; no refresh within 30 s of a failed one or 300 s of a Wialon 1004. |
+| Fuel analytics reads | `fuel/db.py` (`cached_analytics_read`, 16 entries) | 30 s, keyed by filters, caller token (without the service-role key) and the table-layout flags. Cleared by any fuel row insert or import commit in the process; a read that started before a write is never served after it. |
+| Fuel Wialon unit list | `fuel/routes.py` (8 entries) | 60 s per Wialon session, for plate/name matching only; an empty list is never kept. |
 
 - Cache keys include every parameter that changes the result.
 - A window that ended before today's UAE midnight (e.g. `yesterday`) is a closed report: mileage, idle analytics and fleet trips cache it for 1800 s (`CLOSED_WINDOW_TTL_SECONDS`).
@@ -292,6 +294,6 @@ Per page:
 
 ## 13. Scaling Strategy
 
-- **Current**: a single process, with per-process caches, Wialon sessions and report locks. Run one Uvicorn process per deployment.
+- **Current**: caches, Wialon sessions and report locks are per process. Locally that is one Uvicorn process. The root `vercel.json` runs the backend as a Vercel Function, where the platform may run several instances, each with its own caches: an instance that did not run an import can serve pre-import fuel figures for up to 30 s, new Wialon units reach fuel matching within 60 s, and today's telematics are at most one live TTL (120 s) old per instance. Shared caching needs new infrastructure (e.g. Redis) and has not been added.
 - **Next**: move caches to Redis, add background workers for report pre-computation, and add time-series storage for telemetry archives.
 - **Enterprise**: Wialon data-streaming ingestion and horizontally scaled stateless API nodes.

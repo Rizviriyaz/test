@@ -657,7 +657,8 @@ def test_health_stale_keeps_satellite_deduction():
     """P3: with a known satellite count, STALE keeps that count's deduction and adds exactly one -15."""
     def health(pos_age, sats):
         rec, _ = _live(30, 40, True, pos_age=pos_age, sats=sats)
-        raw = {"id": 7, "nm": "T7", "lmsg": {"t": NOW - 30}}
+        # EXCELLENT needs a reported HDOP (a satellite count alone is at most GOOD)
+        raw = {"id": 7, "nm": "T7", "lmsg": {"t": NOW - 30, "p": {"hdop": 0.9}}}
         with patch("app.fleet_analytics.time.time", return_value=NOW):
             return fa.evaluate_vehicle_health(rec, raw_unit=raw, calc_data={})
     scores = {}

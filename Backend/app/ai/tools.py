@@ -806,15 +806,16 @@ def _telematics_for(scope, date_from, date_to, warnings: list = None):
     """
     from concurrent.futures import TimeoutError as FutureTimeout
     from app.fuel import wialon_distance
-    from app.fuel.routes import run_wialon_bounded_sync
+    from app.fuel.routes import telematics_bundle_bounded_sync
     from app.fuel.scope import resolve_effective_dates
 
     dates = resolve_effective_dates(scope.matched, date_from, date_to)
     if scope.is_empty or dates is None:
         return None, None
     try:
-        # Looked up at call time, so the gateway the routes use (and test patches of it) applies here too
-        return run_wialon_bounded_sync(wialon_distance.get_fleet_telematics_bundle, dates[0], dates[1], scope.sid), dates
+        # The routes' cache fast path and shared build per range; the gateway is looked up at call time, so the one
+        # the routes use (and test patches of it) applies here too
+        return telematics_bundle_bounded_sync(dates, scope.sid, wialon_distance.get_fleet_telematics_bundle), dates
     except (FutureTimeout, WialonAPIError) as exc:
         logging.getLogger(__name__).warning("AI fuel telematics %s..%s unavailable: %s", dates[0], dates[1], exc)
         if warnings is not None:

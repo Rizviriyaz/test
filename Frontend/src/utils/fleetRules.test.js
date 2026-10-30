@@ -31,6 +31,7 @@ test("group membership: a vehicle belongs to its primary and every secondary gro
     assert.equal(inGroup(idleRow, "ALL"), true)
     assert.deepEqual(groupIdsOf(idleRow), ["1", "7"])
     assert.deepEqual(groupIdsOf({ group_id: 3 }), ["3"], "older payload: primary group only")
+    assert.deepEqual(groupIdsOf({ group_id: 0, group_ids: [0] }), ["0"], "General Fleet (synthetic group 0) is a real group id")
 })
 
 test("healthy rule matches the backend KPI (battery warning with excellent GPS is not healthy)", () => {

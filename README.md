@@ -98,7 +98,7 @@ Templates: [Backend/.env.example](Backend/.env.example) and [Frontend/.env.examp
 
 ## Local Development
 
-Prerequisites: Python 3.10+, Node.js 18+, a Wialon SDK token, and a Supabase project with at least one user. Sign-in and every API call need Supabase; there is no local login fallback.
+Prerequisites: Python 3.10+, Node.js 20.19+ or 22.12+ (required by Vite 8), a Wialon SDK token, and a Supabase project with at least one user. Sign-in and every API call need Supabase; there is no local login fallback.
 
 ### Backend
 
@@ -111,7 +111,7 @@ copy .env.example .env           # fill in credentials; set ENVIRONMENT=developm
 uvicorn app.main:app --reload    # http://127.0.0.1:8000
 ```
 
-The backend tries a Wialon login at startup and pre-warms the fleet alerts cache in the background. A Wialon outage does not block startup: login is retried on the next request.
+The backend tries a Wialon login at startup. A Wialon outage does not block startup: login is retried on the next request.
 
 ### Frontend
 
@@ -143,6 +143,13 @@ Without a permitted role, the backend returns 403 for every API call. `viewer` i
 | Audit/verify scripts | `Backend/scripts/audit_*`, `verify_*`, `wialon_*_inspector.py`, etc. | **Live**; need a populated `Backend/.env` |
 
 Many backend scripts install `scripts/offline_guard.py`, which blocks outbound HTTP so a missing mock fails loudly. Latest results are recorded in [TASKS.md](TASKS.md#verification-status).
+
+`test_ai_fuel_assistant.py` and three endpoint cases in `test_fuel_efficiency.py` need live services. To run every other backend script (PowerShell, from `Backend/` with the venv active):
+
+```powershell
+Get-ChildItem scripts\test_*.py | Where-Object Name -notin 'test_ai_fuel_assistant.py','test_fuel_efficiency.py' |
+  ForEach-Object { python $_.FullName > $null 2>&1; if ($LASTEXITCODE) { "FAIL $($_.Name)" } else { "PASS $($_.Name)" } }
+```
 
 ---
 
@@ -176,9 +183,9 @@ Optional backend tuning variables from the table above can also be set. `VITE_*`
 
 ### Runtime notes
 
-- The backend runs as a Vercel Function (Fluid compute, 300 s default max duration). The ~30 s cold fleet-alerts scan fits inside it.
-- Caches, the Wialon session and report locks are per instance, so each cold start logs in to Wialon again and starts with empty caches.
-- The startup alerts prewarm is best-effort: it runs on a background thread that may pause while the instance is idle or stop when the instance is recycled. A later `/api/fleet/alerts` request then builds the alerts itself.
+- The backend runs as a Vercel Function (Fluid compute, 300 s default max duration). The ~30-37 s cold fleet-alerts scan (built on demand, not at startup) fits inside it.
+- Caches, the Wialon session and report locks are per instance, so each cold start logs in to Wialon again and starts with empty caches. With several instances, one that did not run an import can serve pre-import fuel figures for up to 30 s.
+- The refresh-ahead of today's fuel telematics runs on a background thread, which may pause while the instance is idle or stop when it is recycled. A later request then rebuilds the range itself, as without refresh-ahead.
 
 ### Post-deploy checks
 

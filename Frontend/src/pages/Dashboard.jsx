@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react"
+import { Suspense, useEffect, useMemo, useState, useRef } from "react"
 import { Link } from "react-router-dom"
 import {
     Layers,
@@ -41,7 +41,7 @@ import {
     EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, activeTodaySummary, forUaeDay, formatKm2, offlineNote,
     previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState, yesterdayCellStates,
 } from "../utils/fleetNow"
-import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import { LazyVehicleDetailDrawer as VehicleDetailDrawer } from "../components/Vehicles/lazyVehicleDetailDrawer"
 import LiveIdleTimer from "../components/Common/LiveIdleTimer"
 import {
     CATEGORY_TICK,
@@ -51,8 +51,17 @@ import {
     TOOLTIP_STYLE,
 } from "../components/Common/chartTheme"
 import {
-    compareKnownDesc, drivingSecondsByVehicle, formatKm, idleSecondsOf, isKnownNumber, isPartialReport, sumKnown, sumKnownInBoth,
+    compareKnownDesc, drivingSecondsByVehicle, formatKm, idleSecondsOf, isKnownNumber, sumKnown, sumKnownInBoth,
+    yesterdayLoadOutcome,
 } from "../utils/knownTotals"
+
+// When the live fleet was read from Wialon: the backend's retrieved_at (UTC epoch seconds), since a read shared between
+// viewers can be several seconds old when it arrives. Null when missing or invalid: no time is shown rather than the
+// browser's clock presenting it as just read.
+function liveRetrievedAt(payload) {
+    const seconds = Number(payload?.retrieved_at)
+    return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null
+}
 
 // A partial or stale "yesterday" report is re-read after this long instead of staying partial until midnight
 const YESTERDAY_PARTIAL_RETRY_MS = 180000
@@ -107,7 +116,7 @@ function Dashboard() {
     // False while the vehicles shown are an earlier visit's cached response
     const [vehiclesFresh, setVehiclesFresh] = useState(false)
     const [error, setError] = useState(null)
-    const [lastUpdated, setLastUpdated] = useState(() => (cached.vehicles ? new Date(cached.vehicles.fetchedAt) : null))
+    const [lastUpdated, setLastUpdated] = useState(() => (cached.vehicles ? liveRetrievedAt(cached.vehicles.data) : null))
 
     // Global Vehicle Group Filter (Affects all sections on the page)
     const [selectedGroup, setSelectedGroup] = useState("ALL")
@@ -167,7 +176,7 @@ function Dashboard() {
                     setVehicles(data.vehicles || [])
                     setVehiclesLoaded(true)
                     setVehiclesFresh(true)
-                    setLastUpdated(new Date())
+                    setLastUpdated(liveRetrievedAt(data))
                     setError(null)
                 }
             } catch (err) {
@@ -230,24 +239,22 @@ function Dashboard() {
                     tracked("yesterdayIdle", getFleetIdleAnalytics({ timeframe: "yesterday", include_events: false })).then(res => { if (isCurrent()) setYesterdayIdleAnalyticsData(res); return res }),
                     tracked("yesterdayMileage", getDashboardMileage("yesterday")).then(res => { if (isCurrent()) setYesterdayMileageData(res); return res }),
                 ] : []
-                const results = await Promise.allSettled([
+                const todayRequests = [
                     tracked("trips", getFleetTripsAnalytics({ timeframe: "today" })).then(res => { if (isCurrent()) setTripsData(res) }),
                     tracked("idle", getFleetIdleAnalytics({ timeframe: "today", include_events: false })).then(res => { if (isCurrent()) setIdleAnalyticsData(res) }),
                     getDashboardMileage("today").then(
                         res => { if (isCurrent()) { setTodayMileageData(res); setTodayMileageFailed(false) } },
                         err => { if (isCurrent()) setTodayMileageFailed(true); throw err },
                     ),
-                    ...yesterdayRequests,
-                ])
+                ]
+                const results = await Promise.allSettled([...todayRequests, ...yesterdayRequests])
                 // Marked loaded only when every yesterday report succeeded and none came back partial or stale; a
                 // failed one is retried on the next poll, a partial or stale one after YESTERDAY_PARTIAL_RETRY_MS
                 if (loadYesterday && isCurrent()) {
-                    const settled = results.slice(4)
-                    const values = settled.map(r => r.value)
-                    if (settled.every(r => r.status === "fulfilled")) {
-                        const complete = values.every(v => !isPartialReport(v))
+                    const outcome = yesterdayLoadOutcome(results, todayRequests.length)
+                    if (outcome.loaded) {
                         yesterdayLoadedForRef.current = dayKey
-                        yesterdayRetryAtRef.current = complete ? null : Date.now() + YESTERDAY_PARTIAL_RETRY_MS
+                        yesterdayRetryAtRef.current = outcome.complete ? null : Date.now() + YESTERDAY_PARTIAL_RETRY_MS
                     }
                 }
             } catch (err) {
@@ -797,10 +804,12 @@ function Dashboard() {
     return (
         <AppShell
             overlay={selectedVehicle && (
-                <VehicleDetailDrawer
-                    vehicle={selectedVehicle}
-                    onClose={() => setSelectedVehicleId(null)}
-                />
+                <Suspense fallback={null}>
+                    <VehicleDetailDrawer
+                        vehicle={selectedVehicle}
+                        onClose={() => setSelectedVehicleId(null)}
+                    />
+                </Suspense>
             )}
         >
             <PageHeader

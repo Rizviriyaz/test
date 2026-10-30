@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs"
 import {
     PARTIAL_EVENTS_NOTE, compareKnownDesc, drivingSecondsByVehicle, formatKm, idleSecondsOf, inMotionSecondsOf,
     isPartialReport, partialEventsNote, sumKnown, sumKnownInBoth, tripDistanceOf, tripsDistanceIncomplete, tripsDistanceKm,
+    yesterdayLoadOutcome,
 } from "./knownTotals.js"
 
 test("sumKnown keeps known values (including a recorded 0) and reports unknown ones", () => {
@@ -103,6 +104,14 @@ test("Idle analytics labels its event figures as Wialon engine-on periods, not c
     assert.match(page, /label="Most Idle in One Period"/)
     assert.match(page, /Most idle time Wialon reports within one engine-on period/)
     assert.doesNotMatch(page, /<span>Longest Idle<\/span>|Per idle occurrence|"Recorded in period"/)
+})
+
+test("Idle analytics drills into General Fleet (group_id 0): a selected group id is never tested for truthiness", () => {
+    const page = readFileSync(new URL("../pages/IdleAnalytics.jsx", import.meta.url), "utf8")
+    assert.match(page, /if \(selectedGroupId == null\) return null/)
+    assert.match(page, /selectedGroupId != null \? \(/)
+    assert.match(page, /if \(d\?\.activePayload\?\.\[0\]\?\.payload\?\.group_id != null\)/)
+    assert.doesNotMatch(page, /!selectedGroupId|selectedGroupId \?|payload\?\.group_id\) \{/)
 })
 
 test("Idle analytics labels trend, hotspots and the event list when events are partial", () => {
@@ -257,7 +266,8 @@ test("isPartialReport flags partial or stale Dashboard reports so a partial Yest
     assert.equal(isPartialReport({ kpis: {}, by_vehicle: [{ total_idle_seconds: 60, in_motion_seconds: null }] }), true, "unknown driving time")
     assert.equal(isPartialReport({ incomplete_units: [], stale: true }), true, "served stale after a Wialon failure")
     const page = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
-    assert.match(page, /isPartialReport\(v\)/, "the Dashboard checks each yesterday report")
+    // Each yesterday report is checked with isPartialReport inside yesterdayLoadOutcome (tested below)
+    assert.match(page, /yesterdayLoadOutcome\(results, todayRequests\.length\)/, "the Dashboard checks each yesterday report")
     assert.match(page, /YESTERDAY_PARTIAL_RETRY_MS/)
 })
 
@@ -269,4 +279,58 @@ test("Dashboard trips sum known counts and show the unknown vehicles; group idle
     assert.match(page, /item\.unknownCount \+= 1/, "unknown idle is counted per group, never added as 0")
     const trips = [{ trip_count: 3 }, { trip_count: null }, { trip_count: 0 }]
     assert.deepEqual(sumKnown(trips, t => t.trip_count), { total: 3, known: 2, unknown: 1, partial: true, allUnknown: false })
+})
+
+
+// Dashboard poll: 3 today requests, then yesterday's trips, idle and mileage (in that order)
+const ok = value => ({ status: "fulfilled", value })
+const failed = () => ({ status: "rejected", reason: new Error("502") })
+const COMPLETE = { summary: { total_distance_partial: false }, kpis: { total_idle_partial: false } }
+const PARTIAL = { stale: true }
+const TODAY = [ok(undefined), ok(undefined), ok(undefined)]
+
+test("yesterday is loaded and complete only when all three yesterday reports succeed in full", () => {
+    assert.deepEqual(yesterdayLoadOutcome([...TODAY, ok(COMPLETE), ok(COMPLETE), ok(COMPLETE)], 3), { loaded: true, complete: true })
+    // Today's own failures never decide yesterday's state
+    assert.deepEqual(yesterdayLoadOutcome([failed(), failed(), failed(), ok(COMPLETE), ok(COMPLETE), ok(COMPLETE)], 3),
+        { loaded: true, complete: true })
+})
+
+test("a failed yesterday report at any position (trips, idle, mileage) leaves yesterday unloaded for a retry", () => {
+    for (const position of [0, 1, 2]) {
+        const yesterday = [ok(COMPLETE), ok(COMPLETE), ok(COMPLETE)]
+        yesterday[position] = failed()
+        assert.deepEqual(yesterdayLoadOutcome([...TODAY, ...yesterday], 3), { loaded: false, complete: false },
+            `yesterday request ${position} failed`)
+    }
+})
+
+test("a partial or stale yesterday report at any position is loaded but incomplete (retried later)", () => {
+    for (const position of [0, 1, 2]) {
+        const yesterday = [ok(COMPLETE), ok(COMPLETE), ok(COMPLETE)]
+        yesterday[position] = ok(PARTIAL)
+        assert.deepEqual(yesterdayLoadOutcome([...TODAY, ...yesterday], 3), { loaded: true, complete: false },
+            `yesterday request ${position} partial`)
+    }
+})
+
+test("a poll without yesterday requests never marks yesterday loaded", () => {
+    assert.deepEqual(yesterdayLoadOutcome(TODAY, 3), { loaded: false, complete: false })
+})
+
+test("Dashboard splits today and yesterday results by the today request count, not a fixed index", () => {
+    const dashboard = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
+    assert.doesNotMatch(dashboard, /results\.slice\(\d\)/)
+    assert.match(dashboard, /yesterdayLoadOutcome\(results, todayRequests\.length\)/)
+    assert.match(dashboard, /Promise\.allSettled\(\[\.\.\.todayRequests, \.\.\.yesterdayRequests\]\)/)
+})
+
+
+test("Dashboard shows when the live fleet was read (backend retrieved_at), never the browser clock", () => {
+    const dashboard = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
+    assert.doesNotMatch(dashboard, /setLastUpdated\(new Date\(\)\)/, "a shared read must not be shown as just read")
+    assert.match(dashboard, /setLastUpdated\(liveRetrievedAt\(data\)\)/)
+    assert.match(dashboard, /liveRetrievedAt\(cached\.vehicles\.data\)/, "a cached response shows its own read time")
+    assert.match(dashboard, /Number\.isFinite\(seconds\) && seconds > 0 \? new Date\(seconds \* 1000\) : null/,
+        "a missing or invalid retrieved_at shows no time")
 })

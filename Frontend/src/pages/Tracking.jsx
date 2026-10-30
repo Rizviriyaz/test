@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react"
 import { useSearchParams } from "react-router-dom"
 import {
     Truck,
@@ -12,7 +12,7 @@ import { isValidCoordinate } from "../utils/coordinates"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
-import VehicleDetailDrawer from "../components/Vehicles/VehicleDetailDrawer"
+import { LazyVehicleDetailDrawer as VehicleDetailDrawer } from "../components/Vehicles/lazyVehicleDetailDrawer"
 import { LIVE_STATUSES, countByStatus, formatAge, isPositionStale, isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
 
 function formatLastUpdate(vehicle) {
@@ -531,12 +531,14 @@ function Tracking() {
 
                         {/* 4. Single Vehicle Details Drawer */}
                         {isDrawerOpen && activeVehicle && (
-                            <VehicleDetailDrawer
-                                vehicle={activeVehicle}
-                                open={isDrawerOpen}
-                                onClose={handleCloseDrawer}
-                                asDrawer={true}
-                            />
+                            <Suspense fallback={null}>
+                                <VehicleDetailDrawer
+                                    vehicle={activeVehicle}
+                                    open={isDrawerOpen}
+                                    onClose={handleCloseDrawer}
+                                    asDrawer={true}
+                                />
+                            </Suspense>
                         )}
                     </main>
                 </div>

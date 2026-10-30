@@ -298,31 +298,25 @@ def test_use_cache_false_bypasses_component_caches():
     print("[PASS] use_cache=False skips the health/safety caches; the default still uses them")
 
 
-def test_startup_prewarms_alerts_in_background():
+def test_startup_does_not_build_alerts():
     from fastapi.testclient import TestClient
     import app.main as main
 
-    _reset()
-    parts = _Parts(delay=0.5)
-    p1, p2 = parts.patches()
-    with p1, p2, patch("app.main.login", return_value="sid"):
-        started = time.perf_counter()
-        with TestClient(main.app):
-            elapsed = time.perf_counter() - started
-        assert elapsed < 0.4, f"startup blocked on the alerts build ({elapsed:.3f}s)"
-        # A visitor arriving during the warm-up waits for it instead of starting a second scan
-        res = fa.get_fleet_alerts_analytics()
-    assert parts.builds() == 1, parts.calls
-    assert _alert_keys(res) == EXPECTED, _alert_keys(res)
-
-    _reset()
-    parts = _Parts()
-    p1, p2 = parts.patches()
-    with p1, p2, patch("app.main.login", side_effect=WialonAPIError("down")):
-        with TestClient(main.app):
-            pass
-    assert parts.calls == [] and not fa._alerts_build_lock.locked(), "no warm-up when Wialon login fails"
-    print(f"[PASS] Startup: alerts warm in the background (startup {elapsed * 1000:.0f} ms), first visitor shares that build; skipped when login fails")
+    for login_patch in (patch("app.main.login", return_value="sid"),
+                        patch("app.main.login", side_effect=WialonAPIError("down"))):
+        _reset()
+        parts = _Parts()
+        p1, p2 = parts.patches()
+        with p1, p2, login_patch:
+            with TestClient(main.app):
+                time.sleep(0.2)  # a background warm-up would have started by now
+            assert parts.calls == [] and not fa._alerts_build_lock.locked(), "startup must not scan alerts"
+            # Alerts are still built on demand (the AI chat tool): the first call builds once, the next is a hit
+            res = fa.get_fleet_alerts_analytics()
+            assert fa.get_fleet_alerts_analytics() == res
+        assert parts.builds() == 1, parts.calls
+        assert _alert_keys(res) == EXPECTED, _alert_keys(res)
+    print("[PASS] Startup builds no alerts (login ok or failed); the first on-demand call builds once and is then cached")
 
 
 def test_background_refresh_backs_off_after_wialon_limit():
@@ -401,7 +395,7 @@ def main() -> int:
         test_cold_caller_waits_for_running_refresh,
         test_queued_cold_callers_share_failure,
         test_use_cache_false_bypasses_component_caches,
-        test_startup_prewarms_alerts_in_background,
+        test_startup_does_not_build_alerts,
         test_background_refresh_backs_off_after_wialon_limit,
         test_safety_scan_stops_loading_after_wialon_limit,
     ]

@@ -201,7 +201,7 @@ export default function IdleMapModal({ event, onClose }) {
                         {/* Start Time (UAE Time) */}
                         <div className="rounded-lg border border-slate-200/80 bg-white p-3">
                             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
-                                <span>Start Time (UAE)</span>
+                                <span>Engine On</span>
                             </div>
                             <p className="mt-1 text-sm font-semibold text-slate-800">
                                 {event.start_time ? formatUAETime(event.start_time) : "—"}
@@ -211,7 +211,7 @@ export default function IdleMapModal({ event, onClose }) {
                         {/* End Time (UAE Time) */}
                         <div className="rounded-lg border border-slate-200/80 bg-white p-3">
                             <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
-                                <span>End Time (UAE)</span>
+                                <span>Engine Off</span>
                             </div>
                             <p className="mt-1 text-sm font-semibold text-slate-800">
                                 {event.end_time ? formatUAETime(event.end_time) : "—"}

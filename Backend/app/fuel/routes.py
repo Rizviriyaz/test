@@ -25,6 +25,7 @@ from app.fuel.analytics import (
 )
 from app.fuel.db import (
     FuelDataFetchError,
+    cached_analytics_read,
     fetch_fuel_transactions_for_analytics,
     fetch_import_coverage,
     replace_enabled,
@@ -84,6 +85,7 @@ from app.fuel.efficiency import (
     calculate_efficiency_trend,
 )
 from app.fuel.anomalies import IDLE_THRESHOLD_MODES, detect_fuel_waste_and_anomalies
+from app.fuel import wialon_distance
 from app.fuel.wialon_distance import (
     get_vehicle_distance,
     get_fleet_distances_map,
@@ -96,9 +98,9 @@ from app.fuel.wialon_distance import (
 )
 from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_int
-from app.utils.datetime_helpers import get_uae_now
-from app.utils.ttl_cache import InFlight
-from app.wialon import WialonAPIError
+from app.utils.datetime_helpers import get_uae_now, now_timestamp
+from app.utils.ttl_cache import InFlight, TTLCache
+from app.wialon import WialonAPIError, seconds_since_limit_hit
 from app.vehicles import get_all_vehicles, extract_registration_plate
 from app.wialon import login
 
@@ -166,14 +168,9 @@ FUEL_DATA_UNAVAILABLE_DETAIL = (
 )
 
 _shared_reads = InFlight()
-
-
-async def _fetch_transactions(filters: Dict[str, Any], bearer_token: Optional[str]) -> List[Dict[str, Any]]:
-    """Read all matching fuel transactions, or fail with 503 rather than compute on partial data."""
-    try:
-        return await run_in_threadpool(fetch_fuel_transactions_for_analytics, filters, bearer_token)
-    except FuelDataFetchError:
-        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+# The fleet's Wialon units, used only to match fuel vehicles by plate/name (not live status): one search per minute
+FUEL_UNITS_TTL_S = 60
+_UNITS_CACHE = TTLCache(max_entries=8)
 
 
 def _bundle_warnings(bundle: Dict[str, Any]) -> List[str]:
@@ -206,30 +203,141 @@ TELEMATICS_TIMEOUT_WARNING = ("Wialon reports did not respond in time; distance,
                               "are unavailable for this request. Reload to retry.")
 TELEMATICS_FAILED_WARNING = ("Wialon reports failed; distance, driving/idle hours and idle estimates are unavailable "
                              "for this request.")
-# Abandoned waiters keep a worker until their report ends; once all are busy, new requests time out to "unavailable"
+# Each in-flight shared job (one per range or unit set, a trend chain, a refresh-ahead) keeps a worker until its report
+# ends, also after its waiters left; once all are busy, uncached requests time out to "unavailable"
 _TELEMATICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fuel-telematics")
 
 
-async def _run_wialon_bounded(fn, *args):
-    """Run a Wialon-bound call off the request pool; asyncio.TimeoutError after FUEL_TELEMATICS_WAIT_S (the call
-    itself keeps running and caches its result)."""
-    loop = asyncio.get_running_loop()
-    future = loop.run_in_executor(_TELEMATICS_EXECUTOR, contextvars.copy_context().run, fn, *args)
-    return await asyncio.wait_for(future, timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
+# One fleet telematics bundle build per range: every request for the range (routes and the AI fuel tools) awaits the
+# same executor future (as the trend chains below do), so a Fuel Performance load holds one executor worker per range
+# instead of one per request, and a range already in the bundle cache answers without a worker. A request that stops
+# waiting never cancels it.
+_BUNDLE_BUILDS: Dict[Tuple[str, str], concurrent.futures.Future] = {}
+_BUNDLE_BUILDS_LOCK = threading.Lock()
+
+# Refresh-ahead of a live range (ending today, UAE): a complete cached bundle at least TELEMATICS_REFRESH_AHEAD of its
+# live TTL old is still served at once, and one background rebuild (the range's shared build) replaces it before it
+# expires, so viewers of today's figures do not wait for, or time out on, a cold rebuild. The live TTL is unchanged,
+# so Wialon still builds a viewed range at most about once per TTL. No rebuild for TELEMATICS_TTL_PARTIAL_S after a
+# failed one, or for TELEMATICS_REFRESH_LIMIT_BACKOFF_S after Wialon's message limit (1004); a failed rebuild leaves
+# the current entry in place until it expires. Closed and partial ranges are never refreshed ahead.
+TELEMATICS_REFRESH_AHEAD = 0.75
+TELEMATICS_REFRESH_LIMIT_BACKOFF_S = 300
+_REFRESH_FAILED_AT: Dict[Tuple[str, str], float] = {}
 
 
-def run_wialon_bounded_sync(fn, *args):
-    """Blocking twin of _run_wialon_bounded for synchronous callers (the AI fuel tools): same executor and
-    FUEL_TELEMATICS_WAIT_S; concurrent.futures.TimeoutError when exceeded (the call keeps running and caches its result)."""
-    future = _TELEMATICS_EXECUTOR.submit(contextvars.copy_context().run, fn, *args)
+# The trend's per-unit trips step, shared the same way per range and unit set (see _shared_unit_trips)
+_UNIT_TRIPS_JOBS: Dict[Tuple[Any, ...], concurrent.futures.Future] = {}
+
+
+def _forget_job(jobs: Dict[Any, concurrent.futures.Future], key, future) -> None:
+    with _BUNDLE_BUILDS_LOCK:
+        if jobs.get(key) is future:
+            del jobs[key]
+
+
+def _shared_job(jobs: Dict[Any, concurrent.futures.Future], key, fn, *args) -> Tuple[concurrent.futures.Future, bool]:
+    """(key's executor future, started): the job already in flight in `jobs`, or fn(*args) submitted now."""
+    with _BUNDLE_BUILDS_LOCK:
+        future = jobs.get(key)
+        if future is not None:
+            return future, False
+        future = _TELEMATICS_EXECUTOR.submit(contextvars.copy_context().run, fn, *args)
+        jobs[key] = future
+    future.add_done_callback(lambda f: _forget_job(jobs, key, f))
+    return future, True
+
+
+def _shared_bundle_build(key: Tuple[str, str], build, sid: Optional[str]) -> Tuple[concurrent.futures.Future, bool]:
+    """(the range's build future, started): the build already in flight, or build(from, to, sid) submitted now."""
+    return _shared_job(_BUNDLE_BUILDS, key, build, key[0], key[1], sid)
+
+
+async def _await_shared(future: concurrent.futures.Future) -> Any:
+    """The shared job's result within FUEL_TELEMATICS_WAIT_S (asyncio.TimeoutError after it); stopping the wait (a
+    timeout or a cancelled request) never cancels the job, which keeps running and caches its result."""
+    waiter = asyncio.wrap_future(future)
+    # A job that fails after its waiters left is logged by them or the next request, not as "never retrieved"
+    waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+    return await asyncio.wait_for(asyncio.shield(waiter),
+                                  timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
+
+
+async def _shared_unit_trips(unit_ids, dates: Tuple[str, str], sid: Optional[str], units) -> Any:
+    """get_units_trips_for_range for the trend: concurrent requests for the same range and unit set share one executor
+    job (and so one worker) instead of one each, under the same bounded wait."""
+    key = (dates[0], dates[1], tuple(sorted({int(u) for u in unit_ids})))
+    future, _ = _shared_job(_UNIT_TRIPS_JOBS, key, get_units_trips_for_range, unit_ids, dates[0], dates[1], sid, units)
+    return await _await_shared(future)
+
+
+def _refresh_due(key: Tuple[str, str], bundle: Dict[str, Any]) -> bool:
+    if bundle.get("errors") or str(key[1])[:10] < get_uae_now().date().isoformat():
+        return False
+    fetched = bundle.get("fetched_at_utc")
+    live_ttl = get_env_int("FUEL_TELEMATICS_TTL_LIVE_S", wialon_distance.TELEMATICS_TTL_LIVE_S)
+    if not isinstance(fetched, (int, float)) or now_timestamp() - fetched < live_ttl * TELEMATICS_REFRESH_AHEAD:
+        return False
+    failed_at = _REFRESH_FAILED_AT.get(key)
+    retry_s = get_env_int("FUEL_TELEMATICS_TTL_PARTIAL_S", wialon_distance.TELEMATICS_TTL_PARTIAL_S)
+    if failed_at is not None and time.monotonic() - failed_at < retry_s:
+        return False
+    since_limit = seconds_since_limit_hit()
+    return since_limit is None or since_limit >= TELEMATICS_REFRESH_LIMIT_BACKOFF_S
+
+
+def _note_refresh(key: Tuple[str, str], future: concurrent.futures.Future) -> None:
+    error = future.exception() if not future.cancelled() else None
+    now = time.monotonic()
+    retry_s = get_env_int("FUEL_TELEMATICS_TTL_PARTIAL_S", wialon_distance.TELEMATICS_TTL_PARTIAL_S)
+    with _BUNDLE_BUILDS_LOCK:
+        # Failures past the retry window no longer hold a back-off (e.g. ranges that stopped ending today): drop them
+        for stale in [k for k, at in _REFRESH_FAILED_AT.items() if now - at >= retry_s]:
+            del _REFRESH_FAILED_AT[stale]
+        if future.cancelled() or error is not None:
+            _REFRESH_FAILED_AT[key] = now
+        else:
+            _REFRESH_FAILED_AT.pop(key, None)
+    if future.cancelled() or error is not None:
+        logger.warning("Fuel telematics refresh-ahead %s..%s failed; the cached bundle stays until it expires: %s",
+                       key[0], key[1], error)
+
+
+def _cached_bundle(key: Tuple[str, str], sid: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The range's bundle from get_fleet_telematics_bundle's own cache (within its TTL), or None; starts the
+    range's refresh-ahead when it is due."""
+    bundle = wialon_distance._TELEMATICS_CACHE.get(key)
+    if bundle is not None and _refresh_due(key, bundle):
+        future, started = _shared_bundle_build(key, wialon_distance.refresh_fleet_telematics_bundle, sid)
+        if started:
+            future.add_done_callback(lambda f: _note_refresh(key, f))
+    return bundle
+
+
+def telematics_bundle_bounded_sync(dates: Tuple[str, str], sid: Optional[str], build) -> Dict[str, Any]:
+    """
+    Blocking twin of _telematics_bundle_or_unavailable for synchronous callers (the AI fuel tools): the same cache
+    fast path, shared build per range and FUEL_TELEMATICS_WAIT_S bound. concurrent.futures.TimeoutError when the wait
+    is exceeded (the shared build keeps running and caches its result); WialonAPIError when the build failed.
+    """
+    key = (dates[0], dates[1])
+    cached = _cached_bundle(key, sid)
+    if cached is not None:
+        return cached
+    future, _ = _shared_bundle_build(key, build, sid)
     return future.result(timeout=get_env_int("FUEL_TELEMATICS_WAIT_S", TELEMATICS_WAIT_S))
 
 
 async def _telematics_bundle_or_unavailable(dates: Tuple[str, str], sid: Optional[str]
                                             ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """(fleet telematics bundle, []) or (None, [warning]) when Wialon failed or did not answer in time."""
+    key = (dates[0], dates[1])
+    cached = _cached_bundle(key, sid)
+    if cached is not None:
+        return cached, []
+    future, _ = _shared_bundle_build(key, get_fleet_telematics_bundle, sid)
     try:
-        return await _run_wialon_bounded(get_fleet_telematics_bundle, dates[0], dates[1], sid), []
+        return await _await_shared(future), []
     except asyncio.TimeoutError:
         logger.warning("Fuel telematics %s..%s exceeded FUEL_TELEMATICS_WAIT_S; answering without telematics", *dates)
         return None, [TELEMATICS_TIMEOUT_WARNING]
@@ -514,16 +622,17 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
     Shared KPI scope for every analytics endpoint: fetch -> exact vehicle filter -> partition -> fuel type.
     Fuel read failures are 503 (no partial KPIs). Wialon is contacted only when there are transactions.
     """
-    # One Fuel Performance load fires ~8 analytics requests at once with mostly identical filters: concurrent identical
-    # reads share one Supabase read / Wialon unit search. Nothing is retained, so no request sees older data than before.
-    # Reads with the caller's token (no service-role key) are keyed by token, since row-level security may differ.
+    # One Fuel Performance load fires ~8 analytics requests at once with mostly identical filters: identical reads share
+    # one Supabase read (kept ANALYTICS_READ_TTL_S, cleared by any fuel write) and one Wialon unit search (kept
+    # FUEL_UNITS_TTL_S). Reads with the caller's token (no service-role key) are keyed by token, since row-level
+    # security may differ.
     read_ms = [0.0]
 
     def fetch(f: Dict[str, Any]) -> List[Dict[str, Any]]:
         auth_key = _auth_key(bearer_token)
         started = time.perf_counter()
         try:
-            rows = _shared_reads.run(
+            rows = cached_analytics_read(
                 ("transactions", auth_key, tuple(sorted(f.items()))),
                 lambda: fetch_fuel_transactions_for_analytics(f, bearer_token),
             )
@@ -532,7 +641,9 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
         return [dict(r) for r in rows or []]
 
     def units(sid: str) -> List[Dict[str, Any]]:
-        return list(_shared_reads.run(("units", sid), lambda: get_all_vehicles(sid)) or [])
+        # An empty list is never kept: it would leave every fuel vehicle unmatched for a minute
+        return list(_UNITS_CACHE.get_or_compute(("units", sid), lambda: get_all_vehicles(sid) or [],
+                                                lambda found: FUEL_UNITS_TTL_S if found else 0))
 
     started = time.perf_counter()
     try:
@@ -1350,9 +1461,7 @@ async def get_fuel_efficiency_trend(
         else:
             # Units the fleet report cannot cover get one report each, serially: bounded like the reports above
             try:
-                unit_trips = await _run_wialon_bounded(
-                    get_units_trips_for_range, unit_ids, dates[0], dates[1], scope.sid, scope.units
-                )
+                unit_trips = await _shared_unit_trips(unit_ids, dates, scope.sid, scope.units)
             except asyncio.TimeoutError:
                 logger.warning("Fuel unit trips %s..%s exceeded FUEL_TELEMATICS_WAIT_S; trend distance withheld", *dates)
         result = await run_in_threadpool(

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # .env that enables it must not change them. load_dotenv never overrides a variable that is already set.
 os.environ["FUEL_IMPORT_REPLACE"] = ""
 
-from test_fuel_scope import AUTH, Q, Api, assert_reconciles, run  # noqa: E402
+from test_fuel_scope import AUTH, Q, Api, assert_reconciles, reset_fuel_read_caches, run  # noqa: E402
 
 from app.fuel.analytics import calculate_fuel_trend  # noqa: E402
 
@@ -104,6 +104,8 @@ def test_route_kpi_scope_and_reconciliation():
         day = api.get(f"/api/fuel/analytics/trend?{Q}&group_by=day")
         week = api.get(f"/api/fuel/analytics/trend?{Q}&group_by=WEEK")
         summary = api.get(f"/api/fuel/analytics/summary?{Q}")
+        reset_fuel_read_caches()  # nothing kept, so a database read by the bad request would be counted
+        fetches_before_bad = api.fetch.call_count
         bad = api.client.get(f"/api/fuel/analytics/trend?{Q}&group_by=year", headers=AUTH)
         fetches_after_bad = api.fetch.call_count
         bundle_calls, trip_calls = api.bundle.call_count, api.trips.call_count
@@ -123,7 +125,7 @@ def test_route_kpi_scope_and_reconciliation():
         assert sum(d["transactions"] for d in body["data"]) == summary["transaction_count"]
 
     assert bad.status_code == 400 and "group_by" in bad.json()["detail"], bad.text
-    assert fetches_after_bad == 3, "invalid group_by is rejected before any database read"
+    assert fetches_after_bad == fetches_before_bad, "invalid group_by is rejected before any database read"
     assert bundle_calls == 0 and trip_calls == 0, "the purchase trend never runs Wialon reports"
     print("[PASS] Route: KPI scope only, reconciles with summary, excluded_scope attached, 400 before DB, no reports.")
 

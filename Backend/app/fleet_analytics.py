@@ -189,6 +189,8 @@ HEALTH_THRESHOLDS = {
     "GPS_SATELLITES_WEAK": _env_float("GPS_SATELLITES_WEAK", 5),
 
     "GPS_HDOP_EXCELLENT": _env_float("GPS_HDOP_EXCELLENT", 1.2),
+    # A satellite count above this is not a count: 255 (0xFF) is the trackers' "no valid fix" sentinel
+    "GPS_SATELLITES_MAX_VALID": _env_float("GPS_SATELLITES_MAX_VALID", 50),
     "GPS_HDOP_GOOD": _env_float("GPS_HDOP_GOOD", 2.5),
 
     # Connectivity thresholds (seconds)
@@ -305,9 +307,12 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
     pdop = _finite_number(prms.get("pdop"))
 
     gps_status = "GOOD"
-    if sats is None:
+    if sats is None or not 0 <= sats <= HEALTH_THRESHOLDS["GPS_SATELLITES_MAX_VALID"]:
+        # Missing, or an invalid count such as the 255 sentinel: the fix quality is unknown, never EXCELLENT
         gps_status = "UNKNOWN"
-    elif sats >= HEALTH_THRESHOLDS["GPS_SATELLITES_EXCELLENT"] and (hdop is None or hdop <= HEALTH_THRESHOLDS["GPS_HDOP_EXCELLENT"]):
+    elif (sats >= HEALTH_THRESHOLDS["GPS_SATELLITES_EXCELLENT"] and hdop is not None
+          and hdop <= HEALTH_THRESHOLDS["GPS_HDOP_EXCELLENT"]):
+        # EXCELLENT needs a reported HDOP confirming the geometry; a satellite count alone is at most GOOD
         gps_status = "EXCELLENT"
     elif sats >= HEALTH_THRESHOLDS["GPS_SATELLITES_GOOD"] and (hdop is None or hdop <= HEALTH_THRESHOLDS["GPS_HDOP_GOOD"]):
         gps_status = "GOOD"
@@ -338,6 +343,14 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
     else:
         conn_status = "OFFLINE"
         seconds_since_update = None
+
+    # An offline unit's voltage is its last reading, not its current battery state: the current state is UNKNOWN (scored
+    # as such), and the last reading's classification stays available as last_reported_status (and for alerts)
+    last_reported_battery_status = None
+    if conn_status == "OFFLINE" and battery_status != "UNKNOWN":
+        last_reported_battery_status = battery_status
+        battery_status = "UNKNOWN"
+        battery_level_label = f"Last reported: {battery_level_label}"
 
     # Transparent Health Score (0-100)
     score = 100
@@ -383,6 +396,8 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
             "label": battery_level_label,
             "system_type": system_type,
             "stale": battery_stale,
+            # The classification of the last reading when the unit is OFFLINE (status is then UNKNOWN), else None
+            "last_reported_status": last_reported_battery_status,
             "internal_voltage": round(_finite_number(pwr_int), 2) if _finite_number(pwr_int) is not None else None,
             "charge_percent": battery_charge if battery_charge is not None else None,
         },
@@ -1324,7 +1339,8 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
 
     # 1. Critical & Warning Battery Alerts
     for v in health["vehicles"]:
-        b_status = v["battery"]["status"]
+        # An offline unit's battery status is UNKNOWN; its last reading still raises an alert, marked "last reported"
+        b_status = v["battery"].get("last_reported_status") or v["battery"]["status"]
         v_volt = v["battery"]["voltage"]
         last_reported = " (last reported)" if v["battery"].get("stale") else ""
         if b_status == "WARNING" and v["battery"].get("system_type") == "Unknown":

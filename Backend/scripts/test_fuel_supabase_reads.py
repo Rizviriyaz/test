@@ -47,14 +47,24 @@ class Resp:
 
 
 class Table:
-    """Paged PostgREST stand-in; `script` maps call number -> exception or status to return instead of a page."""
+    """
+    Paged PostgREST stand-in; `script` maps call number -> exception or status to return instead of a page.
+    With FUEL_MONTHLY_SUMMARY_TABLE the analytics read also reads fuel_monthly_summaries: that table answers from
+    `summaries` (none by default) and is recorded in `summary_calls`, so `calls` stays the fuel_transactions pages.
+    """
 
-    def __init__(self, rows=ROWS, script=None, delay=0.0):
+    def __init__(self, rows=ROWS, script=None, delay=0.0, summaries=()):
         self.rows, self.script, self.delay = rows, dict(script or {}), delay
+        self.summaries, self.summary_calls = list(summaries), []
         self.calls, self.timeouts = [], []
         self._lock = threading.Lock()
 
     def get(self, url, params=None, headers=None, timeout=None):
+        if "fuel_monthly_summaries" in url:
+            with self._lock:
+                self.summary_calls.append(dict(params or {}))
+            span = f"0-{len(self.summaries) - 1}" if self.summaries else "*"
+            return Resp(list(self.summaries), status=200, headers={"content-range": f"{span}/{len(self.summaries)}"})
         with self._lock:
             self.calls.append(dict(params or {}))
             self.timeouts.append(timeout)
@@ -86,7 +96,8 @@ def test_pages_use_pooled_session_with_timeouts():
     table = Table()
     rows, sleep = _read(table)
     assert rows == ROWS and len(table.calls) == 3, (len(rows), len(table.calls))
-    assert [c["offset"] for c in table.calls] == ["0", "1000", "2000"]
+    # Page 1 (with the exact count) first; the remaining pages are read in parallel, in any order
+    assert table.calls[0]["offset"] == "0" and sorted(c["offset"] for c in table.calls[1:]) == ["1000", "2000"]
     assert all(t == (5.0, 10.0) for t in table.timeouts), table.timeouts
     assert not sleep.called
     adapter = fuel_db._session.get_adapter("https://example.supabase.co/rest/v1/x")
@@ -100,7 +111,10 @@ def test_transient_failures_are_retried_and_complete():
         table = Table(script={2: failure})
         rows, sleep = _read(table)
         assert rows == ROWS, (failure, rows)
-        assert len(table.calls) == 4 and table.calls[1]["offset"] == table.calls[2]["offset"] == "1000", table.calls
+        # Call 2 (one of the parallel pages) failed and only that page was read again
+        offsets = sorted(c["offset"] for c in table.calls)
+        assert len(table.calls) == 4 and set(offsets) == {"0", "1000", "2000"} and offsets.count("0") == 1, table.calls
+        assert offsets.count("1000") + offsets.count("2000") == 3, table.calls
         assert sleep.call_count == 1 and 0.25 <= sleep.call_args[0][0] <= 0.5, sleep.call_args
     print("[PASS] A transient page failure (timeout, reset, truncated body, 502/503/504/544) is retried; all rows returned.")
 
@@ -125,7 +139,9 @@ def test_non_retryable_errors_fail_at_once():
         table = Table(script={2: failure})
         exc, sleep = _read(table)
         assert isinstance(exc, FuelDataFetchError), (failure, exc)
-        assert len(table.calls) == 2 and not sleep.called, (failure, table.calls)
+        # No retry: each page is requested at most once (the other parallel page may already be in flight)
+        offsets = [c["offset"] for c in table.calls]
+        assert len(offsets) == len(set(offsets)) <= 3 and not sleep.called, (failure, table.calls)
     print("[PASS] Non-transient errors (HTTP 500/4xx, invalid request) fail at once: no retry, no partial rows.")
 
 
@@ -177,6 +193,25 @@ def test_exhausted_read_is_clear_503_not_zeros():
     print("[PASS] An exhausted read is a 503 with a clear, retryable detail; no zero-valued KPIs are returned.")
 
 
+SUMMARY = {"id": 900, "import_id": 5, "reporting_month": "2026-08-01", "vehicle_identifier": "S-1", "fuel_type": "DIESEL",
+           "litres": 100.0, "unit_price": 3.0, "total_cost": 300.0, "odometer_km": None, "station_name": None,
+           "invoice_number": None, "card_number": None, "driver_name": None, "reference_number": None, "notes": None,
+           "source_row_number": 1}
+
+
+def test_monthly_summary_table_is_read_only_with_its_flag():
+    table = Table(summaries=[SUMMARY])
+    rows, _ = _read(table, FUEL_IMPORT_REPLACE=1, FUEL_MONTHLY_SUMMARY_TABLE=1)
+    assert isinstance(rows, list) and len(rows) == len(ROWS) + 1 and len(table.calls) == 3, rows
+    merged = rows[-1]
+    assert (merged["vehicle_identifier"], merged["litres"], merged["id"]) == ("S-1", 100.0, None), merged
+    assert len(table.summary_calls) == 1, table.summary_calls
+    table = Table(summaries=[SUMMARY])
+    rows, _ = _read(table, FUEL_IMPORT_REPLACE=1, FUEL_MONTHLY_SUMMARY_TABLE="")
+    assert rows == ROWS and table.summary_calls == [], "without the flag the summary table is never read"
+    print("[PASS] fuel_monthly_summaries is read (and merged after the dated rows) only with FUEL_MONTHLY_SUMMARY_TABLE.")
+
+
 if __name__ == "__main__":
     test_pages_use_pooled_session_with_timeouts()
     test_transient_failures_are_retried_and_complete()
@@ -185,4 +220,5 @@ if __name__ == "__main__":
     test_read_deadline_stops_retries()
     test_concurrent_requests_share_one_retrying_read()
     test_exhausted_read_is_clear_503_not_zeros()
+    test_monthly_summary_table_is_read_only_with_its_flag()
     print("\nAll Supabase read tests passed.")

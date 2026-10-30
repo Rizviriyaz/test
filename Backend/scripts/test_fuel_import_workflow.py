@@ -11,6 +11,8 @@ monthly totals and daily trend, including re-importing an existing period and a 
   - failure: an import whose rows are rejected leaves the previously visible data exactly as it was
 
 Every outbound HTTP call is blocked by OfflineGuard. Fixtures only; no production data is read or claimed.
+FakeReplaceDB models summaries stored in fuel_transactions, so this suite pins FUEL_MONTHLY_SUMMARY_TABLE off whatever
+Backend/.env sets; the dedicated summary table end to end is covered by test_fuel_monthly_summary_table.py.
 
 Run from Backend/:  python scripts/test_fuel_import_workflow.py
 """
@@ -19,6 +21,7 @@ import os
 import sys
 import traceback
 from datetime import date, datetime
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -193,7 +196,8 @@ def main():
     try:
         for t in TESTS:
             try:
-                t()
+                with patch.dict(os.environ, {"FUEL_MONTHLY_SUMMARY_TABLE": ""}):
+                    t()
             except Exception:
                 failures += 1
                 print(f"[FAIL] {t.__name__}")

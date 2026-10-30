@@ -356,6 +356,14 @@ TESTS = [
 ]
 
 
+def reset_fuel_read_caches():
+    """Retained fuel reads (transactions, Wialon units) must not carry one test's mocked data into the next."""
+    import app.fuel.routes as routes
+    from app.fuel.db import clear_fuel_read_caches
+    clear_fuel_read_caches()
+    routes._UNITS_CACHE.clear()
+
+
 def run(tests, title):
     print("=" * 60)
     print(title)
@@ -365,6 +373,7 @@ def run(tests, title):
     try:
         for t in tests:
             try:
+                reset_fuel_read_caches()
                 t()
             except Exception:
                 failures += 1

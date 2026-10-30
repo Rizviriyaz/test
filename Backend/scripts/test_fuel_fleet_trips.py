@@ -373,7 +373,15 @@ def test_named_session_relogin_under_its_own_lock():
             seen.append((session, wr._report_lock_for("sid-fuel_engine").locked(), wr._report_lock.locked()))
         return f"sid-{session or 'shared'}"
 
-    with Env(FakeReportEngine(fail_exec={TEMPLATE_GROUP_ENGINE})), \
+    class SessionExpired(FakeReportEngine):
+        # Wialon error 1 (invalid session) is the error that forces a new login (a non-session failure only retries)
+        def __call__(self, svc, params, sid=None, **kw):
+            if svc == "report/exec_report" and params.get("reportTemplateId") == TEMPLATE_GROUP_ENGINE:
+                self.calls.append((svc, params))
+                return {"error": 1}
+            return super().__call__(svc, params, sid=sid, **kw)
+
+    with Env(SessionExpired()), \
          patch("app.fuel.wialon_distance.login", side_effect=login), \
          patch("app.fuel.wialon_distance.session_name", side_effect=named.get), \
          patch("app.wialon_reports.session_name", side_effect=named.get):
