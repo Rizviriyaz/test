@@ -158,3 +158,77 @@ class TTLCache:
         """
         with self._key_state(key) as state:
             return self._compute_and_set(state, key, compute, ttl_for)
+
+
+class FailureBackoff:
+    """
+    Bounded per-key backoff after consecutive failures: a key that failed is not retried for base_seconds, doubling
+    per consecutive failure up to max_seconds; a success clears it. State is kept no longer than retention_seconds.
+    """
+
+    def __init__(self, base_seconds: float = 15, max_seconds: float = 120, max_entries: int = 128,
+                 retention_seconds: float = 600, clock: Callable[[], float] = time.time):
+        self._base = base_seconds
+        self._max = max_seconds
+        self._retention = retention_seconds
+        self._clock = clock
+        self._state = TTLCache(max_entries=max_entries)
+        self._lock = threading.Lock()
+
+    def active(self, key: Hashable) -> bool:
+        state = self._state.get(key)
+        return state is not None and self._clock() < state[1]
+
+    def record_failure(self, key: Hashable) -> float:
+        """Register a failure; returns the seconds until the key may be retried."""
+        with self._lock:
+            failures = (self._state.get(key) or (0, 0))[0] + 1
+            delay = min(self._max, self._base * 2 ** (failures - 1))
+            self._state.set(key, (failures, self._clock() + delay), self._retention)
+            return delay
+
+    def record_success(self, key: Hashable) -> None:
+        with self._lock:
+            self._state.pop(key)
+
+
+class CategorizedTTLCache:
+    """
+    Several bounded TTLCaches behind one TTLCache-like interface, chosen per key by `category_of(key)`: a category
+    whose keys multiply (e.g. one per vehicle and minute) evicts only its own entries, never another category's.
+    Keys never collide across categories because each key maps to exactly one category.
+    """
+
+    def __init__(self, category_of: Callable[[Hashable], str], max_entries: Dict[str, int]):
+        self._category_of = category_of
+        self._caches = {name: TTLCache(max_entries=size) for name, size in max_entries.items()}
+
+    def _for(self, key: Hashable) -> "TTLCache":
+        return self._caches[self._category_of(key)]
+
+    def get(self, key: Hashable) -> Optional[Any]:
+        return self._for(key).get(key)
+
+    def set(self, key: Hashable, value: Any, ttl_seconds: float) -> None:
+        self._for(key).set(key, value, ttl_seconds)
+
+    def pop(self, key: Hashable) -> None:
+        self._for(key).pop(key)
+
+    def clear(self) -> None:
+        for cache in self._caches.values():
+            cache.clear()
+
+    def _now(self) -> float:
+        return next(iter(self._caches.values()))._now()
+
+    def size(self, category: str) -> int:
+        return len(self._caches[category]._data)
+
+    @property
+    def _data(self) -> Dict[Hashable, Any]:
+        """Every entry of every category (a merged view; the entry objects are shared, not copied)."""
+        merged: Dict[Hashable, Any] = {}
+        for cache in self._caches.values():
+            merged.update(cache._data)
+        return merged

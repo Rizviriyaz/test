@@ -97,3 +97,35 @@ export function fuelVehicleListParams(queryParams = {}, searchQuery = "") {
     if (searchQuery) params.vehicle_identifier = searchQuery
     return params
 }
+
+// Vehicle Performance Leaderboard: matched Wialon vehicles only, with the table's page, sort, search and status.
+// Global filters first, so the local search box (and status/sort) is never overwritten by them.
+export function fuelLeaderboardParams(queryParams, { page, pageSize, sortBy, sortOrder, searchQuery, status, idleRate }) {
+    return {
+        page,
+        page_size: pageSize,
+        sort_by: sortBy,
+        sort_order: sortOrder,
+        ...fuelVehicleListParams(queryParams, searchQuery),
+        status: status || undefined,
+        matched_only: true,
+        idle_rate_lph: idleRate,
+    }
+}
+
+// Highest Idle Fuel Wasters: the top 5 of the whole matched fleet for the period and global filters, ranked by the server
+// over every matched vehicle; never the leaderboard's page, search, sort or status
+export const IDLE_RANKING_SIZE = 5
+export function fuelIdleRankingParams(queryParams, idleRate) {
+    return {
+        page: 1,
+        page_size: IDLE_RANKING_SIZE,
+        sort_by: "estimated_idle_fuel",
+        sort_order: "desc",
+        // No status filter: vehicles with known idle hours but unknown distance (no_distance_data) carry the same idle
+        // estimate as the KPI; unknown estimates sort last and are dropped by the caller, never ranked as 0
+        ...fuelVehicleListParams(queryParams),
+        matched_only: true,
+        idle_rate_lph: idleRate,
+    }
+}

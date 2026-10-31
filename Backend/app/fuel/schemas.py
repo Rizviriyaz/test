@@ -295,10 +295,18 @@ class VehicleDistanceResponse(BaseModel):
     has_data: bool = Field(default=True, description="Whether GPS/trip telemetry was recorded in interval")
 
 
+class FuelLatestMonthResponse(BaseModel):
+    month: Optional[str] = Field(None, description="Latest month (YYYY-MM, not after the current UAE month) with a monthly-summary fuel record matched to exactly one Wialon unit; null when there is none")
+    source: str = Field("monthly_summaries", description="monthly_summaries (summary table, identifiers and months only) | monthly_trend (legacy layout: the matched fuel trend)")
+
+
 class FleetEfficiencyResponse(BaseModel):
-    total_litres: float = Field(..., description="Fleet net fuel: vehicles matched to one Wialon unit plus unmapped records (unmatched_litres) [Recorded]")
-    total_cost: float = Field(..., description="Fleet net fuel expenditure: matched vehicles plus unmapped records (unmatched_cost) [Recorded]")
+    total_litres: float = Field(..., description="Excel statement net fuel: vehicles matched to one Wialon unit plus unmapped records (unmatched_litres); suspected duplicates, partial-month summaries and unreported dated rows are not included [Recorded]")
+    total_cost: float = Field(..., description="Excel statement net fuel expenditure: matched vehicles plus unmapped records (unmatched_cost) [Recorded]")
     transaction_count: int = Field(..., description="All source rows in the fleet totals (KPI scope plus unmapped records): dated_purchase_count + refund_count + monthly_summary_rows (+ any legacy zero-litre rows) [Recorded]")
+    matched_litres: float = Field(0.0, description="Net fuel of vehicles matched to exactly one Wialon unit only (total_litres - unmatched_litres): the matched fleet population [Recorded]")
+    matched_cost: float = Field(0.0, description="Net fuel cost of vehicles matched to exactly one Wialon unit only (total_cost - unmatched_cost) [Recorded]")
+    matched_row_count: int = Field(0, description="Source rows of vehicles matched to exactly one Wialon unit (transaction_count - unmatched_transactions_count) [Recorded]")
     dated_purchase_count: int = Field(0, description="Dated purchase rows (litres > 0, not monthly summaries): refuelling events [Recorded]")
     monthly_summary_rows: int = Field(0, description="Monthly-summary rows (statement totals for a month, not refuelling events) [Recorded]")
     refund_count: int = Field(0, description="Refund adjustments (negative litres) in the KPI scope [Recorded]")
@@ -342,6 +350,7 @@ class FleetEfficiencyResponse(BaseModel):
     efficiency_basis: str = Field("purchase_based", description="L/100 km = fuel purchased / Wialon distance x 100 (derived; not measured consumption)")
     value_classification: Dict[str, str] = Field(default_factory=dict, description="Field -> recorded | derived | estimated")
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
+    freshness: Optional[Dict[str, Any]] = Field(None, description="Freshness of the Wialon telematics in this response (app/utils/freshness.py): fetched_at is when the telematics bundle was read; fuel records are read within ANALYTICS_READ_TTL_S")
 
 
 class VehicleEfficiencyItem(BaseModel):
@@ -383,6 +392,7 @@ class VehicleEfficiencyResponse(BaseModel):
     telematics_pending: bool = Field(False, description="True when the Wialon reports did not answer within FUEL_TELEMATICS_WAIT_S but are still running (shared, cached on completion): asking again later returns them. False when they failed or answered")
     data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
+    freshness: Optional[Dict[str, Any]] = Field(None, description="Freshness of the Wialon telematics in this response (app/utils/freshness.py): fetched_at is when the telematics bundle was read; fuel records are read within ANALYTICS_READ_TTL_S")
 
 
 class EfficiencyTrendItem(BaseModel):
@@ -456,6 +466,7 @@ class FuelWasteResponse(BaseModel):
     telematics_pending: bool = Field(False, description="True when the Wialon reports did not answer within FUEL_TELEMATICS_WAIT_S but are still running (shared, cached on completion): asking again later returns them. False when they failed or answered")
     data_warnings: List[str] = Field(default_factory=list, description="Telematics completeness warnings (missing units, unreadable cells, column fallbacks)")
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
+    freshness: Optional[Dict[str, Any]] = Field(None, description="Freshness of the Wialon telematics in this response (app/utils/freshness.py): fetched_at is when the telematics bundle was read; fuel records are read within ANALYTICS_READ_TTL_S")
 
 
 class VehicleFuelDetailResponse(BaseModel):
@@ -468,4 +479,4 @@ class VehicleFuelDetailResponse(BaseModel):
     calculation_transparency: Dict[str, Any] = Field(default_factory=dict, description="Disclosed formulas, coefficient, and data sources")
     value_classification: Dict[str, str] = Field(default_factory=dict, description="vehicle_summary field -> recorded | derived | estimated")
     excluded_scope: Optional[Dict[str, Any]] = Field(None, description="KPI scope reconciliation: kpi / unmatched / ambiguous / suspected_duplicates / all_* (count, litres, cost; refunds signed)")
-
+    freshness: Optional[Dict[str, Any]] = Field(None, description="Freshness of the Wialon telematics in this response (app/utils/freshness.py): fetched_at is when the telematics bundle was read; fuel records are read within ANALYTICS_READ_TTL_S")

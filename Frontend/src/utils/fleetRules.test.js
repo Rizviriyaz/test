@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 import {
-    fuelVehicleListParams, groupIdsOf, groupNamesOf, idleDurationLabel, idleDurationStatus, idleElapsedSeconds, inGroup,
+    fuelIdleRankingParams, fuelLeaderboardParams, fuelVehicleListParams, groupIdsOf, IDLE_RANKING_SIZE, groupNamesOf, idleDurationLabel, idleDurationStatus, idleElapsedSeconds, inGroup,
     isHealthyVehicle,
 } from "./fleetRules.js"
 
@@ -53,8 +53,36 @@ test("fuel vehicle list: the global filter is exact (vehicle_filter), the search
 
 test("Fuel dashboards send the exact vehicle filter for the vehicle table and the idle-waster ranking", () => {
     const page = readFileSync(new URL("../components/Fuel/useFuelEfficiencyData.js", import.meta.url), "utf8")
-    assert.equal((page.match(/fuelVehicleListParams\(/g) || []).length, 2, "rankings and idle-waster lists")
+    assert.equal((page.match(/fuelLeaderboardParams\(/g) || []).length, 1, "leaderboard list")
+    assert.equal((page.match(/fuelIdleRankingParams\(/g) || []).length, 1, "idle-waster ranking")
     assert.doesNotMatch(page, /getVehicleEfficiencyList\(\{[^}]*\.\.\.queryParams/s)
+    const filters = { date_from: "2026-08-01", date_to: "2026-08-31", vehicle_identifier: "7-AUH-5594" }
+    assert.equal(fuelIdleRankingParams(filters, 2).vehicle_filter, "7-AUH-5594")
+    assert.equal(fuelLeaderboardParams(filters, { page: 1 }).vehicle_filter, "7-AUH-5594")
+})
+
+test("fuel leaderboard: matched Wialon vehicles only, with the table's page, sort, search and status", () => {
+    const params = fuelLeaderboardParams({ date_from: "2026-08-01", date_to: "2026-08-31" }, {
+        page: 3, pageSize: 20, sortBy: "efficiency", sortOrder: "asc", searchQuery: "559", status: "no_distance_data", idleRate: 2.5,
+    })
+    assert.deepEqual(params, {
+        page: 3, page_size: 20, sort_by: "efficiency", sort_order: "asc", date_from: "2026-08-01", date_to: "2026-08-31",
+        vehicle_identifier: "559", status: "no_distance_data", matched_only: true, idle_rate_lph: 2.5,
+    })
+    assert.equal(fuelLeaderboardParams({}, { page: 1, status: "" }).status, undefined)
+})
+
+test("idle fuel ranking: the whole matched fleet's top 5, never the leaderboard's page, search, sort or status", () => {
+    const filters = { date_from: "2026-08-01", date_to: "2026-08-31" }
+    const ranking = fuelIdleRankingParams(filters, 2.5)
+    assert.deepEqual(ranking, {
+        page: 1, page_size: IDLE_RANKING_SIZE, sort_by: "estimated_idle_fuel", sort_order: "desc",
+        date_from: "2026-08-01", date_to: "2026-08-31", matched_only: true, idle_rate_lph: 2.5,
+    })
+    assert.equal(IDLE_RANKING_SIZE, 5)
+    // The ranking takes only the period/global filters and the idle rate: no leaderboard state can reach it
+    assert.equal(fuelIdleRankingParams.length, 2)
+    for (const key of ["status", "vehicle_identifier"]) assert.equal(key in ranking, false, key)
 })
 
 test("vehicle drawer refetches by vehicle id, not on every live poll", () => {

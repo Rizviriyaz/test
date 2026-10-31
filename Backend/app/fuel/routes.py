@@ -27,6 +27,7 @@ from app.fuel.db import (
     cached_analytics_read,
     fetch_fuel_transactions_for_analytics,
     fetch_import_coverage,
+    fetch_summary_identifier_months,
     get_fuel_imports_list,
     get_fuel_vehicle_identifiers,
     get_fuel_transactions_list,
@@ -53,6 +54,7 @@ from app.fuel.schemas import (
     FuelImportPreviewResponse,
     FuelImportResultResponse,
     FuelImportsListResponse,
+    FuelLatestMonthResponse,
     FuelMonthlySummariesListResponse,
     FuelMonthlySummaryItem,
     FuelSummaryResponse,
@@ -78,6 +80,7 @@ from app.fuel.efficiency import (
     calculate_vehicle_efficiency_records,
     paginate_and_sort_vehicle_efficiency,
     calculate_efficiency_trend,
+    index_telematics_by_unit_id,
 )
 from app.fuel.anomalies import IDLE_THRESHOLD_MODES, detect_fuel_waste_and_anomalies
 from app.fuel import wialon_distance
@@ -95,6 +98,8 @@ from app.performance_diagnostics import request_trace_id
 from app.utils.config import get_env_int
 from app.utils.datetime_helpers import get_uae_now, now_timestamp
 from app.utils.ttl_cache import InFlight, TTLCache
+from app.utils.freshness import TARGET_FUEL_TELEMATICS_S, freshness_block, window_target
+from app.utils.datetime_helpers import parse_date_to_uae_bounds
 from app.wialon import WialonAPIError, seconds_since_limit_hit
 from app.vehicles import get_all_vehicles, extract_registration_plate
 from app.wialon import login
@@ -198,6 +203,8 @@ TELEMATICS_TIMEOUT_WARNING = ("Wialon reports did not respond in time; distance,
                               "are unavailable for this request. Reload to retry.")
 TELEMATICS_FAILED_WARNING = ("Wialon reports failed; distance, driving/idle hours and idle estimates are unavailable "
                              "for this request.")
+NO_PERIOD_TELEMATICS_WARNING = ("The reporting period could not be determined, so Wialon was not queried; distance, "
+                                "driving/idle hours and idle estimates are unavailable.")
 # Each in-flight shared job (one per range or unit set, a trend chain, a refresh-ahead) keeps a worker until its report
 # ends, also after its waiters left; once all are busy, uncached requests time out to "unavailable"
 _TELEMATICS_EXECUTOR = ThreadPoolExecutor(max_workers=8, thread_name_prefix="fuel-telematics")
@@ -388,6 +395,25 @@ async def _trend_telematics_or_unavailable(dates: Tuple[str, str], sid: Optional
     except WialonAPIError as exc:
         logger.warning("Fuel telematics %s..%s failed; answering without telematics: %s", dates[0], dates[1], exc)
     return None
+
+
+def _fuel_freshness(bundle: Optional[Dict[str, Any]], dates: Optional[Tuple[str, str]],
+                    unavailable: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    """
+    Freshness of a fuel response's Wialon telematics: fetched_at is the bundle's own read time (never invented); a
+    range that ended before today has no target age (its reports no longer change). None when the response needs no
+    telematics (no period or no matched fuel). Unavailable when Wialon failed or did not answer in time.
+    """
+    if not dates:
+        return None
+    try:
+        target = window_target(parse_date_to_uae_bounds(dates[0], dates[1])[1], TARGET_FUEL_TELEMATICS_S)
+    except ValueError:
+        target = TARGET_FUEL_TELEMATICS_S
+    if bundle is None:
+        return freshness_block(None, target_age_seconds=target, unavailable=True,
+                               refresh_error=(unavailable or [None])[0])
+    return freshness_block(bundle.get("fetched_at_utc"), target_age_seconds=target, partial=bundle.get("status") == "partial")
 
 
 def _mark_telematics_unavailable(response: Any, warnings: List[str]) -> None:
@@ -611,6 +637,13 @@ def _auth_key(bearer_token: Optional[str]) -> Optional[str]:
     return None if os.getenv("SUPABASE_SERVICE_ROLE_KEY") else bearer_token
 
 
+def _fuel_units(sid: str) -> List[Dict[str, Any]]:
+    """The fleet's Wialon units for fuel matching, read at most once per FUEL_UNITS_TTL_S. An empty list is never
+    kept: it would leave every fuel vehicle unmatched for a minute."""
+    return list(_UNITS_CACHE.get_or_compute(("units", sid), lambda: get_all_vehicles(sid) or [],
+                                            lambda found: FUEL_UNITS_TTL_S if found else 0))
+
+
 async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
                        login_fn: Optional[Any] = None, units_fn: Optional[Any] = None,
                        summary_only: bool = True) -> ScopeContext:
@@ -627,6 +660,8 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
 
     def fetch(f: Dict[str, Any]) -> List[Dict[str, Any]]:
         auth_key = _auth_key(bearer_token)
+        # Monthly-summary reporting only totals dated rows: read them with the columns those totals need (db.py)
+        f = {**f, "dated_counts_only": bool(summary_only)}
         started = time.perf_counter()
         try:
             rows = cached_analytics_read(
@@ -637,11 +672,6 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
             read_ms[0] = (time.perf_counter() - started) * 1000
         return [dict(r) for r in rows or []]
 
-    def units(sid: str) -> List[Dict[str, Any]]:
-        # An empty list is never kept: it would leave every fuel vehicle unmatched for a minute
-        return list(_UNITS_CACHE.get_or_compute(("units", sid), lambda: get_all_vehicles(sid) or [],
-                                                lambda found: FUEL_UNITS_TTL_S if found else 0))
-
     started = time.perf_counter()
     try:
         scope = await run_in_threadpool(
@@ -649,7 +679,7 @@ async def _build_scope(filters: Dict[str, Any], bearer_token: Optional[str],
             filters,
             fetch,
             login_fn or (lambda: login()),
-            units_fn or units,
+            units_fn or _fuel_units,
             lambda: get_fuel_vehicle_identifiers(bearer_token),
             lambda ids: _shared_reads.run(("coverage", _auth_key(bearer_token), tuple(sorted(ids))),
                                           lambda: fetch_import_coverage(ids, bearer_token)),
@@ -880,6 +910,59 @@ async def get_fuel_analytics_trend(
     return trend
 
 
+def _latest_matched_summary_month(rows: List[Dict[str, Any]], resolver: UnitResolver, current_month: str) -> Optional[str]:
+    """The newest month (YYYY-MM, not after current_month) with a monthly summary whose identifier resolves to exactly
+    one Wialon unit, under the KPI scope's matching rules; rows are newest month first."""
+    for row in rows:
+        month = str(row.get("reporting_month") or "")[:7]
+        if len(month) != 7 or month > current_month:
+            continue
+        if resolver.resolve(str(row.get("vehicle_identifier") or "").strip())["status"] == "matched":
+            return month
+    return None
+
+
+@router.get(
+    "/analytics/latest-month",
+    response_model=FuelLatestMonthResponse,
+    summary="Latest month with matched monthly-summary fuel data",
+    description="The month the Fuel Performance page opens on: the newest month (not after the current UAE month) whose "
+                "monthly-summary records include one matched to exactly one Wialon unit, the same rule as the matched "
+                "monthly trend. Reads only summary identifiers and months: no dated rows, amounts or Wialon reports.",
+)
+async def get_fuel_latest_month(request: Request):
+    bearer_token = _get_bearer_token(request)
+    current_month = get_uae_now().strftime("%Y-%m")
+    if not summary_table_enabled():
+        # Legacy layout: summaries are rows of fuel_transactions, so the matched monthly trend decides, as before
+        scope = await _build_scope({"date_from": None, "date_to": None, "vehicle_identifier": None, "fuel_type": None},
+                                   bearer_token)
+        trend = await run_in_threadpool(calculate_fuel_trend, scope.matched, "month")
+        months = [str(r.period)[:7] for r in trend.data if r.transactions > 0 and str(r.period)[:7] <= current_month]
+        return FuelLatestMonthResponse(month=max(months) if months else None, source="monthly_trend")
+    try:
+        rows = await run_in_threadpool(fetch_summary_identifier_months, bearer_token)
+    except FuelDataFetchError:
+        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+    if not rows:
+        # No summaries: Wialon is not contacted
+        return FuelLatestMonthResponse(month=None)
+
+    def resolve() -> Optional[str]:
+        # Same matching as the KPI scope: the fleet's units (shared 60 s cache) and the imported-identifier registry for
+        # number-only plate-code conflicts (read only if such a match occurs)
+        units = _fuel_units(login())
+        resolver = UnitResolver(units, registry_fn=lambda: get_fuel_vehicle_identifiers(bearer_token),
+                                known_identifiers=(str(r.get("vehicle_identifier") or "").strip() for r in rows))
+        return _latest_matched_summary_month(rows, resolver, current_month)
+
+    try:
+        month = await run_in_threadpool(resolve)
+    except FuelDataFetchError:
+        raise HTTPException(status_code=503, detail=FUEL_DATA_UNAVAILABLE_DETAIL)
+    return FuelLatestMonthResponse(month=month)
+
+
 @router.get(
     "/analytics/vehicles",
     response_model=VehicleAnalyticsResponse,
@@ -1051,8 +1134,16 @@ async def get_fleet_fuel_efficiency(
     dates = _resolve_effective_dates(scope.matched, date_from, date_to)
 
     if scope.is_empty or dates is None:
-        # Unmapped monthly records still count in the fleet fuel totals; nothing Wialon-based can be computed
-        result = calculate_fleet_efficiency(scope.unmapped, {}, scope.units, idle_rate_lph, data_warnings=list(scope.warnings))
+        # Every eligible statement record still counts in the statement totals (matched records in matched_* too);
+        # without a period Wialon is not queried, so every Wialon-based value stays unknown, never 0
+        warnings = list(scope.warnings)
+        if not scope.is_empty:
+            warnings.append(NO_PERIOD_TELEMATICS_WARNING)
+        result = calculate_fleet_efficiency(
+            scope.matched + scope.unmapped, {}, scope.units, idle_rate_lph,
+            telematics_status="complete" if scope.is_empty else TELEMATICS_UNAVAILABLE, data_warnings=warnings,
+            mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
+        )
     else:
         # Fuel purchased and cost need no telematics: without them only the Wialon-based values are unknown
         bundle, unavailable = await _telematics_bundle_or_unavailable(dates, scope.sid)
@@ -1069,6 +1160,7 @@ async def get_fleet_fuel_efficiency(
         )
         # Timed out, not failed: the shared report keeps running and is cached, so the client may ask again
         result.telematics_pending = bundle is None and TELEMATICS_TIMEOUT_WARNING in unavailable
+        result.freshness = _fuel_freshness(bundle, dates, unavailable)
     _apply_excluded_to_efficiency(result, scope)
     result.excluded_scope = _with_period(scope, dates)
     return result
@@ -1088,6 +1180,7 @@ async def get_vehicles_fuel_efficiency(
     vehicle_filter: Optional[str] = Query(None, description="Exact vehicle filter, the same KPI scope rule as the other analytics endpoints (same Wialon unit or identical identifier)"),
     fuel_type: Optional[str] = Query(None, description="Filter by fuel type"),
     status: Optional[str] = Query(None, description="Filter by status ('matched', 'not_tracked', 'no_distance_data', 'ambiguous')"),
+    matched_only: bool = Query(False, description="Only vehicles matched to exactly one Wialon unit (statuses matched / no_distance_data): unmapped identifiers (not_tracked / ambiguous) are never listed"),
     idle_rate_lph: float = Query(2.0, ge=0.1, le=20.0, description="Configured idle consumption coefficient in L/h"),
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     page_size: int = Query(25, ge=1, le=500, description="Items per page"),
@@ -1121,8 +1214,12 @@ async def get_vehicles_fuel_efficiency(
     scope = await _build_scope(filters, _get_bearer_token(request))
     bundle = None
     unavailable: List[str] = []
+    dates = None
 
-    if status_clean in ("not_tracked", "ambiguous"):
+    if matched_only and status_clean in ("not_tracked", "ambiguous"):
+        # Unmapped statuses asked for within the matched fleet: nothing qualifies
+        items = []
+    elif status_clean in ("not_tracked", "ambiguous"):
         # Unmapped identifiers only (in the fleet fuel totals, never in Wialon-based KPIs); no telematics needed.
         rows = scope.partition.unmatched + scope.partition.ambiguous
         items = await run_in_threadpool(calculate_vehicle_efficiency_records, rows, {}, scope.units, idle_rate_lph)
@@ -1141,8 +1238,8 @@ async def get_vehicles_fuel_efficiency(
                 mixed_fuel_unit_ids=scope.mixed_fuel_unit_ids,
             )
         # Unmapped monthly records are part of the fleet fuel totals: listed with their mapping status
-        # (not_tracked / ambiguous) and no Wialon values, never left out of the list
-        if scope.unmapped:
+        # (not_tracked / ambiguous) and no Wialon values, never left out of the list (except in the matched fleet)
+        if scope.unmapped and not matched_only:
             items = items + await run_in_threadpool(
                 calculate_vehicle_efficiency_records, scope.unmapped, {}, scope.units, idle_rate_lph)
 
@@ -1155,6 +1252,8 @@ async def get_vehicles_fuel_efficiency(
         _mark_telematics_unavailable(result, unavailable)
     elif scope.is_empty:
         result.data_warnings = list(scope.warnings)
+    if bundle is not None or unavailable:
+        result.freshness = _fuel_freshness(bundle, dates, unavailable)
     result.excluded_scope = scope.excluded_scope
     result.value_classification = classification.VEHICLE_EFFICIENCY
     return result
@@ -1216,6 +1315,8 @@ async def get_fuel_waste_and_anomalies(
         _mark_telematics_unavailable(waste_report, unavailable)
     else:
         waste_report.data_warnings = list(scope.warnings)
+    if bundle is not None or unavailable:
+        waste_report.freshness = _fuel_freshness(bundle, dates, unavailable)
     waste_report.excluded_scope = scope.excluded_scope
     waste_report.value_classification = classification.WASTE
     return waste_report
@@ -1288,8 +1389,25 @@ async def get_vehicle_fuel_detail(
     summary_items = [_to_summary_item(r) for r in summary_records]
 
     dates = _resolve_effective_dates(raw_records, date_from, date_to)
+    bundle, unavailable = None, []
     if raw_records and dates is not None:
         telematics_detail = await run_in_threadpool(get_vehicle_telematics_detail, unit_id, dates[0], dates[1], sid)
+        # Distance from the authoritative fleet source, the Trips Report – All Units (template 5) in the range's shared
+        # telematics bundle (cached by the dashboard for the same month), so it equals this vehicle's leaderboard row.
+        # The per-unit trips report above still gives the trip count; its own distance total is not used. Unknown
+        # (bundle unavailable, unit absent or name not unique) stays None, never the per-unit total and never 0.
+        bundle, unavailable = await _telematics_bundle_or_unavailable(dates, sid)
+        fleet_entry = None
+        if bundle is not None:
+            by_id, ambiguous_names = index_telematics_by_unit_id(bundle["by_name"], wialon_units, bundle["duplicate_names"])
+            if unit_name not in ambiguous_names:
+                fleet_entry = by_id.get(unit_id)
+        fleet_km = fleet_entry.get("mileage_km") if isinstance(fleet_entry, dict) else None
+        telematics_detail = dict(telematics_detail, distance_km=fleet_km,
+                                 distance_source=(fleet_entry.get("distance_source") or "wialon_fleet_report") if fleet_km is not None else "unavailable")
+        if fleet_km is None:
+            telematics_detail["warnings"] = list(telematics_detail.get("warnings") or []) + (
+                unavailable or ["This vehicle has no readable distance in the Wialon fleet trips report for this period."])
     else:
         telematics_detail = _unavailable_activity(NO_TRANSACTIONS_WARNING)
 
@@ -1346,13 +1464,15 @@ async def get_vehicle_fuel_detail(
         "idle_formula": "Estimated Idle Fuel (L) = Wialon Idle Hours × Idle Coefficient (L/h) [estimated]",
         "driving_formula": "Estimated Driving Fuel (L) = Fuel Purchased (L) − Estimated Idle Fuel (L) [estimated]",
         "efficiency_formula": "Purchase-based L/100 km = fuel purchased ÷ Wialon trip distance × 100 (derived; not measured consumption)",
-        "telematics_source": "Wialon Native Reports (Template 4 Trips & Template 1 Engine Hours)",
+        "telematics_source": "Wialon Native Reports (distance: Template 5 Trips – All Units; trips: Template 4; hours: Template 1 Engine Hours)",
         "transaction_source": ("Supabase public.fuel_transactions (dated) and public.fuel_monthly_summaries (monthly totals)"
                                if summary_table_enabled() else "Supabase public.fuel_transactions table"),
         "disclaimer": "Purchased fuel reflects refuelling events in the selected window, not measured consumption. The driving/idling split is an estimate from Wialon idle hours and the configured idle rate.",
     }
 
     return VehicleFuelDetailResponse(
+        # Freshness of the fleet bundle the distance comes from (the hours come from per-unit reports read now)
+        freshness=_fuel_freshness(bundle, dates, unavailable) if raw_records and dates else None,
         vehicle_identifier=clean_vid,
         vehicle_summary=v_summary,
         transactions=tx_items,

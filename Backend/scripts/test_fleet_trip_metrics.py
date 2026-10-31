@@ -5,7 +5,7 @@ driving time.
   - group trips report path: rows without a readable trip count give None trip metrics (distance unchanged);
     template 5's sub-row counts give real per-unit counts, totals and group sums
   - group trips parser: trip count from each unit row's sub-row count ("-----" placeholder = 0)
-  - unit trips report path: real counts for several trips per vehicle and for zero trips
+  - group report failure: 502, never a per-unit Trips Report fallback
   - zero trips fleet-wide: total 0, no average or longest trip (None, not 0)
   - utilization (group engine report): trip_count None
   - group analytics trips_24h: sum when every count is known, None when any is unknown or missing
@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from offline_guard import OfflineGuard  # noqa: E402
 
 import app.fleet_analytics as fa  # noqa: E402
+import app.wialon_reports as wr  # noqa: E402
 from app.main import app, _cache  # noqa: E402
 from app.wialon import WialonAPIError  # noqa: E402
 
@@ -58,16 +59,9 @@ def _trip(km, minutes, start):
             "average_speed": "40 km/h", "start_location": "From", "end_location": "To"}
 
 
-# UNIT-A: 3 trips, UNIT-B: 1 trip, UNIT-C: 0 trips
-UNIT_TRIPS = {
-    101: [_trip(10.5, 35, 1000), _trip(21.0, 40, 9000), _trip(4.5, 15, 20000)],
-    102: [_trip(60.0, 50, 5000)],
-    103: [],
-}
-
-
-def _base_patches(stack, group_trips=GROUP_TRIPS_ROWS, unit_trips=UNIT_TRIPS):
+def _base_patches(stack, group_trips=GROUP_TRIPS_ROWS):
     fa._analytics_cache.clear()
+    fa._TRIPS_BACKOFF._state.clear()
     _cache.clear()
     stack.enter_context(patch.object(fa, "login", return_value="sid"))
     stack.enter_context(patch.object(fa, "get_vehicle_groups", return_value=GROUPS))
@@ -79,9 +73,10 @@ def _base_patches(stack, group_trips=GROUP_TRIPS_ROWS, unit_trips=UNIT_TRIPS):
     else:
         gt = patch.object(fa, "execute_wialon_group_trips_report", return_value=[dict(r) for r in group_trips])
     stack.enter_context(gt)
+    # Fleet trips come from the group report only (or its last good result): a per-unit Trips Report is a failure
     stack.enter_context(patch.object(
-        fa, "execute_wialon_unit_trips_report",
-        side_effect=lambda sid, vid, f, t: {"trips": [dict(x) for x in unit_trips[vid]], "stats": {}},
+        wr, "execute_wialon_unit_trips_report",
+        side_effect=AssertionError("fleet trips must never run per-unit Trips Reports"),
     ))
 
 
@@ -257,26 +252,22 @@ def test_group_report_path_real_trip_counts():
           "summed (1) with the unknown vehicle listed; all unknown -> None.")
 
 
-def test_unit_report_path_multiple_and_zero_trips():
+def test_group_report_failure_never_uses_unit_reports():
+    # The group report failing with no earlier result: 502, and no per-unit Trips Report (patched to fail if called)
     with ExitStack() as stack:
         _base_patches(stack, group_trips=None)
-        res = fa.get_trips_mileage_analytics(hours=24)
-    by_id = {v["vehicle_id"]: v for v in res["vehicles"]}
-    assert by_id[101]["trip_count"] == 3 and by_id[102]["trip_count"] == 1 and by_id[103]["trip_count"] == 0, by_id
-    s = res["summary"]
-    assert s["total_trips"] == 4, s
-    assert s["total_distance_km"] == 96.0, s                      # 10.5 + 21 + 4.5 + 60
-    assert s["average_trip_distance_km"] == 24.0, s               # 96 / 4 trips
-    assert s["average_trip_duration_minutes"] == 35.0, s          # (35 + 40 + 15 + 50) / 4
-    assert s["longest_trip_km"] == 60.0, s                        # longest single trip
-    groups = {g["group"]: g for g in res["by_group"]}
-    assert groups["Logistics"]["trips"] == 4 and groups["Contracts"]["trips"] == 0, groups
-    print("[PASS] Unit report path: 3/1/0 trips per vehicle, total 4, avg 24.0 km, avg 35.0 min, longest 60.0 km, group sums.")
+        try:
+            fa.get_trips_mileage_analytics(hours=24)
+            raise AssertionError("expected WialonAPIError")
+        except WialonAPIError:
+            pass
+    print("[PASS] Group report failing: WialonAPIError (502), no per-unit Trips Report fallback.")
 
 
 def test_zero_trips_fleet_wide():
+    rows = [dict(r, mileage_km=0.0, trip_count=0) for r in GROUP_TRIPS_ROWS]
     with ExitStack() as stack:
-        _base_patches(stack, group_trips=None, unit_trips={101: [], 102: [], 103: []})
+        _base_patches(stack, group_trips=rows)
         res = fa.get_trips_mileage_analytics(hours=24)
     s = res["summary"]
     assert s["total_trips"] == 0, s
@@ -369,7 +360,7 @@ def main() -> int:
         test_unit_trips_parser_expands_day_rows,
         test_ai_vehicle_trips_tool_uses_wialon_report,
         test_ai_tool_results_fit_model_budget,
-        test_unit_report_path_multiple_and_zero_trips,
+        test_group_report_failure_never_uses_unit_reports,
         test_zero_trips_fleet_wide,
         test_utilization_trip_count_unavailable,
         test_group_analytics_trips,

@@ -1,42 +1,40 @@
-import { useState, useEffect, useMemo, useCallback } from "react"
-import { getFuelVehicles } from "../api/fleetApi"
+import { useState, useMemo, useCallback, useRef } from "react"
+import { getFuelLatestMonth } from "../api/fleetApi"
 import { getUAETodayStr, getUAEDateStr } from "../utils/datetime"
 import { FuelFilterContext } from "./fuel-filter-context"
-import { lastCompleteMonth, monthBounds, monthLabel } from "../components/Fuel/fuelPeriod"
+import { lastCompleteMonth, monthBounds, monthLabel, validLatestMonth } from "../components/Fuel/fuelPeriod"
 
 export function FuelFilterProvider({ children }) {
     // Period selection: 'month' (selectedMonth, the default: the last complete UAE month).
     // Supported values: 'month', 'today', 'yesterday', '7d', '30d', 'all'.
+    // The selected month changes only through setMonth (the user's month navigation or the jump button) and
+    // resetFilters: never when a request finishes.
     const [period, setPeriod] = useState("month")
     const [selectedMonth, setSelectedMonth] = useState(() => lastCompleteMonth(getUAETodayStr()))
-    const [vehicle, setVehicle] = useState("")
 
-    // Dynamic dropdown lists from backend (vehicle list only)
-    const [vehiclesList, setVehiclesList] = useState([])
-    const [loadingFilterOptions, setLoadingFilterOptions] = useState(false)
-
-    // Load dynamic filter options from backend
-    useEffect(() => {
-        let active = true
-        async function fetchFilterOptions() {
-            try {
-                setLoadingFilterOptions(true)
-                const vehRes = await getFuelVehicles({ page: 1, page_size: 500 })
-                if (!active) return
-                if (vehRes && Array.isArray(vehRes.data)) {
-                    setVehiclesList(vehRes.data.map((item) => item.vehicle_identifier).filter(Boolean))
-                }
-            } catch (err) {
-                console.error("Failed to load fuel filter options:", err)
-            } finally {
-                if (active) setLoadingFilterOptions(false)
-            }
-        }
-        fetchFilterOptions()
-        return () => {
-            active = false
-        }
+    // Latest month with matched monthly-summary fuel data, looked up in the background for the "Jump to latest month
+    // with data" button (/api/fuel/analytics/latest-month: summary identifiers and months only, no dated rows or Wialon
+    // reports). It only records the month (status: idle | loading | found | none | error); it never changes
+    // selectedMonth. Looked up once per session, or again after an import (force).
+    const [latestMonth, setLatestMonth] = useState({ status: "idle", month: null })
+    const latestLookupRef = useRef(0)
+    const lookupLatestMonth = useCallback(({ force = false } = {}) => {
+        if (latestLookupRef.current && !force) return
+        const lookup = ++latestLookupRef.current
+        setLatestMonth((prev) => ({ status: "loading", month: prev.month }))
+        getFuelLatestMonth()
+            .then((res) => {
+                if (lookup !== latestLookupRef.current) return
+                const month = validLatestMonth(res?.month, getUAETodayStr())
+                setLatestMonth({ status: month ? "found" : "none", month })
+            })
+            .catch(() => {
+                if (lookup === latestLookupRef.current) setLatestMonth({ status: "error", month: null })
+            })
     }, [])
+    // Exact vehicle filter: no page control sets it any more (the month is the only page filter); kept for callers
+    // that clear it (Data Coverage) and the drill-down
+    const [vehicle, setVehicle] = useState("")
 
     // Calculate effective date_from and date_to based on current period
     const { dateFrom, dateTo, periodLabel } = useMemo(() => {
@@ -88,13 +86,13 @@ export function FuelFilterProvider({ children }) {
         setPeriod,
         selectedMonth,
         setMonth,
+        latestMonth,
+        lookupLatestMonth,
         dateFrom,
         dateTo,
         periodLabel,
         vehicle,
         setVehicle,
-        vehiclesList,
-        loadingFilterOptions,
         resetFilters,
         queryParams,
     }

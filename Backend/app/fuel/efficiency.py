@@ -338,6 +338,10 @@ def calculate_fleet_efficiency(
     total_litres = sum((g["litres"] for g in every_group), Decimal(0))
     total_cost = sum((g["cost"] for g in every_group), Decimal(0))
     tx_count = sum(g["count"] for g in every_group)
+    # Matched fleet population: units resolving to exactly one Wialon unit, the population of every Wialon-based value
+    matched_litres = sum((g["litres"] for g in fuel_by_unit.values()), Decimal(0))
+    matched_cost = sum((g["cost"] for g in fuel_by_unit.values()), Decimal(0))
+    matched_rows = sum(g["count"] for g in fuel_by_unit.values())
 
     vehicles_telemetry_unknown = vehicles_hours_unknown = 0
     vehicles_with_distance = vehicles_without_distance = 0
@@ -480,6 +484,9 @@ def calculate_fleet_efficiency(
         total_litres=float(_round2(total_litres) or 0.0),
         total_cost=float(_round2(total_cost) or 0.0),
         transaction_count=tx_count,
+        matched_litres=float(_round2(matched_litres) or 0.0),
+        matched_cost=float(_round2(matched_cost) or 0.0),
+        matched_row_count=matched_rows,
         dated_purchase_count=sum(g["purchases"] for g in fuel_by_unit.values()),
         refund_count=sum(g["refunds"] for g in fuel_by_unit.values()),
         monthly_summary_rows=sum(g["summaries"] for g in every_group),

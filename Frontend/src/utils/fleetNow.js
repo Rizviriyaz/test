@@ -194,3 +194,17 @@ export function yesterdayCellStates({ mileage, trips, idle }, { failed = {}, ear
         idle: idleCell,
     }
 }
+
+// ─── Live fleet read ────────────────────────────────────────────────────────
+// A /api/vehicles response's read time and staleness: `retrievedAt` is when the backend read Wialon (null when missing
+// or invalid), never the browser's clock, since a read shared between viewers arrives several seconds old; `stale` is
+// true when the backend served its last good read because Wialon failed, so the positions are not current.
+export function liveFleetRead(payload) {
+    const seconds = Number(payload?.retrieved_at)
+    return {
+        retrievedAt: Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null,
+        stale: payload?.stale === true,
+    }
+}
+
+export const STALE_LIVE_FLEET_MESSAGE = "Live Wialon data is unavailable."

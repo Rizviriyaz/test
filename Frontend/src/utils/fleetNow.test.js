@@ -3,8 +3,9 @@ import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
 
 import {
-    EARLIER_RESULT_NOTICE, activeTodaySummary, fleetAlertsCount, forUaeDay, formatKm2, offlineNote, previousUaeDay,
-    reportNotice, roundKm2, sectionState, todayMileageState, yesterdayCellStates,
+    EARLIER_RESULT_NOTICE, STALE_LIVE_FLEET_MESSAGE, activeTodaySummary, fleetAlertsCount, forUaeDay, formatKm2,
+    liveFleetRead, offlineNote, previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState,
+    yesterdayCellStates,
 } from "./fleetNow.js"
 
 // 2026-10-27 00:00 Asia/Dubai (UTC+4) = 2026-10-26T20:00:00Z
@@ -314,4 +315,40 @@ test("AuthContext: a late profile response never applies to another session", ()
     assert.doesNotMatch(src, /if \(profileData && mounted\)/, "the background load checks the active user")
     assert.match(src, /if \(activeUserIdRef\.current === data\.user\.id\) setProfile\(fetchedProfile\)/)
     assert.equal((src.match(/activeUserIdRef\.current = null/g) || []).length, 2, "sign-out (event and logout) clears it")
+})
+
+
+test("live fleet read: the backend's read time, never the browser clock; a stale read is never live", () => {
+    const fresh = liveFleetRead({ retrieved_at: 1793386454, stale: false, vehicles: [] })
+    assert.equal(fresh.retrievedAt.getTime(), 1793386454 * 1000)
+    assert.equal(fresh.stale, false)
+    const stale = liveFleetRead({ retrieved_at: 1793380000, stale: true, vehicles: [] })
+    assert.equal(stale.stale, true)
+    assert.equal(stale.retrievedAt.getTime(), 1793380000 * 1000, "the last good read keeps its own time")
+    // Missing or invalid time: no time at all rather than the browser's clock
+    assert.equal(liveFleetRead({}).retrievedAt, null)
+    assert.equal(liveFleetRead({ retrieved_at: "x" }).retrievedAt, null)
+    assert.equal(liveFleetRead(null).stale, false)
+    assert.match(STALE_LIVE_FLEET_MESSAGE, /unavailable/)
+})
+
+test("Dashboard and Live Tracking show a stale fleet with its read time and an error, never as live", () => {
+    const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
+    const dashboard = read("../pages/Dashboard.jsx")
+    assert.match(dashboard, /setVehiclesFresh\(!read\.stale\)/)
+    assert.match(dashboard, /setLastUpdated\(read\.retrievedAt\)/)
+    assert.match(dashboard, /read\.stale\s*\?\s*`\$\{STALE_LIVE_FLEET_MESSAGE\}/)
+    const tracking = read("../pages/Tracking.jsx")
+    assert.match(tracking, /setError\(read\.stale \? STALE_LIVE_FLEET_MESSAGE : null\)/)
+    // The sync time is the backend's read time, never new Date() at receipt
+    assert.doesNotMatch(tracking, /setLastSyncTime\(new Date\(\)/)
+})
+
+test("Live map: one icon per status/selection and memoised markers, so a poll does not rebuild unchanged markers", () => {
+    const map = readFileSync(new URL("../components/FleetMap.jsx", import.meta.url), "utf8")
+    assert.match(map, /const MARKER_ICONS = new Map\(\)/)
+    assert.match(map, /if \(!MARKER_ICONS\.has\(key\)\) MARKER_ICONS\.set\(key, buildMarkerIcon\(status, selected\)\)/)
+    assert.match(map, /const VehicleMarker = memo\(function VehicleMarker/)
+    // Status still comes from the shared classification, unchanged
+    assert.match(map, /status=\{normalizeVehicleStatus\(vehicle\)\}/)
 })

@@ -1,5 +1,6 @@
 import { supabase } from "../lib/supabase"
 import { clearClientCache, deduplicatedFetch as dedupeRequest, getFromClientCache, peekClientCache } from "./requestCache"
+export { isAbortError } from "./requestCache"
 import { getUAETodayStr } from "../utils/datetime"
 
 export const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://127.0.0.1:8000" : "")
@@ -77,8 +78,12 @@ function calendarCacheKey(url, timeframe) {
     return CALENDAR_TIMEFRAMES.has(String(timeframe || "").toLowerCase()) ? `${url}#uae=${getUAETodayStr()}` : url
 }
 
+// The network request uses the shared request's own signal (requestCache), never one caller's: a caller passing
+// `options.signal` only stops waiting, and the request is aborted once no caller needs it
 function deduplicatedFetch(url, options = {}, ttlMs = 0) {
-    return dedupeRequest(url, async () => (await apiFetch(url, options)).json(), options, ttlMs)
+    const requestOptions = { ...options }
+    delete requestOptions.signal
+    return dedupeRequest(url, async (signal) => (await apiFetch(url, { ...requestOptions, signal })).json(), options, ttlMs)
 }
 
 export async function getVehicles(options = {}) {
@@ -371,6 +376,12 @@ export async function getFuelSummary(params = {}, options = {}) {
 
 export async function getFuelTrend(params = {}, options = {}) {
     return deduplicatedFetch(`${API_URL}/api/fuel/analytics/trend${buildFuelQueryString(params)}`, options, 30000)
+}
+
+// Latest month with matched monthly-summary fuel data ({ month: "YYYY-MM" | null }): monthly-summary identifiers and
+// months only, no dated rows or Wialon reports
+export async function getFuelLatestMonth(options = {}) {
+    return deduplicatedFetch(`${API_URL}/api/fuel/analytics/latest-month`, options, 30000)
 }
 
 export async function getFuelVehicles(params = {}, options = {}) {

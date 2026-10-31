@@ -31,6 +31,7 @@ import {
 
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
+import FreshnessBadge from "../components/Common/FreshnessBadge"
 import SectionCard from "../components/Common/SectionCard"
 import FilterSelect from "../components/Common/FilterSelect"
 import { ErrorBanner } from "../components/Common/StateViews"
@@ -38,8 +39,9 @@ import { formatUAEDateTime, formatUAETime, getUAETodayBounds, getUAETodayStr } f
 import { groupNamesOf, idleDurationStatus, inGroup } from "../utils/fleetRules"
 import { isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
 import {
-    EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, activeTodaySummary, forUaeDay, formatKm2, offlineNote,
-    previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState, yesterdayCellStates,
+    EARLIER_RESULT_NOTICE, OFFLINE_RULE_TITLE, STALE_LIVE_FLEET_MESSAGE, activeTodaySummary, forUaeDay, formatKm2,
+    liveFleetRead, offlineNote, previousUaeDay, reportNotice, roundKm2, sectionState, todayMileageState,
+    yesterdayCellStates,
 } from "../utils/fleetNow"
 import { LazyVehicleDetailDrawer as VehicleDetailDrawer } from "../components/Vehicles/lazyVehicleDetailDrawer"
 import LiveIdleTimer from "../components/Common/LiveIdleTimer"
@@ -54,14 +56,6 @@ import {
     compareKnownDesc, drivingSecondsByVehicle, formatKm, idleSecondsOf, isKnownNumber, sumKnown, sumKnownInBoth,
     yesterdayLoadOutcome,
 } from "../utils/knownTotals"
-
-// When the live fleet was read from Wialon: the backend's retrieved_at (UTC epoch seconds), since a read shared between
-// viewers can be several seconds old when it arrives. Null when missing or invalid: no time is shown rather than the
-// browser's clock presenting it as just read.
-function liveRetrievedAt(payload) {
-    const seconds = Number(payload?.retrieved_at)
-    return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : null
-}
 
 // A partial or stale "yesterday" report is re-read after this long instead of staying partial until midnight
 const YESTERDAY_PARTIAL_RETRY_MS = 180000
@@ -116,7 +110,11 @@ function Dashboard() {
     // False while the vehicles shown are an earlier visit's cached response
     const [vehiclesFresh, setVehiclesFresh] = useState(false)
     const [error, setError] = useState(null)
-    const [lastUpdated, setLastUpdated] = useState(() => (cached.vehicles ? liveRetrievedAt(cached.vehicles.data) : null))
+    // When the shown fleet was read from Wialon (the backend's time, never the browser's clock)
+    const [lastUpdated, setLastUpdated] = useState(() => (cached.vehicles ? liveFleetRead(cached.vehicles.data).retrievedAt : null))
+    // Freshness of the live fleet shown (backend block) and whether the latest live request failed outright
+    const [liveFreshness, setLiveFreshness] = useState(() => cached.vehicles?.data?.freshness ?? null)
+    const [liveFailed, setLiveFailed] = useState(false)
 
     // Global Vehicle Group Filter (Affects all sections on the page)
     const [selectedGroup, setSelectedGroup] = useState("ALL")
@@ -173,16 +171,24 @@ function Dashboard() {
             try {
                 const data = await getVehicles()
                 if (mounted) {
+                    // A stale read is the backend's last good fleet (Wialon failed): shown with its own read time,
+                    // never as live
+                    const read = liveFleetRead(data)
                     setVehicles(data.vehicles || [])
                     setVehiclesLoaded(true)
-                    setVehiclesFresh(true)
-                    setLastUpdated(liveRetrievedAt(data))
-                    setError(null)
+                    setVehiclesFresh(!read.stale)
+                    setLastUpdated(read.retrievedAt)
+                    setLiveFreshness(data.freshness ?? null)
+                    setLiveFailed(false)
+                    setError(read.stale
+                        ? `${STALE_LIVE_FLEET_MESSAGE} Showing positions read at ${read.retrievedAt ? formatUAETime(read.retrievedAt) : "an earlier time"}`
+                        : null)
                 }
             } catch (err) {
                 if (mounted) {
                     console.error("Failed to load vehicle data:", err)
                     setError("Failed to load vehicle data")
+                    setLiveFailed(true)
                 }
             } finally {
                 isFetching = false
@@ -815,6 +821,7 @@ function Dashboard() {
             <PageHeader
                 lastUpdated={lastUpdated ? formatUAETime(lastUpdated) : null}
             >
+                <FreshnessBadge label="Live" freshness={liveFreshness} error={liveFailed ? "failed" : null} hasData={vehiclesLoaded} loading={!vehiclesLoaded} />
                 <FilterSelect
                     icon={Layers}
                     label="Group"

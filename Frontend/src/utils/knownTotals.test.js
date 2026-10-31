@@ -329,8 +329,7 @@ test("Dashboard splits today and yesterday results by the today request count, n
 test("Dashboard shows when the live fleet was read (backend retrieved_at), never the browser clock", () => {
     const dashboard = readFileSync(new URL("../pages/Dashboard.jsx", import.meta.url), "utf8")
     assert.doesNotMatch(dashboard, /setLastUpdated\(new Date\(\)\)/, "a shared read must not be shown as just read")
-    assert.match(dashboard, /setLastUpdated\(liveRetrievedAt\(data\)\)/)
-    assert.match(dashboard, /liveRetrievedAt\(cached\.vehicles\.data\)/, "a cached response shows its own read time")
-    assert.match(dashboard, /Number\.isFinite\(seconds\) && seconds > 0 \? new Date\(seconds \* 1000\) : null/,
-        "a missing or invalid retrieved_at shows no time")
+    // The read time comes from fleetNow.liveFleetRead (missing or invalid retrieved_at -> no time; unit-tested there)
+    assert.match(dashboard, /const read = liveFleetRead\(data\)[\s\S]*?setLastUpdated\(read\.retrievedAt\)/)
+    assert.match(dashboard, /liveFleetRead\(cached\.vehicles\.data\)\.retrievedAt/, "a cached response shows its own read time")
 })

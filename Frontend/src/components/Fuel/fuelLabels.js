@@ -118,3 +118,30 @@ export function shareSplit(a, b) {
     if (!known(a) || !known(b) || a + b <= 0) return null
     return { first: (a / (a + b)) * 100, second: (b / (a + b)) * 100 }
 }
+
+// A value in whole units of `decimals` (fils for 2, tenths for 1), rounded half away from zero on its decimal digits
+// rather than its binary float (2993.15 is stored as 2993.1499…); null when unknown
+function toUnits(value, decimals) {
+    if (value === null || value === undefined || value === "") return null
+    const n = Number(value)
+    if (!Number.isFinite(n)) return null
+    const scaled = Number((Math.abs(n) * 10 ** decimals).toPrecision(12))
+    return Math.sign(n) * Math.round(scaled)
+}
+
+/**
+ * Excel statement total, its matched-fleet part and the rest (records without a single Wialon vehicle), all at the
+ * displayed precision. The total and the matched part are the backend's figures (summed from raw values, rounded once);
+ * the rest is total − matched at that precision, never a sum of separately rounded rows, so the three displayed figures
+ * always add up. Unknown stays null.
+ */
+export function statementSplit(total, matched, decimals) {
+    const t = toUnits(total, decimals)
+    const m = toUnits(matched, decimals)
+    const scale = 10 ** decimals
+    return {
+        total: t === null ? null : t / scale,
+        matched: m === null ? null : m / scale,
+        rest: t === null || m === null ? null : (t - m) / scale,
+    }
+}

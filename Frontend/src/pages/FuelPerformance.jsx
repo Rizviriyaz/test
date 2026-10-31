@@ -15,10 +15,10 @@ import { useFuelFilters } from "../context/useFuelFilters"
 import {
     previewFuelImport,
     executeFuelImport,
-    getFuelTrend,
     clearClientCache,
 } from "../api/fleetApi"
 import FuelHeader from "../components/Fuel/FuelHeader"
+import FreshnessBadge from "../components/Common/FreshnessBadge"
 import KpiCards from "../components/Fuel/KpiCards"
 import DrivingVsIdlingChart from "../components/Fuel/DrivingVsIdlingChart"
 import VehicleLeaderboard from "../components/Fuel/VehicleLeaderboard"
@@ -26,8 +26,9 @@ import VehicleFuelDetailModal from "../components/Fuel/VehicleFuelDetailModal"
 import { skippedRowsLabel } from "../components/Fuel/fuelLabels"
 import FuelImportControls from "../components/Fuel/FuelImportControls"
 import DataCoverage from "../components/Fuel/DataCoverage"
+import DailyFuelChart from "../components/Fuel/DailyFuelChart"
 import { canConfirmImport, formatReportingDate, formatReportingMonth, importOptions, isReportingMonth, mappingForImport, showColumnChoices } from "../components/Fuel/fuelImportState"
-import { latestMonthWithData, monthLabel } from "../components/Fuel/fuelPeriod"
+import { hasReportedDailyRows, jumpTargetMonth, monthLabel } from "../components/Fuel/fuelPeriod"
 import FuelNoticeList from "../components/Fuel/FuelNoticeList"
 import { fuelScopeNotices } from "../components/Fuel/fuelNotices"
 import useFuelEfficiencyData from "../components/Fuel/useFuelEfficiencyData"
@@ -50,7 +51,7 @@ function previewPeriodLabel(preview) {
 }
 
 export default function FuelPerformance() {
-    const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, setVehicle } = useFuelFilters()
+    const { queryParams, periodLabel, period, selectedMonth, setMonth, vehicle, setVehicle, latestMonth, lookupLatestMonth } = useFuelFilters()
 
     const {
         idleRate, setIdleRate,
@@ -62,9 +63,6 @@ export default function FuelPerformance() {
         telematicsPending, telematicsRetries,
     } = useFuelEfficiencyData(queryParams)
     const [idleThreshold] = useState(5.0)
-
-    // Latest month with data, looked up only when the selected month is empty: idle | loading | found | none | error
-    const [latestMonth, setLatestMonth] = useState({ status: "idle", month: null })
 
     // Vehicle Detail Modal State
     const [selectedVehicleDetail, setSelectedVehicleDetail] = useState(null)
@@ -153,6 +151,8 @@ export default function FuelPerformance() {
             loadEfficiencyData()
             loadRankingsData()
             loadIdleWasters()
+            // An import can add a newer month: look it up again (the selected month stays as it is)
+            lookupLatestMonth({ force: true })
         } catch (err) {
             console.error("Import execution failed:", err)
             setImportError(err.message || "An error occurred while importing fuel statement.")
@@ -169,32 +169,43 @@ export default function FuelPerformance() {
     // Monthly summaries are the only fuel reporting source: dated statement rows in the period are counted, never shown
     const datedNotReported = Number(scope?.dated_not_reported?.transaction_count) || 0
 
-    // When the selected month is empty, find the latest month with matched fuel data (fuel-only monthly trend; no
-    // Wialon reports). Months whose rows are all unmatched are not offered: their KPIs would be empty too.
-    const lookupLatest = hasNoData && monthMode
+    // The latest month with matched fuel data is looked up in the background (fuel-only; once per session) after the
+    // selected month's own first request finished, so it reuses the Wialon unit list that request just read instead of
+    // adding a Wialon call. It only fills the "Jump to latest month with data" button: the selected month changes only
+    // when the user clicks it (or navigates).
+    const firstLoadDone = !loadingEfficiency
     useEffect(() => {
-        if (!lookupLatest) return undefined
-        let active = true
-        // eslint-disable-next-line react-hooks/set-state-in-effect -- the lookup shows its loading state while it runs
-        setLatestMonth({ status: "loading", month: null })
-        getFuelTrend({ group_by: "month", ...(vehicle ? { vehicle_identifier: vehicle } : {}) })
-            .then((res) => {
-                if (!active) return
-                const month = latestMonthWithData(res?.data, getUAETodayStr())
-                setLatestMonth({ status: month ? "found" : "none", month })
-            })
-            .catch(() => {
-                if (active) setLatestMonth({ status: "error", month: null })
-            })
-        return () => { active = false }
-    }, [lookupLatest, vehicle])
+        if (firstLoadDone) lookupLatestMonth()
+    }, [firstLoadDone, lookupLatestMonth])
+    const jumpMonth = monthMode ? jumpTargetMonth(latestMonth, selectedMonth) : null
+    const jumpButton = jumpMonth ? (
+        <button
+            type="button"
+            onClick={() => setMonth(jumpMonth)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
+        >
+            Jump to latest month with data ({monthLabel(jumpMonth)})
+        </button>
+    ) : null
 
     const notices = fuelScopeNotices({ efficiency, selectedMonth, today, monthMode, telematicsPending })
 
     return (
         <AppShell>
             <FuelHeader
-                showFilters={true}
+                status={(
+                    <>
+                        <FreshnessBadge
+                            label="Telematics"
+                            freshness={efficiency?.freshness}
+                            loading={loadingEfficiency}
+                            error={overviewError}
+                            hasData={Boolean(efficiency)}
+                        />
+                        {/* The empty state shows its own jump button */}
+                        {!hasNoData && jumpButton}
+                    </>
+                )}
                 idleRate={idleRate}
                 setIdleRate={setIdleRate}
                 onOpenImport={openImportModal}
@@ -218,26 +229,18 @@ export default function FuelPerformance() {
                                 : null,
                         ].filter(Boolean).join(" ") || undefined}
                         action={monthMode ? (
-                            latestMonth.status === "loading" ? (
+                            jumpButton ?? (latestMonth.status === "loading" || latestMonth.status === "idle" ? (
                                 <span className="text-xs text-slate-400">Finding the latest month with data…</span>
-                            ) : latestMonth.status === "found" && latestMonth.month !== selectedMonth ? (
-                                <button
-                                    type="button"
-                                    onClick={() => setMonth(latestMonth.month)}
-                                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-brand px-3 text-xs font-medium text-white transition-colors hover:bg-brand-hover cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
-                                >
-                                    Jump to latest month with data ({monthLabel(latestMonth.month)})
-                                </button>
                             ) : latestMonth.status === "error" ? (
                                 <span className="text-xs text-slate-500">The latest month with data could not be determined.</span>
                             ) : latestMonth.status === "none" ? (
                                 <span className="text-xs text-slate-500">No matched fuel data for these filters.</span>
-                            ) : null
+                            ) : null)
                         ) : null}
                     />
                 ) : (
                     <>
-                        {/* Monthly overview: 8 KPI categories */}
+                        {/* Excel statement totals (2 cards), then the matched fleet (8 cards) */}
                         <KpiCards
                             efficiencyData={efficiency}
                             loading={loadingEfficiency}
@@ -275,15 +278,23 @@ export default function FuelPerformance() {
                             onSelectVehicle={(vId) => setSelectedVehicleDetail(vId)}
                             monthlySummaryRows={summaryRows}
                         />
+
+                        {/* Only for a month whose reporting scope holds dated (transaction-level) rows; never built
+                            from monthly summaries */}
+                        {monthMode && !loadingEfficiency && hasReportedDailyRows(efficiency) && (
+                            <DailyFuelChart dateFrom={queryParams.date_from} dateTo={queryParams.date_to} />
+                        )}
                     </>
                 )}
 
-                {/* Data coverage: fleet vehicles without fuel records, and matched vehicles without distance */}
+                {/* Data coverage: fleet vehicles without fuel records, matched vehicles without distance, and Excel
+                    records without a matching Wialon vehicle */}
                 <DataCoverage
                     queryParams={queryParams}
                     vehicleFilter={vehicle}
                     onClearVehicle={() => setVehicle("")}
                     refreshKey={`${telematicsRetries}|${importResult?.import_id ?? ""}`}
+                    efficiency={loadingEfficiency ? null : efficiency}
                 />
             </div>
 

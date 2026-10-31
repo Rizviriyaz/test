@@ -1,6 +1,6 @@
 // Pure data-notice rules of the fuel dashboard (unit-tested in fuelNotices.test.js). Monthly summaries are the only
 // fuel reporting source. Each notice is { key, tone: "info" | "warn", text, title? }, most relevant first.
-import { excludedSummary } from "./fuelLabels.js"
+import { excludedSummary, statementSplit } from "./fuelLabels.js"
 import { isCurrentMonth, monthLabel } from "./fuelPeriod.js"
 
 const litresText = (v) => Number(v).toLocaleString("en-US", { maximumFractionDigits: 1 })
@@ -11,13 +11,15 @@ export function fuelScopeNotices({ efficiency, selectedMonth, today, monthMode =
     if (monthMode && isCurrentMonth(selectedMonth, today)) {
         notices.push({ key: "mtd", tone: "info", text: `${monthLabel(selectedMonth)} is in progress: month-to-date figures.` })
     }
-    // Records with no single Wialon unit stay in the fleet fuel totals; only Wialon-based values cannot include them
+    // Records with no single Wialon unit stay in the Excel statement totals; the matched fleet never includes them
     const unmappedRows = Number(efficiency?.unmatched_transactions_count) || 0
     if (unmappedRows > 0) {
+        // The same litres as the KPI cards and Data Coverage: statement − matched at 0.1 L
+        const unmappedLitres = statementSplit(efficiency.total_litres, efficiency.matched_litres, 1).rest
         notices.push({
             key: "unmapped",
             tone: "warn",
-            text: `${unmappedRows} monthly record(s) (${litresText(efficiency.unmatched_litres)} L) match no single Wialon unit: included in fuel totals and listed as unmapped, without distance or idle data.`,
+            text: `${unmappedRows} monthly record(s)${unmappedLitres === null ? "" : ` (${litresText(unmappedLitres)} L)`} match no single Wialon vehicle: included in the Excel statement totals only, listed in Data Coverage.`,
         })
     }
     // A period with data: its dated statement rows are not reported (the empty state says so for a period without)

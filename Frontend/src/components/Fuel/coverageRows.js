@@ -3,6 +3,7 @@
 // the fuel efficiency vehicle list (the KPI scope) resolves a statement identifier to that unit's id, or when the
 // backend reports that unit's rows as excluded from the KPIs (excluded_scope.overlap_conflicts). Nothing here compares
 // plates or names against the statement.
+import { statementSplit } from "./fuelLabels.js"
 
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v))
 
@@ -50,7 +51,8 @@ export function distanceReadiness(response) {
  * - notMatched: fleet units with no statement record resolved to them (ambiguous = a statement identifier names this
  *   unit among several candidates, so its fuel is not attributed)
  * - excludedFromKpi: fleet units whose statement records are all excluded from the KPIs (not "unmatched")
- * - withoutDistance: fleet units with fuel in the KPI scope whose Wialon distance is not available (no_distance_data)
+ * - withoutDistance: fleet units with fuel in the KPI scope and no usable Wialon distance (no_distance_data): `distance`
+ *   0 when Wialon recorded no movement, null when the distance is unknown
  */
 export function buildCoverage(fleet, fuelVehicles, { ambiguousUnitNames = [], excludedUnitIds = [] } = {}) {
     const fleetById = new Map()
@@ -94,6 +96,8 @@ export function buildCoverage(fleet, fuelVehicles, { ambiguousUnitNames = [], ex
             groups: groupsOf(v),
             litres: num(r.litres),
             cost: num(r.total_cost),
+            // The API's own value: 0 is a distance Wialon recorded (no movement); null or missing is unknown
+            distance: num(r.distance_km),
             note: Array.isArray(r.quality_warnings) && r.quality_warnings[0] ? r.quality_warnings[0] : null,
         })
     }
@@ -105,10 +109,55 @@ export function buildCoverage(fleet, fuelVehicles, { ambiguousUnitNames = [], ex
     }
 }
 
+const WITHOUT_WIALON_REASONS = new Set(["unmatched", "ambiguous"])
+
+/**
+ * Excel records without a matching Wialon vehicle: the /analytics/excluded groups (one per identifier and reason) whose
+ * reason is unmatched (no Wialon unit) or ambiguous (several candidate units, or a plate-code conflict). Suspected
+ * duplicates and partial-month summaries are other exclusions and never listed here. These rows are statement records,
+ * disjoint from the matched fleet, so their litres and cost are never also counted in the other two lists.
+ * Largest volume first. Each row keeps its own backend value (null litres/cost stay unknown, never 0); the list's totals
+ * come from withoutWialonTotalsOf, not from a sum of these separately rounded rows.
+ */
+export function buildExcelWithoutWialon(groups) {
+    const rows = []
+    for (const g of groups || []) {
+        if (!WITHOUT_WIALON_REASONS.has(g?.reason)) continue
+        rows.push({
+            key: `${g.reason}|${g.vehicle_identifier}`,
+            identifier: String(g.vehicle_identifier || "").trim(),
+            reason: g.reason,
+            plateCodeConflict: g.ambiguity_reason === "plate_code_conflict",
+            candidates: Array.isArray(g.candidate_unit_names) ? g.candidate_unit_names.filter(Boolean) : [],
+            records: Number(g.transaction_count) || 0,
+            litres: num(g.litres),
+            cost: num(g.cost),
+        })
+    }
+    rows.sort((a, b) => (Math.abs(b.litres ?? 0) - Math.abs(a.litres ?? 0)) || a.identifier.localeCompare(b.identifier, "en", { numeric: true }))
+    return { rows }
+}
+
+/**
+ * Totals of the Excel-without-Wialon list from the fleet efficiency response (the KPI cards' figures): Excel statement −
+ * matched fleet for records, litres (0.1 L) and cost (0.01 AED), the same rule as the cards (fuelLabels.statementSplit),
+ * so the list's totals and the two cards always add up. null without the response; an unknown figure stays null.
+ */
+export function withoutWialonTotalsOf(efficiency) {
+    if (!efficiency) return null
+    const rows = Number(efficiency.transaction_count)
+    const matchedRows = Number(efficiency.matched_row_count)
+    return {
+        records: Number.isFinite(rows) && Number.isFinite(matchedRows) ? rows - matchedRows : null,
+        litres: statementSplit(efficiency.total_litres, efficiency.matched_litres, 1).rest,
+        cost: statementSplit(efficiency.total_cost, efficiency.matched_cost, 2).rest,
+    }
+}
+
 // Case-insensitive search over the vehicle name, plate, statement identifier and groups
 export function filterCoverageRows(rows, query) {
     const q = String(query || "").trim().toLowerCase()
     if (!q) return rows
-    return rows.filter((r) => [r.name, r.plate, r.fuelIdentifier, ...(r.groups || [])]
+    return rows.filter((r) => [r.name, r.plate, r.fuelIdentifier, r.identifier, ...(r.groups || []), ...(r.candidates || [])]
         .some((s) => s && String(s).toLowerCase().includes(q)))
 }

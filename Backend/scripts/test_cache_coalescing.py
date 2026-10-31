@@ -112,6 +112,7 @@ def test_vehicles_single_flight():
         patch.object(main, "get_all_vehicles", search),
         patch.object(main, "get_calculated_data", return_value=[]),
         patch.object(main, "get_vehicle_live_data", return_value=FLEET),
+        patch.object(main, "get_vehicle_groups", return_value=[]),
     ]):
         results = _run_concurrently(main.get_vehicles)
     assert search.call_count == 1, f"expected one Wialon read, got {search.call_count}"

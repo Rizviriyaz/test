@@ -232,6 +232,11 @@ def tool_get_idle_events(hours: int = 24, min_duration_minutes: int = 0, vehicle
         "vehicles_with_unknown_events": unknown_vehicles[:20],
         "vehicles_with_unknown_events_count": len(unknown_vehicles),
         "complete": complete,
+        # The Idle Analytics result's own window and read time (it can be served from its cache, or stale after a
+        # Wialon failure)
+        "timeframe": data.get("timeframe"),
+        "retrieved_at": data.get("retrieved_at"),
+        "stale": data.get("stale") is True,
     }
     if not complete:
         result["note"] = (
@@ -602,6 +607,37 @@ def _bounded_int(args: dict, key: str, default: int, low: int, high: int, clampe
     return bounded
 
 
+# Tools that read their source on every call: their data time is the answer time. Fuel tools read the fuel records per
+# call; their Wialon telematics can come from the shared bundle (at most its live TTL old for a period reaching today).
+_LIVE_READ_TOOLS = {"get_fleet_summary", "get_vehicles_by_status", "get_vehicle_status", "get_vehicle_trips"}
+_FUEL_TOOLS = {"get_fuel_summary", "get_fleet_fuel_efficiency", "get_vehicle_fuel_ranking", "get_vehicle_fuel_performance"}
+
+
+def _data_freshness(name: str, result: dict) -> dict:
+    """When the data behind a tool result was read and for which period, so answers can state them. Read times come
+    from the result itself (retrieved_at) or from the tool reading its source on this call; never invented."""
+    now = time.time()
+    out = {"answered_at": _format_ts(now)}
+    read_at = result.get("retrieved_at")
+    if isinstance(read_at, (int, float)) and not isinstance(read_at, bool) and read_at > 0:
+        out["data_read_at"] = _format_ts(read_at)
+        out["data_age_minutes"] = round(max(0.0, now - read_at) / 60, 1)
+    elif name in _LIVE_READ_TOOLS:
+        out["data_read_at"] = "read from Wialon for this answer"
+    elif name in _FUEL_TOOLS:
+        out["data_read_at"] = ("fuel records read for this answer; Wialon telematics up to 2 minutes old for a period "
+                               "reaching today")
+    else:
+        out["data_read_at"] = "unknown"
+    out["stale"] = result.get("stale") is True
+    period = result.get("period") or result.get("timeframe")
+    if not period and "hours_window" in result:
+        period = {"last_hours": result["hours_window"]}
+    if period:
+        out["reporting_period"] = period
+    return out
+
+
 def dispatch_tool(name: str, args: dict) -> str:
     """Execute a tool by name and return the result as a JSON string."""
     clamped: list = []
@@ -683,6 +719,9 @@ def dispatch_tool(name: str, args: dict) -> str:
         logging.getLogger(__name__).warning("AI tool %s failed: %s", name, e, exc_info=True)
         result = {"error": "The data source for this tool is currently unavailable."}
 
+    if isinstance(result, dict) and "error" not in result:
+        # Copy: analytics results can be cached dicts that must not be mutated.
+        result = {**result, "data_freshness": _data_freshness(name, result)}
     if clamped and isinstance(result, dict):
         # Copy: analytics results can be cached dicts that must not be mutated.
         result = {**result, "time_range_note": "; ".join(clamped)}

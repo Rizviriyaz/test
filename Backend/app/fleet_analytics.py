@@ -27,17 +27,15 @@ from app.wialon import (
     seconds_since_limit_hit, wialon_error_code,
 )
 from app.wialon_reports import (
-    execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
     execute_wialon_group_engine_idle_report,
-    parse_duration_to_seconds,
     GROUP_ID_ALL_UNITS,
     resolve_all_units_group_id,
 )
 from app.vehicles import get_all_vehicles, get_calculated_data, get_vehicle_live_data, get_sensor_by_name, parse_wialon_epoch
 from app.normalize import normalize_wialon_messages, segment_vehicle_activity, is_valid_sensor_value, INVALID_WIALON_VALUE
 from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS
-from app.utils.ttl_cache import InFlight, TTLCache
+from app.utils.ttl_cache import FailureBackoff, InFlight, TTLCache
 
 # ── Simple in-memory cache with TTL ──────────────────────────────────────────
 # Bounded LRU (keys include client-chosen hours and windows). Entries are evicted after the longest
@@ -158,6 +156,30 @@ def shorten_group_trips_snapshot(group_id, window_spec: str) -> float:
 # units, a row naming no unit) is cached like a complete one and keeps its partial flags; one partial through a
 # possibly transient read problem (unreadable cell, guessed column, failed group report) only this long
 TRANSIENT_PARTIAL_TTL_SECONDS = 30
+
+# Fleet trips after a Wialon failure: not asked again for that window for 15 s, doubling per consecutive failure up
+# to 120 s (as /api/dashboard/mileage and idle analytics); meanwhile the last good result is served marked stale
+_TRIPS_BACKOFF = FailureBackoff(base_seconds=15, max_seconds=120)
+
+
+def _oldest_read(*parts: Any) -> int:
+    """Read time (UTC epoch seconds) of a result built now from other results that may be cached: the oldest of their
+    retrieved_at values, or now when none carries one."""
+    times = [p.get("retrieved_at") for p in parts if isinstance(p, dict)]
+    known = [int(t) for t in times if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0]
+    return min(known + [now_timestamp()])
+
+
+def _trips_last_good_or_raise(cache_key: str) -> Dict[str, Any]:
+    """The last good trips result for cache_key (any age within retention) marked stale with the time it was read,
+    or WialonAPIError (HTTP 502) when none is retained. Never a result rebuilt from other sources."""
+    entry = _analytics_cache.get(cache_key)
+    if not entry or not isinstance(entry.get("data"), dict):
+        raise WialonAPIError("Wialon group trips report unavailable and no earlier result is retained")
+    retrieved_at = entry["data"].get("retrieved_at")
+    if isinstance(retrieved_at, bool) or not isinstance(retrieved_at, (int, float)) or retrieved_at <= 0:
+        retrieved_at = entry["time"]
+    return {**entry["data"], "stale": True, "retrieved_at": int(retrieved_at)}
 
 
 # ── Health Threshold Constants ───────────────────────────────────────────────
@@ -467,6 +489,8 @@ def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
             healthy_vehicles += 1
 
     result = {
+        # When this result was read from Wialon (UTC epoch seconds); a cached result keeps it, so its age is known
+        "retrieved_at": now_timestamp(),
         # When this data was read from Wialon (UTC epoch seconds); a cached response keeps its original time
         "generated_at": now_timestamp(),
         "total_vehicles": len(fleet),
@@ -687,6 +711,8 @@ def get_fleet_utilization_analytics(hours: int = 24) -> Dict[str, Any]:
                                if u["driving_seconds"] is None or u["idle_seconds"] is None or u["engine_on_seconds"] is None})
 
     result = {
+        # When this result was read from Wialon (UTC epoch seconds); a cached result keeps it, so its age is known
+        "retrieved_at": now_timestamp(),
         "hours": hours,
         # wialon_group_engine_report (authoritative) or raw_message_fallback (segmented messages; partial, uncached)
         "source": source,
@@ -777,20 +803,24 @@ def get_trips_mileage_analytics(
     log_cache_state("/api/fleet/trips", cached is not None)
     if cached:
         return cached
+    # Wialon failed for this window moments ago: the last good result (marked stale) until the bounded backoff ends,
+    # without asking Wialon again
+    if _TRIPS_BACKOFF.active(cache_key):
+        return _trips_last_good_or_raise(cache_key)
 
-    sid = login()
-    raw_groups, vehicles, calc_data = _fleet_discovery(sid)
-    fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
-    calc_map = {item.get("i"): item for item in calc_data}
-
-    # Primary: Fast authoritative Wialon Group Trips Report (Template 5), shared with /api/dashboard/mileage for the
-    # same report group and window (group_trips_snapshot): the result then reports the snapshot's window and retrieval
-    # time and expires with it. An hours-N window has no mileage counterpart (mileage takes timeframes, dates and
-    # exact bounds only), so it runs its own report and keeps the normal trips TTL.
-    group_report = None
+    # Authoritative Wialon Group Trips Report (Template 5), shared with /api/dashboard/mileage for the same report group
+    # and window (group_trips_snapshot): the result then reports the snapshot's window and retrieval time and expires
+    # with it. An hours-N window has no mileage counterpart (mileage takes timeframes, dates and exact bounds only), so
+    # it runs its own report and keeps the normal trips TTL. When Wialon fails, the last good result is served marked
+    # stale (or the request fails): trips are never rebuilt from one per-unit report per vehicle, which would run about
+    # one report per fleet unit exactly while Wialon is struggling.
     retrieved_at = None
     snapshot_fresh_for = None
     try:
+        sid = login()
+        raw_groups, vehicles, calc_data = _fleet_discovery(sid)
+        fleet = get_vehicle_live_data(sid, vehicles, calc_data, groups=raw_groups)
+        calc_map = {item.get("i"): item for item in calc_data}
         if window_spec.startswith("hours-"):
             group_report = execute_wialon_group_trips_report(
                 sid=sid,
@@ -807,14 +837,17 @@ def get_trips_mileage_analytics(
                 execute_wialon_group_trips_report, sid, snapshot_group_id, window_spec, eff_from, eff_to)
             group_report = snapshot["rows"]
             eff_from, eff_to, retrieved_at = snapshot["from_time"], snapshot["to_time"], snapshot["retrieved_at"]
+        if group_report is None:
+            raise WialonAPIError("Wialon group trips report returned no result")
     except Exception as e:
-        logging.warning("Group trips report failed, falling back to unit analysis: %s", e)
-        group_report = None
+        delay = _TRIPS_BACKOFF.record_failure(cache_key)
+        logging.warning("Group trips report failed (next attempt in %.0f s); serving the last good result if any: %s",
+                        delay, e)
+        return _trips_last_good_or_raise(cache_key)
 
     report_incomplete = False
     unmatched_rows: List[str] = []
-    # wialon_group_trips_report, or unit_trips_reports (one Trips Report per unit when the group report failed)
-    source = "wialon_group_trips_report" if group_report is not None else "unit_trips_reports"
+    source = "wialon_group_trips_report"
     if group_report is not None:
         rep_by_name = {item["vehicle_name"]: item for item in group_report}
         # Report rows carry only the unit name: a name shared by several units (or rows) cannot be attributed
@@ -869,92 +902,6 @@ def get_trips_mileage_analytics(
                 "avg_speed_kmh": round(avg_spd, 1) if avg_spd is not None else None,
                 "trips": []
             })
-    else:
-        def _process_trips(v_record):
-            vid = v_record["vehicle_id"]
-            calc = calc_map.get(vid, {})
-            curr_hw_mileage = (calc.get("mileage") or {}).get("value")
-
-            try:
-                native_rep = execute_wialon_unit_trips_report(sid, vid, eff_from, eff_to)
-            except WialonAPIError as exc:
-                # The Trips Report is the only mileage source: without it mileage and trip count are unknown
-                # (None), never re-derived from raw messages, which measure differently
-                logging.warning("Wialon trips report failed for vehicle %s; mileage unknown: %s", vid, exc)
-                return {
-                    "vehicle_id": vid,
-                    "vehicle_name": v_record["vehicle_name"],
-                    "group": v_record.get("group", "General Fleet"),
-                    "trip_count": None,
-                    "gps_mileage_km": None,
-                    "hardware_mileage_km": None,
-                    "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage is not None else None,
-                    "max_speed_kmh": None,
-                    "avg_speed_kmh": None,
-                    "trips": [],
-                }
-
-            w_trips = native_rep["trips"]
-            # Unknown when any trip distance is unreadable or the Mileage column was not identified
-            dist_unknown = "distance_km" in (
-                (native_rep.get("unlocated_fields") or []) + (native_rep.get("incomplete_fields") or [])
-            )
-            gps_dist = None if dist_unknown else round(sum(t.get("distance_km", 0.0) for t in w_trips), 2)
-            max_spd = 0.0
-            for t in w_trips:
-                ms_str = str(t.get("max_speed", "")).replace("km/h", "").strip()
-                try:
-                    ms_val = float(ms_str)
-                    if ms_val > max_spd:
-                        max_spd = ms_val
-                except ValueError:
-                    pass
-
-            speed_samples = []
-            for trip in w_trips:
-                trip_speed = _parse_speed_kmh(trip.get("average_speed"))
-                if trip_speed is not None:
-                    moving_seconds = parse_duration_to_seconds(trip.get("moving_duration"))
-                    speed_samples.append((trip_speed, moving_seconds))
-            weighted_seconds = sum(seconds for _, seconds in speed_samples)
-            avg_spd = (
-                round(sum(speed * seconds for speed, seconds in speed_samples) / weighted_seconds, 1)
-                if weighted_seconds > 0
-                else round(sum(speed for speed, _ in speed_samples) / len(speed_samples), 1)
-                if speed_samples
-                else None
-            )
-
-            return {
-                "vehicle_id": vid,
-                "vehicle_name": v_record["vehicle_name"],
-                "group": v_record.get("group", "General Fleet"),
-                "trip_count": len(w_trips),
-                "gps_mileage_km": gps_dist,
-                "hardware_mileage_km": None,
-                "cumulative_odometer_km": round(float(curr_hw_mileage), 1) if curr_hw_mileage is not None else None,
-                "max_speed_kmh": round(max_spd, 1),
-                "avg_speed_kmh": avg_spd,
-                "trips": [
-                    {
-                        "start_time": t.get("start_time"),
-                        "end_time": t.get("end_time"),
-                        "duration_minutes": t.get("duration_minutes"),
-                        "moving_duration": t.get("moving_duration_str"),
-                        "distance_km": t.get("distance_km"),
-                        "max_speed": t.get("max_speed"),
-                        "average_speed": t.get("average_speed"),
-                        "start_location": t.get("start_location"),
-                        "end_location": t.get("end_location"),
-                    }
-                    for t in w_trips
-                ]
-            }
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            vehicle_trips = list(map_with_request_context(executor, _process_trips, fleet))
-        # A failed or partial unit report leaves that unit unknown: not cached, so the next request re-reads it
-        report_incomplete = any(v["gps_mileage_km"] is None or v["trip_count"] is None for v in vehicle_trips)
 
     # The trip total sums the known counts and lists the vehicles whose count is unknown (as distance does), never
     # counting them as 0; no known count at all is unknown (None). Per-trip metrics still need every trip list.
@@ -1017,6 +964,8 @@ def get_trips_mileage_analytics(
         "to_time": eff_to,
         # When this result was read from Wialon (UTC epoch seconds); a cached response keeps its original time
         "retrieved_at": retrieved_at or now_timestamp(),
+        # True only when a retained earlier result is served because Wialon failed (_trips_last_good_or_raise)
+        "stale": False,
         "source": source,
         "summary": {
             "total_trips": total_trips,
@@ -1045,6 +994,7 @@ def get_trips_mileage_analytics(
         result_ttl = min(result_ttl, snapshot_fresh_for)
     if result_ttl > 0:
         set_cached(cache_key, result, ttl_seconds=result_ttl)
+    _TRIPS_BACKOFF.record_success(cache_key)
     return result
 
 
@@ -1191,6 +1141,8 @@ def get_safety_analytics(hours: int = 168, use_cache: bool = True) -> Dict[str, 
         elif ev["event_type"] == "Harsh Cornering": by_grp[g]["cornering"] += 1
 
     result = {
+        # When this result was read from Wialon (UTC epoch seconds); a cached result keeps it, so its age is known
+        "retrieved_at": now_timestamp(),
         "period_hours": hours,
         "summary": {
             # Counts cover the units that could be read; `partial` lists the ones that could not
@@ -1537,6 +1489,8 @@ def _build_fleet_alerts(use_cache: bool) -> Dict[str, Any]:
 
     safety_partial = bool(safety.get("partial"))
     result = {
+        # Built from the health and safety results, which may be cached: as old as the oldest of them
+        "retrieved_at": _oldest_read(health, safety),
         # When the underlying health/safety data was read (UTC epoch seconds); `timestamp` on an alert is the
         # vehicle's last reported message (or GPS fix), not when the condition began
         "generated_at": min(filter(None, [health.get("generated_at"), safety.get("generated_at")]), default=now_timestamp()),
@@ -1655,6 +1609,8 @@ def get_fleet_groups_analytics() -> Dict[str, Any]:
         })
 
     result = {
+        # Built from the live fleet and the trips and safety results, which may be cached: as old as the oldest
+        "retrieved_at": _oldest_read(trips_data, safety_data),
         "count": len(groups_summary),
         # Group-membership totals: a vehicle in several groups counts in each, so they do not add up to the fleet
         "totals_basis": "group_membership",
@@ -1727,6 +1683,8 @@ def get_single_vehicle_deep_analytics(vehicle_id: int, hours: int = 24) -> Dict[
             })
 
     result = {
+        # When this result was read from Wialon (UTC epoch seconds); a cached result keeps it, so its age is known
+        "retrieved_at": now_timestamp(),
         "found": True,
         "vehicle_id": vehicle_id,
         "vehicle_name": target.get("nm", f"Vehicle {vehicle_id}"),

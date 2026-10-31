@@ -187,3 +187,46 @@ test("fleetApi tags calendar timeframes (today, yesterday...) with the UAE date 
     assert.match(source, /cacheKey: calendarCacheKey\(url, options\?\.timeframe\)/, "fleet trips")
     assert.match(source, /cacheKey: calendarCacheKey\(url, timeframe\)/, "fleet idle analytics")
 })
+
+test("cancellation: a caller leaving stops only its own wait; the request is aborted when no caller needs it", async () => {
+    const pending = deferred()
+    let networkSignal = null
+    const fetchJson = (signal) => { networkSignal = signal; return pending.promise }
+    const a = new AbortController()
+    const b = new AbortController()
+    const first = deduplicatedFetch("/api/cancel", fetchJson, { signal: a.signal }, 10000)
+    const second = deduplicatedFetch("/api/cancel", fetchJson, { signal: b.signal }, 10000)
+    a.abort()
+    await assert.rejects(first, (err) => err.name === "AbortError")
+    assert.equal(networkSignal.aborted, false, "still needed by the second caller")
+    b.abort()
+    await assert.rejects(second, (err) => err.name === "AbortError")
+    assert.equal(networkSignal.aborted, true, "nobody waits any more: the network request is aborted")
+    pending.reject(new DOMException("aborted", "AbortError"))
+    assert.equal(getFromClientCache("/api/cancel", 10000), null, "an aborted request is never cached")
+})
+
+test("cancellation: a caller without a signal keeps the shared request alive", async () => {
+    const pending = deferred()
+    let networkSignal = null
+    const fetchJson = (signal) => { networkSignal = signal; return pending.promise }
+    const a = new AbortController()
+    const leaving = deduplicatedFetch("/api/keep", fetchJson, { signal: a.signal }, 10000)
+    const staying = deduplicatedFetch("/api/keep", fetchJson, {}, 10000)
+    a.abort()
+    await assert.rejects(leaving, (err) => err.name === "AbortError")
+    assert.equal(networkSignal.aborted, false, "never cancelled while a component still needs it")
+    pending.resolve({ ok: 1 })
+    assert.deepEqual(await staying, { ok: 1 })
+    assert.deepEqual(getFromClientCache("/api/keep", 10000), { ok: 1 })
+})
+
+test("cancellation: an already aborted signal never starts a request; a later caller starts a fresh one", async () => {
+    let calls = 0
+    const fetchJson = async () => { calls += 1; return { n: calls } }
+    const a = new AbortController()
+    a.abort()
+    await assert.rejects(deduplicatedFetch("/api/late", fetchJson, { signal: a.signal }, 10000), (err) => err.name === "AbortError")
+    assert.equal(calls, 0)
+    assert.deepEqual(await deduplicatedFetch("/api/late", fetchJson, {}, 10000), { n: 1 })
+})

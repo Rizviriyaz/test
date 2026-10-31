@@ -1212,6 +1212,12 @@ def get_fuel_transactions_list(
         raise FuelDataFetchError("Fuel transactions could not be read.") from None
 
 
+# Columns of a dated row that monthly-summary reporting uses: its identifier (vehicle filter, plate-code conflict check)
+# and the litres and cost of the dated_not_reported totals (rows, litres, cost, refunds, identifiers); the date keeps the
+# merged order. Row count alone (a count-only query) could not give those litres and costs.
+DATED_COUNT_COLUMNS = "vehicle_identifier,litres,total_cost,transaction_date"
+
+
 def fetch_fuel_transactions_for_analytics(
     filters: Dict[str, Any],
     bearer_token: Optional[str] = None,
@@ -1255,6 +1261,12 @@ def fetch_fuel_transactions_for_analytics(
     if filters.get("import_id") is not None:
         params["import_id"] = f"eq.{filters['import_id']}"
     apply_dated_only_filter(apply_visible_filter(params))
+    # Monthly-summary reporting (filters["dated_counts_only"]) never reports dated rows: it only totals them
+    # (excluded_scope.dated_not_reported) and checks their identifiers (vehicle filter, plate-code conflicts). With the
+    # summary table every fuel_transactions row read here is dated, so it is read with just those columns; the
+    # summaries below keep every column. The legacy layout keeps summaries in this table, so it reads every column.
+    if filters.get("dated_counts_only") and summary_table_enabled():
+        params["select"] = DATED_COUNT_COLUMNS
 
     rows = _fetch_all_pages(url, params, headers, "fuel transactions")
     if not summary_table_enabled():
@@ -1299,6 +1311,18 @@ def fetch_fuel_vehicle_identifiers(bearer_token: Optional[str] = None) -> List[s
             {"select": "vehicle_identifier", "order": "id.asc", "limit": str(PAGE_SIZE)}), headers,
             "monthly-summary vehicle identifiers")
     return sorted({str(r.get("vehicle_identifier") or "").strip() for r in rows} - {""})
+
+
+def fetch_summary_identifier_months(bearer_token: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    vehicle_identifier and reporting_month ('YYYY-MM-DD', the month's first day) of every visible monthly summary in
+    fuel_monthly_summaries, newest month first: the opening month needs nothing else (no dated rows, no amounts).
+    Reads every page (see _fetch_all_pages) or raises FuelDataFetchError. Requires FUEL_MONTHLY_SUMMARY_TABLE.
+    """
+    params = apply_visible_filter({"select": "vehicle_identifier,reporting_month",
+                                   "order": "reporting_month.desc,id.asc", "limit": str(PAGE_SIZE)})
+    return _fetch_all_pages(get_supabase_rest_url(SUMMARY_TABLE), params, _read_headers(bearer_token),
+                            "monthly-summary months")
 
 
 # Identifier registry per reader (service role, or the caller's token since row-level security may differ).

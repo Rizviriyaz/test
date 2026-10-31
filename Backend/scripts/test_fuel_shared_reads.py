@@ -114,7 +114,8 @@ def test_scope_reads_shared_across_concurrent_requests():
 
         asyncio.run(mixed())
         # The first filter's read is still kept; a different filter never shares it and reads on its own
-        assert reads == [other], ("different filters must never share a read", reads)
+        # (scope reads carry the monthly-summary reporting flag: dated rows are read with their count columns only)
+        assert reads == [dict(other, dated_counts_only=True)], ("different filters must never share a read", reads)
     print("[PASS] Scope: concurrent same-filter requests share 1 Supabase read + 1 unit search; later and other-filter reads are separate.")
 
 

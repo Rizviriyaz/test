@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
-import { getFleetEfficiency, getVehicleEfficiencyList, clearClientCache } from "../../api/fleetApi"
-import { fuelVehicleListParams } from "../../utils/fleetRules"
+import { getFleetEfficiency, getVehicleEfficiencyList, clearClientCache, isAbortError } from "../../api/fleetApi"
+import { fuelIdleRankingParams, fuelLeaderboardParams } from "../../utils/fleetRules"
 import { TELEMATICS_RETRY_DELAY_MS, shouldRetryTelematics } from "./telemetryFormat"
 
 // Fleet efficiency KPIs, the vehicle leaderboard and the fleet-wide idle fuel ranking for the fuel filters
@@ -19,6 +19,16 @@ export default function useFuelEfficiencyData(queryParams) {
     const efficiencyRequestIdRef = useRef(0)
     const rankingsRequestIdRef = useRef(0)
     const idleWastersRequestIdRef = useRef(0)
+    // One AbortController per loader: a newer request (or leaving the page) cancels the previous one, which the
+    // request cache aborts on the network only when no other component still waits for it
+    const controllersRef = useRef({})
+    const nextSignal = useCallback((name) => {
+        controllersRef.current[name]?.abort()
+        const controller = new AbortController()
+        controllersRef.current[name] = controller
+        return controller.signal
+    }, [])
+    useEffect(() => () => Object.values(controllersRef.current).forEach((c) => c.abort()), [])
 
     // Fleet Efficiency & Overview Metrics
     const [efficiency, setEfficiency] = useState(null)
@@ -45,69 +55,58 @@ export default function useFuelEfficiencyData(queryParams) {
     // `silent`: a background refresh (telematics retry) keeps the figures on screen instead of a loading state
     const loadEfficiencyData = useCallback(async ({ silent = false } = {}) => {
         const requestId = ++efficiencyRequestIdRef.current
+        const signal = nextSignal("efficiency")
         try {
             if (!silent) setLoadingEfficiency(true)
             setOverviewError(null)
             const res = await getFleetEfficiency({
                 ...queryParams,
                 idle_rate_lph: idleRateQuery,
-            })
+            }, { signal })
             if (requestId !== efficiencyRequestIdRef.current) return
             setEfficiency(res)
         } catch (err) {
-            if (requestId !== efficiencyRequestIdRef.current) return
+            if (requestId !== efficiencyRequestIdRef.current || isAbortError(err)) return
             setEfficiency(null)
             setOverviewError(err.message || "Failed to load fleet efficiency metrics.")
         } finally {
             if (requestId === efficiencyRequestIdRef.current) setLoadingEfficiency(false)
         }
-    }, [queryParams, idleRateQuery])
+    }, [queryParams, idleRateQuery, nextSignal])
 
     // 2. Fetch Vehicle Rankings
     const loadRankingsData = useCallback(async ({ silent = false } = {}) => {
         const requestId = ++rankingsRequestIdRef.current
+        const signal = nextSignal("rankings")
         try {
             if (!silent) setLoadingRankings(true)
             setRankingsError(null)
-            const res = await getVehicleEfficiencyList({
-                page,
-                page_size: pageSize,
-                sort_by: sortBy,
-                sort_order: sortOrder,
-                // Global filters first, so the local search box (and status/sort) is never overwritten by them. The
-                // global vehicle filter is exact (vehicle_filter, as the KPI cards); the search box stays a substring.
-                ...fuelVehicleListParams(queryParams, searchQuery),
-                status: statusFilter || undefined,
-                idle_rate_lph: idleRateQuery,
-            })
+            // Matched Wialon vehicles only. The global vehicle filter is exact (vehicle_filter, as the KPI cards); the
+            // search box stays a substring.
+            const res = await getVehicleEfficiencyList(fuelLeaderboardParams(queryParams, {
+                page, pageSize, sortBy, sortOrder, searchQuery, status: statusFilter, idleRate: idleRateQuery,
+            }), { signal })
             if (requestId !== rankingsRequestIdRef.current) return
             setVehiclesData(res || { data: [], total: 0, page: 1 })
         } catch (err) {
-            if (requestId !== rankingsRequestIdRef.current) return
+            if (requestId !== rankingsRequestIdRef.current || isAbortError(err)) return
             setVehiclesData({ data: [], total: 0, page: 1 })
             setRankingsError(err.message || "Failed to load vehicle rankings.")
         } finally {
             if (requestId === rankingsRequestIdRef.current) setLoadingRankings(false)
         }
-    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery])
+    }, [page, pageSize, sortBy, sortOrder, statusFilter, searchQuery, queryParams, idleRateQuery, nextSignal])
 
     // 3. Fetch the fleet-wide idle fuel ranking: period and global filters only, never the leaderboard's
     // page, search, sort or status
     const loadIdleWasters = useCallback(async ({ silent = false } = {}) => {
         const requestId = ++idleWastersRequestIdRef.current
+        const signal = nextSignal("idleWasters")
         try {
             if (!silent) setLoadingIdleWasters(true)
             setIdleWastersError(null)
-            const res = await getVehicleEfficiencyList({
-                page: 1,
-                page_size: 5,
-                sort_by: "estimated_idle_fuel",
-                sort_order: "desc",
-                // No status filter: vehicles with known idle hours but unknown distance (no_distance_data) carry the
-                // same idle estimate as the KPI; unknown estimates are dropped below, never ranked as 0
-                idle_rate_lph: idleRateQuery,
-                ...fuelVehicleListParams(queryParams),
-            })
+            // The whole matched fleet, ranked by the server (see fuelIdleRankingParams)
+            const res = await getVehicleEfficiencyList(fuelIdleRankingParams(queryParams, idleRateQuery), { signal })
             if (requestId !== idleWastersRequestIdRef.current) return
             // Without Wialon telematics there is no ranking: say so rather than "no idle fuel"
             if (res?.telematics_status === "unavailable") {
@@ -120,13 +119,13 @@ export default function useFuelEfficiencyData(queryParams) {
                 (v) => v.estimated_idle_fuel_litres !== null && v.estimated_idle_fuel_litres !== undefined
             ))
         } catch (err) {
-            if (requestId !== idleWastersRequestIdRef.current) return
+            if (requestId !== idleWastersRequestIdRef.current || isAbortError(err)) return
             setIdleWasters([])
             setIdleWastersError(err.message || "Failed to load the idle fuel ranking.")
         } finally {
             if (requestId === idleWastersRequestIdRef.current) setLoadingIdleWasters(false)
         }
-    }, [queryParams, idleRateQuery])
+    }, [queryParams, idleRateQuery, nextSignal])
 
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect -- loaders fetch from the API and must show their loading state on every filter change

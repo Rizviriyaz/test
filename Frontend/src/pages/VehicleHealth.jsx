@@ -15,6 +15,7 @@ import {
 } from "lucide-react"
 import AppShell from "../components/Common/AppShell"
 import PageHeader from "../components/Common/PageHeader"
+import FreshnessBadge from "../components/Common/FreshnessBadge"
 import KpiCard, { KpiStrip } from "../components/Common/KpiCard"
 import SearchInput from "../components/Common/SearchInput"
 import { EmptyState, ErrorBanner, ErrorState, LoadingState } from "../components/Common/StateViews"
@@ -610,7 +611,9 @@ export default function VehicleHealth() {
                 loading={loading}
                 lastUpdated={data?.generated_at ? formatUAETime(data.generated_at) : null}
                 lastUpdatedLabel="Data as of"
-            />
+            >
+                <FreshnessBadge freshness={data?.freshness} loading={loading} error={error} hasData={Boolean(data)} />
+            </PageHeader>
 
             <div className="space-y-4">
                 {/* Error Banner */}

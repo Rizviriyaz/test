@@ -564,6 +564,8 @@ def test_last_message_timestamp_malformed_and_valid():
         stack.enter_context(patch("app.vehicles.now_timestamp", return_value=NOW))
         stack.enter_context(patch("app.vehicles.get_vehicle_history", MagicMock(return_value=[])))
         stack.enter_context(patch("app.vehicles.get_vehicle_groups", return_value=[]))
+        # The live fleet read fetches the groups itself (shared for LIVE_GROUPS_TTL_SECONDS)
+        stack.enter_context(patch("app.main.get_vehicle_groups", return_value=[]))
         stack.enter_context(patch("app.main.login", return_value="sid"))
         stack.enter_context(patch("app.main.get_all_vehicles", return_value=units))
         stack.enter_context(patch("app.main.get_calculated_data", return_value=calc))

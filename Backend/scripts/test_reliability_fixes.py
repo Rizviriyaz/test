@@ -170,7 +170,9 @@ def test_live_vehicles_cache_follows_poll_interval():
          patch.object(main, "get_all_vehicles", side_effect=search), \
          patch.object(main, "get_calculated_data", return_value=[]), \
          patch.object(main, "get_vehicle_live_data", return_value=[{"vehicle_id": 1}]), \
+         patch.object(main, "get_vehicle_groups", return_value=[]), \
          patch("app.main.time.time", side_effect=lambda: clock[0]), \
+         patch("app.utils.freshness.time.time", side_effect=lambda: clock[0]), \
          patch("app.main.now_timestamp", side_effect=lambda: int(clock[0])):
         first = main.get_vehicles()
         clock[0] += 6  # another tab or user polling in between
@@ -179,13 +181,19 @@ def test_live_vehicles_cache_follows_poll_interval():
         third = main.get_vehicles()
     assert main.LIVE_FLEET_TTL_SECONDS == 8
     assert len(reads) == 2, f"a read is shared for 8 s, and a poll 10 s later reads again: {reads}"
-    assert second == first and second["retrieved_at"] == 1_000_000, "a shared read keeps its own retrieval time"
+    # The freshness block is computed per response (the shared read ages), so it is compared apart from the data
+    def without(r):
+        return {k: v for k, v in r.items() if k != "freshness"}
+    assert without(second) == without(first) and second["retrieved_at"] == 1_000_000, "a shared read keeps its own retrieval time"
+    assert (first["freshness"]["data_age_seconds"], second["freshness"]["data_age_seconds"]) == (0, 6)
+    assert (first["freshness"]["refresh_status"], second["freshness"]["refresh_status"]) == ("fresh", "cached")
     assert third["retrieved_at"] == 1_000_010 and third["count"] == 1
     print("[PASS] M1: /api/vehicles reuses a read for 8 s (other viewers), re-reads for the 10 s poll, states retrieved_at.")
 
 
 def test_live_vehicles_failure_is_502_not_cached_data():
     main._cache.clear()
+    main._failure_backoff.clear()
     from fastapi import HTTPException
     from app.wialon import WialonAPIError
     with patch.object(main, "login", return_value="sid"), \

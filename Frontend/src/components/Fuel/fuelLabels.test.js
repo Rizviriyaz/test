@@ -2,7 +2,7 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { existsSync, readFileSync } from "node:fs"
-import { LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote, EXCLUDED_REASON_LABELS } from "./fuelLabels.js"
+import { statementSplit, LOWER_IS_BETTER, sortOrderLabels, classificationOf, excludedSummary, TREND_STATUS_LABELS, fixedOrDash, fuelTypeLabel, isRefundAdjustment, skippedRowsLabel, fuelShareNote, EXCLUDED_REASON_LABELS } from "./fuelLabels.js"
 import { compactTick, formatTrendPoint } from "./telemetryFormat.js"
 
 const read = (rel) => readFileSync(new URL(rel, import.meta.url), "utf8")
@@ -185,8 +185,11 @@ test("monthly-only fuel reporting: no daily page, link or request; idle ranking 
     // The old daily URL only redirects to the monthly dashboard
     assert.match(read("../../App.jsx"), /path="\/fuel\/daily"\s*element=\{<Navigate to="\/fuel" replace \/>\}/)
     const idle = page.slice(page.indexOf("const loadIdleWasters"), page.indexOf("useEffect(", page.indexOf("const loadIdleWasters")))
-    assert.match(idle, /sort_by: "estimated_idle_fuel"/)
-    assert.ok(!/status: "matched"/.test(idle), "no_distance_data vehicles carry idle estimates and must stay ranked")
+    // The request comes from fleetRules.fuelIdleRankingParams (sort by estimated idle fuel, no status filter)
+    assert.match(idle, /fuelIdleRankingParams\(queryParams, idleRateQuery\)/)
+    const ranking = read("../../utils/fleetRules.js").split("export function fuelIdleRankingParams")[1].split("\n}\n")[0]
+    assert.match(ranking, /sort_by: "estimated_idle_fuel"/)
+    assert.ok(!/status: "matched"/.test(idle + ranking), "no_distance_data vehicles carry idle estimates and must stay ranked")
 })
 
 test("excluded panel: Overlaps tab lists dated rows a monthly summary superseded, labelled apart", () => {
@@ -203,4 +206,49 @@ test("leaderboard: unknown distance is never labelled as zero distance", () => {
     assert.match(board, /const isZeroDistance = v\.distance_km === 0\r?\n/)
     assert.match(board, /isDistanceUnknown\s*\?\s*"Distance unknown"/)
     assert.ok(!board.includes(">Zero Distance</option>"), "no_distance_data includes unknown distance")
+})
+
+test("Excel statement cards read the statement totals; matched fleet cards read the matched figures only", () => {
+    const kpi = read("./KpiCards.jsx")
+    // Statement: every eligible record (matched + unmatched + ambiguous)
+    assert.match(kpi, /statementSplit\(efficiencyData\?\.total_litres, efficiencyData\?\.matched_litres, 1\)/)
+    assert.match(kpi, /statementSplit\(efficiencyData\?\.total_cost, efficiencyData\?\.matched_cost, 2\)/)
+    assert.match(kpi, /const statementLitres = litresSplit\.total/)
+    assert.match(kpi, /const statementCost = costSplit\.total/)
+    // Matched fleet: the Phase 1 matched_* fields, never the statement totals
+    assert.match(kpi, /const totalLitres = litresSplit\.matched/)
+    assert.match(kpi, /const totalCost = costSplit\.matched/)
+    // Recorded amounts are shown in fils so the statement, matched and rest add up when displayed
+    assert.match(kpi, /value: formatMoney\(statementCost\)/)
+    assert.match(kpi, /value: formatMoney\(totalCost\)/)
+    assert.match(kpi, /efficiencyData\?\.matched_row_count/)
+    const matchedCards = kpi.slice(kpi.indexOf("const primaryMetrics"), kpi.indexOf("function fixedOrDash"))
+    assert.doesNotMatch(matchedCards, /statementLitres|statementCost|unmappedLitres|unmatchedCount/)
+    assert.match(kpi, /"Excel Statement"/)
+    assert.match(kpi, /"Matched Fleet Performance"/)
+})
+
+test("monthly page: no multi-month comparison request; daily chart only for dated reporting rows", () => {
+    const page = read("../../pages/FuelPerformance.jsx")
+    // The Wialon-backed efficiency trend is never requested by the monthly page (the fuel-only getFuelTrend lookup of
+    // the latest month with data is separate)
+    assert.doesNotMatch(page, /MonthlyComparisonChart|getEfficiencyTrend/)
+    assert.match(page, /hasReportedDailyRows\(efficiency\) && \(\s*<DailyFuelChart/)
+    const daily = read("./DailyFuelChart.jsx")
+    assert.match(daily, /group_by: "day"/)
+    assert.doesNotMatch(daily, /getFuelDaily|getFuelTransactions/)
+})
+
+test("statement split: totals rounded once, the rest is total − matched at the displayed precision", () => {
+    // Live August 2026: 103,343.345 raw → 103,343.35; matched 93,049.622 → 93,049.62; the rest is 10,293.73
+    assert.deepEqual(statementSplit(103343.35, 93049.62, 2), { total: 103343.35, matched: 93049.62, rest: 10293.73 })
+    assert.deepEqual(statementSplit(30049.99, 27056.8, 1), { total: 30050, matched: 27056.8, rest: 2993.2 })
+    // Whole units still add up (the rest absorbs the rounding, rows are never changed)
+    assert.deepEqual(statementSplit(103343.35, 93049.62, 0), { total: 103343, matched: 93050, rest: 10293 })
+    // Decimal half-up, not the binary float (2993.15 is 2993.1499…)
+    assert.equal(statementSplit(2993.15, 0, 1).total, 2993.2)
+    assert.equal(statementSplit(-10.25, 0, 1).total, -10.3)
+    // Unknown stays unknown; a recorded 0 stays 0
+    assert.deepEqual(statementSplit(null, 5, 2), { total: null, matched: 5, rest: null })
+    assert.deepEqual(statementSplit(0, 0, 2), { total: 0, matched: 0, rest: 0 })
 })

@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES, closed_window_ttl
+import functools
 import logging
 import os
 import sys
@@ -19,7 +20,11 @@ from app.auth import authenticate_access_token
 from app.performance_diagnostics import log_cache_state, log_data_window, new_trace_id, request_trace_id, timed_calculation
 from app.utils.status_config import CONN_DELAYED_SECONDS
 from app.utils.rate_limit import enforce_rate_limit
-from app.utils.ttl_cache import TTLCache
+from app.utils.ttl_cache import CategorizedTTLCache, TTLCache
+from app.utils.freshness import (
+    TARGET_FLEET_ANALYTICS_S, TARGET_GROUPS_S, TARGET_LIVE_FLEET_S, TARGET_TODAY_IDLE_S, TARGET_TODAY_REPORT_S,
+    TARGET_VEHICLE_TRIPS_S, window_target, with_freshness,
+)
 
 from app.wialon import EVENTS_SESSION, VEHICLE_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
 from app.wialon_reports import (
@@ -227,6 +232,21 @@ def _internal_error(endpoint: str) -> HTTPException:
     return HTTPException(status_code=500, detail="Internal server error")
 
 
+def _fresh(target):
+    """
+    Route decorator: the dict result gets its freshness block (app/utils/freshness.py) at response time, computed from
+    its own retrieved_at and stale flags, so a cached result reports its real age and is never mutated. `target` is
+    the category's target age in seconds, or a function of the result (e.g. None for a closed report window).
+    """
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            result = fn(*args, **kwargs)
+            return with_freshness(result, target_age_seconds=target(result) if callable(target) else target)
+        return wrapper
+    return decorate
+
+
 # Upper bounds on client-chosen time windows. Raw message history (per-vehicle message loads) is far heavier
 # than Wialon report rows, so it gets the tighter limit; the UI's longest preset is 720 h (30 days).
 MAX_HISTORY_HOURS = 31 * 24
@@ -257,7 +277,22 @@ def _require_window_within(eff_from: int, eff_to: int, max_hours: int) -> None:
 # Bounded LRU: keys include client-chosen windows and vehicle ids, so an unbounded dict would grow forever.
 # Entries are evicted after the longest ttl_seconds any caller passes to cached(); freshness is checked per call.
 _CACHE_RETENTION_SECONDS = 600
-_cache = TTLCache(max_entries=128)
+# Separate bounds per category, so keys that multiply (one per vehicle and per minute from the vehicle drawer) can never
+# evict the shared live fleet or the fleet report results; keys are unchanged and each belongs to exactly one category.
+_LIVE_CACHE_KEYS = ("fleet-vehicles-live", "fleet-groups-live", "fleet-groups-raw")
+CACHE_CATEGORY_SIZES = {"live": 16, "reports": 128, "per_vehicle": 256}
+
+
+def _cache_category(key):
+    key = str(key)
+    if key.startswith(_LIVE_CACHE_KEYS):
+        return "live"
+    if key.startswith("vehicle-") or (key.startswith("fleet-idle-") and "-veh-None-" not in key):
+        return "per_vehicle"
+    return "reports"
+
+
+_cache = CategorizedTTLCache(_cache_category, CACHE_CATEGORY_SIZES)
 
 def cached(key, ttl_seconds=300):
     """Return cached data if still fresh, otherwise None. An entry stored with its own (shorter) ttl is fresh only
@@ -385,78 +420,102 @@ def health_check():
 LIVE_FLEET_TTL_SECONDS = 8
 
 
-@app.get("/api/vehicles")
-@timed_calculation("/api/vehicles")
-def get_vehicles():
+# Wialon unit groups for the live fleet read: membership changes rarely, so one read is shared for this long instead of
+# one per 8 s live read (a fleet read is then 2 Wialon calls, not 3). Group membership in live results is at most this old.
+LIVE_GROUPS_TTL_SECONDS = 60
+
+
+def _live_groups(sid):
+    hit = cached("fleet-groups-raw", ttl_seconds=LIVE_GROUPS_TTL_SECONDS)
+    if hit is not None:
+        return hit
+    with _single_flight("fleet-groups-raw"):
+        hit = cached("fleet-groups-raw", ttl_seconds=LIVE_GROUPS_TTL_SECONDS)
+        if hit is not None:
+            return hit
+        groups = get_vehicle_groups(sid)
+        # An empty list is not kept: it would drop every unit's groups for a minute
+        if groups:
+            set_cache("fleet-groups-raw", groups, ttl_seconds=LIVE_GROUPS_TTL_SECONDS)
+        return groups
+
+
+def _newest_message_time(fleet):
+    """The newest Wialon message time among the fleet's units (a source timestamp), or None when none is known."""
+    times = [v.get("last_message_timestamp") for v in fleet or [] if isinstance(v, dict)]
+    known = [int(t) for t in times if isinstance(t, (int, float)) and not isinstance(t, bool) and t > 0]
+    return max(known) if known else None
+
+
+def _live_fleet_payload():
+    """
+    The live fleet ({count, vehicles, retrieved_at, stale}): a read shared for LIVE_FLEET_TTL_SECONDS; overlapping
+    callers wait for the read already running; on a Wialon failure the last good fleet (marked stale with the time it
+    was read) until the failure backoff ends. Raises when Wialon fails and nothing is retained.
+    """
     hit = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
     if hit:
         return hit
+    # Wialon failed moments ago: the last good fleet (marked stale, with the time it was read) until the backoff ends,
+    # without asking Wialon again on every poll
+    stale = _last_good("fleet-vehicles-live") if _in_failure_backoff("fleet-vehicles-live") else None
+    if stale is not None:
+        return stale
 
+    def _read_live_fleet():
+        sid = login()
+        vehicles = get_all_vehicles(sid)
+        calculated_data = get_calculated_data(sid, vehicles)
+        fleet = get_vehicle_live_data(sid, vehicles, calculated_data, groups=_live_groups(sid))
+        result = {
+            "count": len(fleet),
+            "vehicles": fleet,
+            # When this fleet was read from Wialon (UTC epoch seconds): a shared read is up to LIVE_FLEET_TTL_SECONDS old
+            "retrieved_at": now_timestamp(),
+            # True only when the last good read is served because Wialon failed (positions are then not current)
+            "stale": False,
+        }
+        set_cache("fleet-vehicles-live", result)
+        return result
+
+    # Overlapping polls (several tabs or users) wait for the read already running and reuse its result
+    with _single_flight("fleet-vehicles-live"):
+        hit = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
+        if hit:
+            return hit
+        # On a Wialon failure the last good fleet (any age within the cache retention) is served marked stale
+        return _compute_with_last_good("fleet-vehicles-live", _read_live_fleet, "/api/vehicles")
+
+
+@app.get("/api/vehicles")
+@timed_calculation("/api/vehicles")
+def get_vehicles():
     try:
-        # Overlapping polls (several tabs or users) wait for the read already running and reuse its result
-        with _single_flight("fleet-vehicles-live"):
-            hit = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
-            if hit:
-                return hit
-
-            # Login to Wialon
-            sid = login()
-
-            # Get all vehicles
-            vehicles = get_all_vehicles(sid)
-
-            # Get latest calculated data
-            calculated_data = get_calculated_data(sid, vehicles)
-
-            # Build final vehicle data
-            fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
-
-            result = {
-                "count": len(fleet),
-                "vehicles": fleet,
-                # When this fleet was read from Wialon (UTC epoch seconds): a shared read is up to LIVE_FLEET_TTL_SECONDS old
-                "retrieved_at": now_timestamp(),
-            }
-            set_cache("fleet-vehicles-live", result)
-            return result
-
+        payload = _live_fleet_payload()
     except Exception as e:
         raise _internal_error("/api/vehicles")
+    # source_updated_at: the newest Wialon message of the fleet; each vehicle keeps its own message age
+    return with_freshness(payload, target_age_seconds=TARGET_LIVE_FLEET_S,
+                          source_updated_at=_newest_message_time(payload.get("vehicles")))
 
 
 @app.get("/api/vehicles/{vehicle_id}")
 def get_vehicle_details(vehicle_id: int):
-    cached_fleet_res = cached("fleet-vehicles-live", ttl_seconds=LIVE_FLEET_TTL_SECONDS)
-    fleet = cached_fleet_res.get("vehicles") if cached_fleet_res else None
-
-    if not fleet:
-        sid = login()
-        vehicles = get_all_vehicles(sid)
-        calculated_data = get_calculated_data(sid, vehicles)
-        fleet = get_vehicle_live_data(sid, vehicles, calculated_data)
-        set_cache("fleet-vehicles-live", {"count": len(fleet), "vehicles": fleet, "retrieved_at": now_timestamp()})
-
-    vehicle = next(
-        (
-            item
-            for item in fleet
-            if item["vehicle_id"] == vehicle_id
-        ),
-        None
-    )
-
-    if not vehicle:
-        return {
-            "vehicle_id": vehicle_id,
-            "found": False,
-            "vehicle": None
-        }
-
-    return {
+    # The same shared live fleet as /api/vehicles (one read for overlapping callers, last good result on a failure)
+    try:
+        payload = _live_fleet_payload()
+    except Exception as e:
+        raise _internal_error("/api/vehicles/{vehicle_id}")
+    vehicle = next((item for item in payload.get("vehicles") or [] if item["vehicle_id"] == vehicle_id), None)
+    result = {
         "vehicle_id": vehicle_id,
-        "found": True,
-        "vehicle": vehicle
+        "found": vehicle is not None,
+        "vehicle": vehicle,
+        "retrieved_at": payload.get("retrieved_at"),
+        "stale": payload.get("stale") is True,
     }
+    return with_freshness(result, target_age_seconds=TARGET_LIVE_FLEET_S,
+                          source_updated_at=(vehicle or {}).get("last_message_timestamp"))
 
 
 @app.get("/api/wialon/audit")
@@ -477,6 +536,7 @@ def get_wialon_audit(request: Request):
 
 
 @app.get("/api/groups")
+@_fresh(TARGET_GROUPS_S)
 def get_groups():
     hit = cached("fleet-groups-live", ttl_seconds=15)
     if hit:
@@ -522,7 +582,9 @@ def get_groups():
 
         result = {
             "count": len(group_summaries),
-            "groups": group_summaries
+            "groups": group_summaries,
+            # When the groups and their vehicles were read from Wialon (UTC epoch seconds)
+            "retrieved_at": now_timestamp(),
         }
         set_cache("fleet-groups-live", result)
         return result
@@ -531,6 +593,7 @@ def get_groups():
 
 
 @app.get("/api/vehicles/{vehicle_id}/trips")
+@_fresh(TARGET_VEHICLE_TRIPS_S)
 def get_vehicle_trips(
     vehicle_id: int,
     hours: Annotated[int, Query(ge=1, le=MAX_REPORT_HOURS)] = 24,
@@ -585,6 +648,8 @@ def _compute_vehicle_trips(vehicle_id, hours, eff_from, eff_to, cache_key):
         "trips": w_trips,
         "incomplete_fields": sorted(set(native_rep.get("incomplete_fields") or []) | set(unlocated)),
         "column_warnings": native_rep.get("column_warnings") or [],
+        # When this trip list was read from Wialon (UTC epoch seconds); a cached result keeps it
+        "retrieved_at": now_timestamp(),
     }
     # Do not cache a report with unreadable cells or unlocated columns; the next request re-reads it
     if not (res["incomplete_fields"] or res["column_warnings"]):
@@ -972,7 +1037,13 @@ def _build_dashboard_summary(cache_key, hours):
     offline = sum(1 for v in fleet if v.get("connection_status") == "OFFLINE" or v.get("is_offline"))
 
     # Authoritative analytics
-    trips_data = get_trips_mileage_analytics(hours=hours)
+    try:
+        trips_data = get_trips_mileage_analytics(hours=hours)
+    except WialonAPIError:
+        # The Group Trips report failed and no earlier result is retained: distance and trips unknown (null, partial,
+        # so this summary is not cached), never 0 and never rebuilt from per-unit reports
+        trips_data = {"summary": {"total_distance_km": None, "total_distance_partial": True,
+                                  "total_trips": None, "total_trips_partial": True}}
     # Safety loads raw history for every unit: only computed for windows up to MAX_SAFETY_HOURS; longer windows
     # report the count as unknown (null) instead of loading weeks of messages per unit
     safety_supported = hours <= MAX_SAFETY_HOURS
@@ -1097,6 +1168,7 @@ MILEAGE_TTL_SECONDS = 60
 
 @app.get("/api/dashboard/mileage")
 @timed_calculation("/api/dashboard/mileage")
+@_fresh(lambda r: window_target(r.get("effective_to"), TARGET_TODAY_REPORT_S))
 def get_dashboard_mileage(
     timeframe: str = "today",
     from_time: int = None,
@@ -1643,6 +1715,7 @@ IDLE_ANALYTICS_TTL_SECONDS = 180
 
 @app.get("/api/idle/fleet-analytics")
 @timed_calculation("/api/idle/fleet-analytics")
+@_fresh(lambda r: window_target((r.get("timeframe") or {}).get("to_time"), TARGET_TODAY_IDLE_S))
 def get_fleet_idle_analytics(
     request: Request = None,
     hours: Annotated[int, Query(ge=1, le=MAX_REPORT_HOURS)] = 24,
@@ -2293,6 +2366,7 @@ from app.fleet_analytics import (
 
 @app.get("/api/fleet/health")
 @timed_calculation("/api/fleet/health")
+@_fresh(TARGET_FLEET_ANALYTICS_S)
 def api_fleet_health():
     """Vehicle Health & Diagnostics across the fleet."""
     try:
@@ -2303,6 +2377,7 @@ def api_fleet_health():
 
 @app.get("/api/fleet/utilization")
 @timed_calculation("/api/fleet/utilization")
+@_fresh(TARGET_FLEET_ANALYTICS_S)
 def api_fleet_utilization(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS)] = 24):
     """Fleet utilization breakdown: driving, idle, stopped, engine-on."""
     try:
@@ -2313,6 +2388,7 @@ def api_fleet_utilization(hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS
 
 @app.get("/api/fleet/trips")
 @timed_calculation("/api/fleet/trips")
+@_fresh(lambda r: window_target(r.get("to_time"), TARGET_TODAY_REPORT_S))
 def api_fleet_trips(
     hours: Annotated[int, Query(ge=1, le=MAX_REPORT_HOURS)] = 24,
     from_time: int = None,
@@ -2354,6 +2430,7 @@ def api_fleet_trips(
 
 @app.get("/api/fleet/safety")
 @timed_calculation("/api/fleet/safety")
+@_fresh(TARGET_FLEET_ANALYTICS_S)
 def api_fleet_safety(request: Request = None, hours: Annotated[int, Query(ge=1)] = 168):
     """Safety analytics: harsh braking, harsh acceleration, harsh cornering."""
     if hours > MAX_SAFETY_HOURS:
@@ -2371,6 +2448,7 @@ def api_fleet_safety(request: Request = None, hours: Annotated[int, Query(ge=1)]
 
 @app.get("/api/fleet/alerts")
 @timed_calculation("/api/fleet/alerts")
+@_fresh(TARGET_FLEET_ANALYTICS_S)
 def api_fleet_alerts():
     """Derived fleet alerts categorized by CRITICAL, WARNING, INFO."""
     try:
@@ -2381,6 +2459,7 @@ def api_fleet_alerts():
 
 @app.get("/api/fleet/groups")
 @timed_calculation("/api/fleet/groups")
+@_fresh(TARGET_FLEET_ANALYTICS_S)
 def api_fleet_groups():
     """Dynamic group rollups (distance, trips, idle, safety)."""
     try:

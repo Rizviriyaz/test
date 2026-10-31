@@ -16,10 +16,11 @@ test("current month is flagged month-to-date only in month mode", () => {
 })
 
 test("unmapped monthly records are named as included in the totals, never silently dropped", () => {
-    const efficiency = { unmatched_transactions_count: 2, unmatched_litres: 2993.19, excluded_scope: { all_transaction_count: 61 } }
+    // Live August 2026 figures: statement 30,049.99 L, matched 27,056.8 L
+    const efficiency = { unmatched_transactions_count: 2, unmatched_litres: 2993.19, total_litres: 30049.99, matched_litres: 27056.8, excluded_scope: { all_transaction_count: 61 } }
     const [notice] = fuelScopeNotices({ efficiency, selectedMonth: "2026-08", today: "2026-10-30" })
     assert.equal(notice.key, "unmapped")
-    assert.equal(notice.text, "2 monthly record(s) (2,993.2 L) match no single Wialon unit: included in fuel totals and listed as unmapped, without distance or idle data.")
+    assert.equal(notice.text, "2 monthly record(s) (2,993.2 L) match no single Wialon vehicle: included in the Excel statement totals only, listed in Data Coverage.")
 })
 
 test("dated rows are reported as not used only for a period with monthly data", () => {

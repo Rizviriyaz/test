@@ -154,8 +154,18 @@ def test_startup_survives_login_failure():
 def test_caches_are_bounded():
     import app.auth as auth
     import app.fleet_analytics as fa
+    # main._cache keeps one bound per category: a flood of per-vehicle keys stays within the per-vehicle bound and
+    # never evicts a shared live or report entry
+    main._cache.clear()
+    main.set_cache("fleet-vehicles-live", {"live": True})
+    main.set_cache("dashboard-mileage-v3-tf-today-1-None-uae", {"report": True})
+    for i in range(5000):
+        main.set_cache(f"vehicle-trips-v3-1-exact-{i}-{i + 1}-uae", {"i": i})
+    assert main._cache.size("per_vehicle") <= main.CACHE_CATEGORY_SIZES["per_vehicle"], main._cache.size("per_vehicle")
+    assert len(main._cache._data) <= sum(main.CACHE_CATEGORY_SIZES.values())
+    assert main.cached("fleet-vehicles-live", ttl_seconds=60) == {"live": True}
+    assert main.cached("dashboard-mileage-v3-tf-today-1-None-uae", ttl_seconds=60) == {"report": True}
     for cache, setter in (
-        (main._cache, lambda i: main.set_cache(f"vehicle-trips-v3-1-exact-{i}-{i + 1}-uae", {"i": i})),
         (fa._analytics_cache, lambda i: fa.set_cached(f"fleet_utilization_{i}", {"i": i})),
     ):
         cache.clear()

@@ -3,9 +3,9 @@ import { AlertTriangle, Info, Loader2 } from "lucide-react"
 import SectionCard from "../Common/SectionCard"
 import SearchInput from "../Common/SearchInput"
 import { ErrorState } from "../Common/StateViews"
-import { clearClientCache, getFuelExcluded, getVehicleEfficiencyList, getVehicles } from "../../api/fleetApi"
+import { clearClientCache, getFuelExcluded, getVehicleEfficiencyList, getVehicles, isAbortError } from "../../api/fleetApi"
 import { fuelVehicleListParams } from "../../utils/fleetRules"
-import { buildCoverage, distanceReadiness, filterCoverageRows, overlapUnitIds, partialSummaryRowCount } from "./coverageRows"
+import { buildCoverage, buildExcelWithoutWialon, distanceReadiness, filterCoverageRows, overlapUnitIds, partialSummaryRowCount, withoutWialonTotalsOf } from "./coverageRows"
 
 const PAGE_SIZE = 500
 
@@ -55,27 +55,38 @@ const TH = "px-3 py-2 font-medium"
 const TD = "px-3 py-2"
 
 /**
- * Data Coverage: dashboard (Wialon) fleet vehicles without fuel records in the period, and fleet vehicles with fuel
- * records but no Wialon distance. Period and vehicle filter come from the fuel filters; `refreshKey` reloads after an
- * import or a telematics retry. The distance list is shown only from final Wialon results.
+ * Data Coverage, three disjoint lists: dashboard (Wialon) fleet vehicles without fuel records in the period; matched
+ * vehicles with fuel records but no Wialon distance; and Excel records without a matching Wialon vehicle (unmatched or
+ * ambiguous identifiers). Period and vehicle filter come from the fuel filters; `refreshKey` reloads after an import or
+ * a telematics retry. The distance list is shown only from final Wialon results.
  */
-export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicle, refreshKey }) {
-    const [state, setState] = useState({ loading: true, error: null, fleet: [], fuel: [], ambiguousNames: [], ambiguousError: false, readiness: "ready", excludedScope: null })
+export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicle, refreshKey, efficiency = null }) {
+    const [state, setState] = useState({ loading: true, error: null, fleet: [], fuel: [], excludedGroups: [], excludedError: false, readiness: "ready", excludedScope: null })
     const [tab, setTab] = useState("not_matched")
     const [search, setSearch] = useState("")
     const requestIdRef = useRef(0)
+    // A newer load (or leaving the page) cancels the previous one; the request cache aborts a request on the network
+    // only when no other component still waits for it (the live fleet is shared with other pages)
+    const controllerRef = useRef(null)
+    useEffect(() => () => controllerRef.current?.abort(), [])
 
     const load = useCallback(async () => {
         const requestId = ++requestIdRef.current
+        controllerRef.current?.abort()
+        const controller = new AbortController()
+        controllerRef.current = controller
+        const { signal } = controller
         setState((s) => ({ ...s, loading: true, error: null }))
         try {
             const listParams = fuelVehicleListParams(queryParams)
-            const [fleetRes, fuelRes, ambiguousRes] = await Promise.allSettled([
-                getVehicles(),
-                fetchAllPages((page) => getVehicleEfficiencyList({ ...listParams, page, page_size: PAGE_SIZE, sort_by: "vehicle_identifier", sort_order: "asc" })),
-                fetchAllPages((page) => getFuelExcluded({ ...queryParams, reason: "ambiguous", page, page_size: PAGE_SIZE })),
+            const [fleetRes, fuelRes, excludedRes] = await Promise.allSettled([
+                getVehicles({ signal }),
+                // Matched vehicles only: the lists below compare Wialon units
+                fetchAllPages((page) => getVehicleEfficiencyList({ ...listParams, matched_only: true, page, page_size: PAGE_SIZE, sort_by: "vehicle_identifier", sort_order: "asc" }, { signal })),
+                // Every excluded group (unmatched, ambiguous and other reasons); buildExcelWithoutWialon keeps the first two
+                fetchAllPages((page) => getFuelExcluded({ ...queryParams, page, page_size: PAGE_SIZE }, { signal })),
             ])
-            if (requestId !== requestIdRef.current) return
+            if (requestId !== requestIdRef.current || signal.aborted) return
             if (fleetRes.status === "rejected") throw fleetRes.reason
             if (fuelRes.status === "rejected") throw fuelRes.reason
             setState({
@@ -85,12 +96,13 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                 fuel: fuelRes.value.rows,
                 readiness: distanceReadiness(fuelRes.value.first),
                 excludedScope: fuelRes.value.first?.excluded_scope || null,
-                // Without the ambiguity list, every fleet unit without fuel is still listed; only the flag is missing
-                ambiguousNames: ambiguousRes.status === "fulfilled" ? ambiguousRes.value.rows.flatMap((g) => g.candidate_unit_names || []) : [],
-                ambiguousError: ambiguousRes.status === "rejected",
+                // Without the excluded list, every fleet unit without fuel is still listed; only the ambiguity flag and
+                // the Excel-without-Wialon list are missing
+                excludedGroups: excludedRes.status === "fulfilled" ? excludedRes.value.rows : [],
+                excludedError: excludedRes.status === "rejected",
             })
         } catch (err) {
-            if (requestId !== requestIdRef.current) return
+            if (requestId !== requestIdRef.current || isAbortError(err)) return
             setState((s) => ({ ...s, loading: false, error: err?.message || "Failed to load data coverage." }))
         }
     }, [queryParams])
@@ -107,12 +119,16 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
         load()
     }
 
+    const withoutWialon = useMemo(() => buildExcelWithoutWialon(state.excludedGroups), [state.excludedGroups])
+    // The footer totals are the KPI cards' own: Excel statement − matched fleet at the displayed precision, so they add
+    // up with the cards (a sum of separately rounded rows can differ by a fil). Without the KPI figures: no totals.
+    const withoutWialonTotals = useMemo(() => withoutWialonTotalsOf(efficiency), [efficiency])
     const { notMatched, excludedFromKpi, withoutDistance } = useMemo(
         () => buildCoverage(state.fleet, state.fuel, {
-            ambiguousUnitNames: state.ambiguousNames,
+            ambiguousUnitNames: withoutWialon.rows.filter((r) => r.reason === "ambiguous").flatMap((r) => r.candidates),
             excludedUnitIds: overlapUnitIds(state.excludedScope),
         }),
-        [state.fleet, state.fuel, state.ambiguousNames, state.excludedScope]
+        [state.fleet, state.fuel, withoutWialon, state.excludedScope]
     )
     const partialRows = partialSummaryRowCount(state.excludedScope)
 
@@ -124,12 +140,15 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
     const ready = !state.loading && !state.error
     const rows = tab === "not_matched"
         ? (notMatchedApplies ? notMatched : [])
-        : (distanceFinal ? withoutDistance : [])
+        : tab === "no_wialon"
+            ? (state.excludedError ? [] : withoutWialon.rows)
+            : (distanceFinal ? withoutDistance : [])
     const shown = filterCoverageRows(rows, search)
 
     const tabs = [
         { key: "not_matched", label: "Not matched to Excel", count: ready && notMatchedApplies ? notMatched.length : null },
         { key: "no_distance", label: "Matched, no distance", count: ready && distanceFinal ? withoutDistance.length : null, pending: ready && state.readiness === "pending" },
+        { key: "no_wialon", label: "Excel, no Wialon vehicle", count: ready && !state.excludedError ? withoutWialon.rows.length : null },
     ]
 
     const notice = (tone, children, title) => (
@@ -211,6 +230,8 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                         Check again
                     </button>
                 </div>
+            ) : tab === "no_wialon" && state.excludedError ? (
+                <ErrorState title="Excel records unavailable" message="The Excel records without a Wialon vehicle could not be loaded." onRetry={load} className="border-0 py-8" />
             ) : tab === "no_distance" && state.readiness === "unavailable" ? (
                 <ErrorState
                     title="Wialon distance unavailable"
@@ -220,7 +241,7 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                 />
             ) : (
                 <>
-                    {tab === "not_matched" && state.ambiguousError && notice("warn",
+                    {tab === "not_matched" && state.excludedError && notice("warn",
                         "Ambiguous statement identifiers could not be checked; some vehicles listed here may have unattributed fuel records."
                     )}
                     {tab === "not_matched" && partialRows > 0 && notice("warn",
@@ -240,7 +261,9 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                                 ? <>No vehicles match &ldquo;{search.trim()}&rdquo;.</>
                                 : tab === "not_matched"
                                     ? "Every fleet vehicle has a matching fuel record in this period."
-                                    : "Every matched vehicle has Wialon distance for this period."}
+                                    : tab === "no_wialon"
+                                        ? "Every Excel record in this period matches one Wialon vehicle."
+                                        : "Every matched vehicle has Wialon distance for this period."}
                         </p>
                     ) : (
                         <div className="max-h-[26rem] overflow-auto">
@@ -251,6 +274,14 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                                             <th scope="col" className={`${TH} w-[40%]`}>Vehicle</th>
                                             <th scope="col" className={`${TH} w-[32%]`}>Group</th>
                                             <th scope="col" className={TH}>Status</th>
+                                        </tr>
+                                    ) : tab === "no_wialon" ? (
+                                        <tr>
+                                            <th scope="col" className={`${TH} w-[24%]`}>Excel identifier</th>
+                                            <th scope="col" className={`${TH} w-[30%]`}>Reason</th>
+                                            <th scope="col" className={`${TH} text-right`}>Records</th>
+                                            <th scope="col" className={`${TH} text-right`}>Fuel</th>
+                                            <th scope="col" className={`${TH} text-right`}>Cost</th>
                                         </tr>
                                     ) : (
                                         <tr>
@@ -280,6 +311,30 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                                                 </td>
                                             </tr>
                                         ))
+                                        : tab === "no_wialon" ? shown.map((r) => (
+                                            <tr key={r.key} className="hover:bg-slate-50/70">
+                                                <td className={`${TD} truncate font-mono font-semibold text-slate-900`} title={r.identifier}>{r.identifier}</td>
+                                                <td className={TD}>
+                                                    {r.reason === "ambiguous" ? (
+                                                        <>
+                                                            <StatusLabel tone="rose" title={r.plateCodeConflict ? "Matches by registration number only, and other plate codes share that number" : "Matches several Wialon vehicles"}>
+                                                                {r.plateCodeConflict ? "Ambiguous: plate code conflict" : "Ambiguous: several vehicles"}
+                                                            </StatusLabel>
+                                                            {r.candidates.length > 0 && (
+                                                                <span className="mt-0.5 block truncate text-[11px] text-slate-500" title={r.candidates.join(", ")}>
+                                                                    Candidates: {r.candidates.join(", ")}
+                                                                </span>
+                                                            )}
+                                                        </>
+                                                    ) : (
+                                                        <StatusLabel tone="slate">No Wialon vehicle</StatusLabel>
+                                                    )}
+                                                </td>
+                                                <td className={`${TD} text-right tabular-nums text-slate-700`}>{r.records.toLocaleString("en-US")}</td>
+                                                <td className={`${TD} text-right tabular-nums text-slate-900`}>{r.litres === null ? "—" : `${fmt(r.litres, 1)} L`}</td>
+                                                <td className={`${TD} text-right tabular-nums text-slate-900`}>{r.cost === null ? "—" : `AED ${fmt(r.cost, 2)}`}</td>
+                                            </tr>
+                                        ))
                                         : shown.map((r) => (
                                             <tr key={r.unitId} className="hover:bg-slate-50/70">
                                                 <td className={TD}>
@@ -291,9 +346,17 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                                                 <td className={`${TD} text-slate-600`}><GroupsCell groups={r.groups} /></td>
                                                 <td className={`${TD} text-right tabular-nums text-slate-900`}>{r.litres === null ? "—" : `${fmt(r.litres, 1)} L`}</td>
                                                 <td className={`${TD} text-right tabular-nums text-slate-900`}>{r.cost === null ? "—" : `AED ${fmt(r.cost, 0)}`}</td>
-                                                <td className={`${TD} text-right text-slate-400`}>Unavailable</td>
+                                                {r.distance === null ? (
+                                                    <td className={`${TD} text-right text-slate-400`}>Unavailable</td>
+                                                ) : (
+                                                    <td className={`${TD} text-right tabular-nums text-slate-900`}>{fmt(r.distance, 2)} km</td>
+                                                )}
                                                 <td className={TD}>
-                                                    <StatusLabel tone="amber" title={r.note || undefined}>Distance unavailable</StatusLabel>
+                                                    {r.distance === null ? (
+                                                        <StatusLabel tone="amber" title={r.note || undefined}>Distance unavailable</StatusLabel>
+                                                    ) : (
+                                                        <StatusLabel tone="slate" title={r.note || undefined}>Recorded 0 km</StatusLabel>
+                                                    )}
                                                 </td>
                                             </tr>
                                         ))}
@@ -304,7 +367,10 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
 
                     {shown.length > 0 && (
                         <p className="border-t border-slate-100 px-4 py-2 text-[11px] tabular-nums text-slate-500">
-                            {search.trim() ? `${shown.length} of ${rows.length}` : rows.length} {rows.length === 1 ? "vehicle" : "vehicles"}
+                            {search.trim() ? `${shown.length} of ${rows.length}` : rows.length}{" "}
+                            {tab === "no_wialon"
+                                ? `${rows.length === 1 ? "identifier" : "identifiers"}${withoutWialonTotals ? ` · ${withoutWialonTotals.records === null ? "—" : withoutWialonTotals.records.toLocaleString("en-US")} records · ${withoutWialonTotals.litres === null ? "—" : `${fmt(withoutWialonTotals.litres, 1)} L`} · ${withoutWialonTotals.cost === null ? "—" : `AED ${fmt(withoutWialonTotals.cost, 2)}`} (Excel statement − matched fleet)` : ""}`
+                                : rows.length === 1 ? "vehicle" : "vehicles"}
                         </p>
                     )}
                 </>

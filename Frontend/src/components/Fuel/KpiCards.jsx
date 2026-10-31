@@ -7,7 +7,7 @@ import {
     Database,
     Calculator,
 } from "lucide-react"
-import { fuelShareNote, transactionCountLabel, TREND_STATUS_LABELS } from "./fuelLabels"
+import { fuelShareNote, statementSplit, transactionCountLabel, TREND_STATUS_LABELS } from "./fuelLabels"
 
 function formatNumber(val, decimals = 1) {
     if (val === null || val === undefined || isNaN(val)) return "—"
@@ -17,12 +17,19 @@ function formatNumber(val, decimals = 1) {
     })
 }
 
+const CARD_SHADOW = "shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]"
+
 function formatCurrency(val) {
     if (val === null || val === undefined || isNaN(val)) return "—"
     return Number(val).toLocaleString("en-US", {
         minimumFractionDigits: 0,
         maximumFractionDigits: 0,
     })
+}
+
+// Recorded statement amounts (statement, matched and the rest) in fils, so the three displayed amounts add up
+function formatMoney(val) {
+    return formatNumber(val, 2)
 }
 
 export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
@@ -36,33 +43,46 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     }, [selectedKpi])
 
     if (loading) {
+        const skeleton = (count, cols) => (
+            <div className={`grid ${cols} gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 ${CARD_SHADOW}`}>
+                {Array.from({ length: count }, (_, i) => (
+                    <div key={i} className="bg-white px-3 py-2.5">
+                        <div className="h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                        <div className="mt-1.5 h-6 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                        <div className="mt-1.5 h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                    </div>
+                ))}
+            </div>
+        )
         return (
-            <div role="status" aria-label="Loading fuel KPIs">
-                <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
-                    {[0, 1, 2, 3, 4, 5, 6, 7].map((i) => (
-                        <div key={i} className="bg-white px-3 py-2.5">
-                            <div className="h-3 w-20 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                            <div className="mt-1.5 h-6 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                            <div className="mt-1.5 h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
-                        </div>
-                    ))}
-                </div>
+            <div role="status" aria-label="Loading fuel KPIs" className="space-y-3 sm:space-y-4">
+                {skeleton(2, "grid-cols-2")}
+                {skeleton(8, "grid-cols-2 sm:grid-cols-4")}
             </div>
         )
     }
 
-    const totalLitres = efficiencyData?.total_litres
-    const totalCost = efficiencyData?.total_cost
-    const transactionCount = efficiencyData?.transaction_count
-    const vehicleCount = efficiencyData?.vehicle_count
+    // Excel statement: every eligible statement record (matched, unmatched and ambiguous). Suspected duplicates,
+    // partial-month summaries and dated rows outside monthly-summary reporting are left out by the backend.
+    // Statement, matched part and the rest at the displayed precision (litres 0.1 L, cost 0.01 AED): the rest (records
+    // with no single Wialon unit) is statement − matched, so the displayed figures always add up (fuelLabels)
+    const litresSplit = statementSplit(efficiencyData?.total_litres, efficiencyData?.matched_litres, 1)
+    const costSplit = statementSplit(efficiencyData?.total_cost, efficiencyData?.matched_cost, 2)
+    const statementLitres = litresSplit.total
+    const statementCost = costSplit.total
+    const statementRowsLabel = transactionCountLabel(efficiencyData?.transaction_count, efficiencyData?.monthly_summary_rows)
+    // Statement records with no single Wialon unit: in the statement totals only, never in the matched fleet
+    const unmappedLitres = litresSplit.rest
+    const unmappedCost = costSplit.rest
     const unmatchedCount = efficiencyData?.unmatched_vehicle_count
-    // Fleet totals include monthly records with no single Wialon unit (no distance or idle data): shown, never dropped
-    const unmappedLitres = Number(efficiencyData?.unmatched_litres) || 0
-    const unmappedCost = Number(efficiencyData?.unmatched_cost) || 0
-    const mappedLitres = totalLitres !== null && totalLitres !== undefined ? totalLitres - unmappedLitres : null
-    // Monthly-summary rows (mapped and unmapped) are statement totals, not refuels: counts are labelled as rows
-    const summaryRows = efficiencyData?.monthly_summary_rows
-    const rowsLabel = transactionCountLabel(transactionCount, summaryRows)
+    const statementPrice = statementLitres && statementCost ? statementCost / statementLitres : null
+
+    // Matched fleet: vehicles matched to exactly one Wialon unit, the population of every card below
+    const totalLitres = litresSplit.matched
+    const totalCost = costSplit.matched
+    const vehicleCount = efficiencyData?.vehicle_count
+    // Monthly-summary rows are statement totals, not refuels: counts are labelled as rows
+    const rowsLabel = transactionCountLabel(efficiencyData?.matched_row_count, efficiencyData?.excluded_scope?.monthly_summary_rows)
     const trackedLitres = efficiencyData?.tracked_litres
     // Basis of the idle/driving fuel shares: litres of vehicles with distance or engine hours
     // Litres of the vehicles whose idle fuel is estimated: the basis of the idle/driving fuel shares
@@ -93,49 +113,89 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
     // Breakdown details generator for active KPI
     const getBreakdownDetails = (kpiKey) => {
         switch (kpiKey) {
+            case "statement_litres":
+                return {
+                    title: "Total Fuel Purchased (Excel statement)",
+                    category: "Recorded Statement Invoices",
+                    classificationBadge: "recorded",
+                    resultText: `${formatNumber(statementLitres, 1)} Litres`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Monthly fuel statement summaries (net of refunds)",
+                    formulaText: "Matched vehicles + records without a single Wialon vehicle",
+                    natureText: "Every eligible statement record, matched to Wialon or not. Suspected duplicates, partial-month summaries and dated rows outside monthly-summary reporting are excluded.",
+                    inputs: [
+                        { label: "Statement volume", value: `${formatNumber(statementLitres, 1)} L`, source: "All eligible statement records" },
+                        { label: "Matched to one Wialon vehicle", value: `${formatNumber(totalLitres, 1)} L`, source: "Matched Fleet Performance" },
+                        { label: "No single Wialon vehicle", value: `${formatNumber(unmappedLitres, 1)} L`, source: `${unmatchedCount ?? "—"} identifier(s), listed in Data Coverage` },
+                        { label: "Statement rows", value: statementRowsLabel, source: "Monthly Summary Rows" },
+                        { label: "Weighted Average Price", value: statementPrice !== null ? `AED ${statementPrice.toFixed(2)} / L` : "—", source: "Statement Cost ÷ Statement Litres" },
+                    ],
+                    calculationSteps: [
+                        `Statement Litres = ${formatNumber(totalLitres, 1)} L matched + ${formatNumber(unmappedLitres, 1)} L without a Wialon vehicle`,
+                        `Result = ${formatNumber(statementLitres, 1)} L`,
+                    ],
+                }
+            case "statement_cost":
+                return {
+                    title: "Total Fuel Cost (Excel statement)",
+                    category: "Recorded Statement Invoices",
+                    classificationBadge: "recorded",
+                    resultText: `AED ${formatMoney(statementCost)}`,
+                    dateRange: dateRangeStr,
+                    dataSource: "Fuel statement invoices (Invoiced amounts in AED)",
+                    formulaText: "Matched vehicles + records without a single Wialon vehicle",
+                    natureText: "Net invoiced amount of every eligible statement record, matched to Wialon or not.",
+                    inputs: [
+                        { label: "Statement spend", value: `AED ${formatMoney(statementCost)}`, source: "All eligible statement records" },
+                        { label: "Matched to one Wialon vehicle", value: `AED ${formatMoney(totalCost)}`, source: "Matched Fleet Performance" },
+                        { label: "No single Wialon vehicle", value: `AED ${formatMoney(unmappedCost)}`, source: "Listed in Data Coverage" },
+                        { label: "Statement rows", value: statementRowsLabel, source: "Invoice Rows" },
+                    ],
+                    calculationSteps: [
+                        `Statement Cost = AED ${formatMoney(totalCost)} matched + AED ${formatMoney(unmappedCost)} without a Wialon vehicle`,
+                        `Result = AED ${formatMoney(statementCost)}`,
+                    ],
+                }
             case "total_litres":
                 return {
-                    title: "Total Fuel Purchased",
+                    title: "Fuel Purchased (matched fleet)",
                     category: "Recorded Statement Invoices",
                     classificationBadge: "recorded",
                     resultText: `${formatNumber(totalLitres, 1)} Litres`,
                     dateRange: dateRangeStr,
                     dataSource: "Monthly fuel statement summaries (net of refunds)",
-                    formulaText: "Monthly summaries of mapped vehicles + unmapped monthly records",
-                    natureText: "Aggregated from imported monthly fuel summaries. Records with no single Wialon unit are included and listed as unmapped; they have no distance or idle data.",
+                    formulaText: "Sum of net litres of vehicles matched to exactly one Wialon unit",
+                    natureText: "Only vehicles matched to one Wialon unit, the same vehicles as every other matched-fleet value. Records without a single Wialon vehicle are in the Excel statement totals only.",
                     inputs: [
-                        { label: "Net Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Monthly Summary Aggregation" },
-                        { label: "Mapped to Wialon units", value: `${formatNumber(mappedLitres, 1)} L`, source: "Monthly summaries of matched vehicles" },
-                        { label: "Unmapped records", value: `${formatNumber(unmappedLitres, 1)} L`, source: "No or several Wialon units: no distance or idle data" },
+                        { label: "Matched volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Matched vehicles' monthly summaries" },
+                        { label: "Matched vehicles", value: `${vehicleCount ?? "—"}`, source: "Wialon Unit Registry" },
                         { label: "Statement rows", value: rowsLabel, source: "Monthly Summary Rows" },
-                        { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Invoice Total Costs" },
-                        { label: "Weighted Average Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
+                        { label: "Weighted Average Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Matched Cost ÷ Matched Litres" },
                     ],
                     calculationSteps: [
-                        `Fleet Litres = ${formatNumber(mappedLitres, 1)} L mapped + ${formatNumber(unmappedLitres, 1)} L unmapped`,
+                        "Matched Litres = Sum(net litres of matched vehicles)",
                         `Result = ${formatNumber(totalLitres, 1)} L`,
                     ],
                 }
             case "total_cost":
                 return {
-                    title: "Total Fuel Expenditure",
+                    title: "Fuel Cost (matched fleet)",
                     category: "Recorded Statement Invoices",
                     classificationBadge: "recorded",
-                    resultText: `AED ${formatCurrency(totalCost)}`,
+                    resultText: `AED ${formatMoney(totalCost)}`,
                     dateRange: dateRangeStr,
                     dataSource: "Fuel statement invoices (Invoiced amounts in AED)",
-                    formulaText: "Sum of All Invoiced Refuel Costs (AED)",
-                    natureText: "Recorded financial expenditure directly from supplier statement invoices, reflecting net billing.",
+                    formulaText: "Sum of net invoiced cost of vehicles matched to exactly one Wialon unit",
+                    natureText: "Net invoiced amount of the matched vehicles only.",
                     inputs: [
-                        { label: "Total Invoiced Spend", value: `AED ${formatCurrency(totalCost)}`, source: "Monthly Summary Cost Sum" },
-                        { label: "Unmapped records", value: `AED ${formatCurrency(unmappedCost)}`, source: "Included; no single Wialon unit" },
-                        { label: "Purchased Volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Monthly Summary Litres Sum" },
-                        { label: "Effective Fuel Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Total Cost ÷ Total Litres" },
+                        { label: "Matched spend", value: `AED ${formatMoney(totalCost)}`, source: "Matched vehicles' monthly summaries" },
+                        { label: "Matched volume", value: `${formatNumber(totalLitres, 1)} L`, source: "Matched vehicles' monthly summaries" },
+                        { label: "Effective Fuel Price", value: avgPrice !== null ? `AED ${avgPrice.toFixed(2)} / L` : "—", source: "Matched Cost ÷ Matched Litres" },
                         { label: "Statement rows", value: rowsLabel, source: "Invoice Rows" },
                     ],
                     calculationSteps: [
-                        "Total Expenditure = Sum(Line Item Amounts in AED)",
-                        `Result = AED ${formatCurrency(totalCost)}`,
+                        "Matched Cost = Sum(net cost of matched vehicles)",
+                        `Result = AED ${formatMoney(totalCost)}`,
                     ],
                 }
             case "total_distance":
@@ -145,7 +205,7 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                     classificationBadge: "recorded",
                     resultText: `${totalDistance !== null && totalDistance !== undefined ? formatNumber(totalDistance, 1) + " km" : "—"}`,
                     dateRange: dateRangeStr,
-                    dataSource: "Wialon Native Reports & Odometer Mileage",
+                    dataSource: "Wialon Trips Report – All Units",
                     formulaText: "Sum of verified GPS trip distance across matched units",
                     natureText: "Authoritative distance travelled recorded by Wialon telematics for units matched to fuel transactions.",
                     inputs: [
@@ -257,7 +317,6 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
                         { label: "Matched Wialon Units", value: `${vehicleCount ?? "—"}`, source: "Wialon Unit Registry" },
                         { label: "Units with GPS Distance", value: `${vehiclesWithDistance ?? "—"}`, source: "Wialon Odometer Reports" },
                         { label: "Units with Engine-Hours Only", value: `${engineOnlyCount ?? "—"}`, source: "Wialon Engine Reports" },
-                        { label: "Unmapped Fuel Identifiers", value: `${unmatchedCount ?? "—"}`, source: "In fuel totals; no distance or idle (no or several Wialon units)" },
                         { label: "Fuel Volume (Tracked Units)", value: `${formatNumber(trackedLitres, 1)} L`, source: "Matched Vehicle Invoices" },
                     ],
                     calculationSteps: [
@@ -275,25 +334,45 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
 
     // Primary & Secondary KPI configurations. Unknown values render as "—" with an "Unavailable" note, never as 0.
     const efficiencyWithheld = !has(efficiency) && suppressedReason ? (TREND_STATUS_LABELS[suppressedReason] || "Withheld") : null
+    const statementMetrics = [
+        {
+            key: "statement_litres",
+            label: "Total Fuel Purchased",
+            value: formatNumber(statementLitres, 1),
+            unit: "L",
+            note: unmappedLitres ? `incl. ${formatNumber(unmappedLitres, 1)} L without a Wialon vehicle` : null,
+            provenance: "Recorded",
+            title: "All eligible Excel statement records, matched to Wialon or not",
+        },
+        {
+            key: "statement_cost",
+            label: "Total Fuel Cost",
+            prefix: "AED",
+            value: formatMoney(statementCost),
+            note: statementRowsLabel,
+            provenance: "Recorded",
+            title: "All eligible Excel statement records, matched to Wialon or not",
+        },
+    ]
+
     const primaryMetrics = [
         {
             key: "total_litres",
             label: "Fuel Purchased",
             value: formatNumber(totalLitres, 1),
             unit: "L",
-            note: [
-                avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : null,
-                unmappedLitres ? `incl. ${formatNumber(unmappedLitres, 1)} L unmapped` : null,
-            ].filter(Boolean).join(" · ") || null,
+            note: avgPrice ? `AED ${avgPrice.toFixed(2)} / L avg` : null,
             provenance: "Recorded",
+            title: "Vehicles matched to one Wialon unit",
         },
         {
             key: "total_cost",
             label: "Fuel Cost",
             prefix: "AED",
-            value: formatCurrency(totalCost),
+            value: formatMoney(totalCost),
             note: rowsLabel,
             provenance: "Recorded",
+            title: "Vehicles matched to one Wialon unit",
         },
         {
             key: "total_distance",
@@ -351,11 +430,8 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
             key: "vehicle_count",
             label: "Vehicles",
             value: has(vehicleCount) ? vehicleCount : "—",
-            unit: "refuelled",
-            note: [
-                has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : null,
-                unmatchedCount ? `${unmatchedCount} unmapped` : null,
-            ].filter(Boolean).join(" · ") || null,
+            unit: "matched",
+            note: has(vehiclesWithDistance) ? `${vehiclesWithDistance} with distance` : null,
             provenance: "Recorded",
             title: "Refuelled vehicles matched to one Wialon unit (not total fleet size)",
         },
@@ -400,13 +476,28 @@ export default function KpiCards({ efficiencyData, loading, idleRate = 2.0 }) {
         </button>
     )
 
+    const groupHeading = (id, text) => (
+        <h2 id={id} className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{text}</h2>
+    )
+
     return (
-        <div>
-            {/* Unified 8-card hairline grid (Primary top row, Secondary bottom row) */}
-            <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 lg:grid-cols-4 shadow-[0_2px_8px_-2px_rgba(15,23,42,0.05),0_1px_3px_-1px_rgba(15,23,42,0.03)]">
-                {primaryMetrics.map(renderCard)}
-                {secondaryMetrics.map(renderCard)}
-            </div>
+        <div className="space-y-3 sm:space-y-4">
+            {/* Excel statement totals: every eligible record, matched to Wialon or not */}
+            <section aria-labelledby="fuel-statement-heading">
+                {groupHeading("fuel-statement-heading", "Excel Statement")}
+                <div className={`grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 ${CARD_SHADOW}`}>
+                    {statementMetrics.map(renderCard)}
+                </div>
+            </section>
+
+            {/* Matched fleet: vehicles matched to exactly one Wialon unit only */}
+            <section aria-labelledby="fuel-matched-heading">
+                {groupHeading("fuel-matched-heading", "Matched Fleet Performance")}
+                <div className={`grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-slate-200/70 bg-slate-200/60 sm:grid-cols-4 ${CARD_SHADOW}`}>
+                    {primaryMetrics.map(renderCard)}
+                    {secondaryMetrics.map(renderCard)}
+                </div>
+            </section>
 
             {/* ─── INTERACTIVE KPI FORMULA & BREAKDOWN MODAL ───────────── */}
             {activeBreakdown && createPortal(

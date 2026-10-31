@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef } from "react"
 import {
     MapContainer,
     TileLayer,
@@ -13,7 +13,17 @@ import "leaflet/dist/leaflet.css"
 import { isValidCoordinate } from "../utils/coordinates"
 import { normalizeVehicleStatus } from "../utils/vehicleStatus"
 
+// One Leaflet icon per (status, selected): a live refresh then hands every unchanged marker the same icon object, so
+// react-leaflet does not replace its icon element on each 10 s poll (a new divIcon per render did, for every marker)
+const MARKER_ICONS = new Map()
+
 function getMarkerIcon(status, selected = false) {
+    const key = `${status}|${selected}`
+    if (!MARKER_ICONS.has(key)) MARKER_ICONS.set(key, buildMarkerIcon(status, selected))
+    return MARKER_ICONS.get(key)
+}
+
+function buildMarkerIcon(status, selected) {
     // Same status colors as the rest of the UI (index.css --color-status-*)
     const colors = {
         MOVING: "#059669",
@@ -190,6 +200,13 @@ function FleetMapControls({ vehicles, isPanelOpen = true, isDrawerOpen = false }
     )
 }
 
+// One vehicle marker, re-rendered only when its position, status or selection changes
+const VehicleMarker = memo(function VehicleMarker({ id, lat, lng, status, selected, onSelect }) {
+    const position = useMemo(() => [lat, lng], [lat, lng])
+    const eventHandlers = useMemo(() => ({ click: () => onSelect(id) }), [id, onSelect])
+    return <Marker position={position} icon={getMarkerIcon(status, selected)} eventHandlers={eventHandlers} />
+})
+
 function FleetMap({
     vehicles = [],
     selectedVehicleId = null,
@@ -215,6 +232,20 @@ function FleetMap({
         }
         return [25.2048, 55.2708] // Default UAE Center
     }, [vehiclesWithLocation])
+
+    // A marker click selects the vehicle's latest record; the handler itself stays the same across refreshes, so
+    // unchanged markers are not re-rendered
+    const latestRef = useRef({ byId: new Map(), onVehicleSelect })
+    useEffect(() => {
+        latestRef.current = {
+            byId: new Map(vehiclesWithLocation.map(v => [String(v.vehicle_id || v.id), v])),
+            onVehicleSelect,
+        }
+    }, [vehiclesWithLocation, onVehicleSelect])
+    const selectById = useCallback((id) => {
+        const vehicle = latestRef.current.byId.get(String(id))
+        if (vehicle) latestRef.current.onVehicleSelect(vehicle)
+    }, [])
 
     return (
         <div
@@ -249,20 +280,16 @@ function FleetMap({
                 />
 
                 {vehiclesWithLocation.map(vehicle => {
-                    const isSelected = String(vehicle.vehicle_id || vehicle.id) === String(selectedVehicleId)
+                    const id = vehicle.vehicle_id || vehicle.id
                     return (
-                        <Marker
-                            key={vehicle.vehicle_id || vehicle.id}
-                            position={[
-                                Number(vehicle.latitude),
-                                Number(vehicle.longitude),
-                            ]}
-                            icon={getMarkerIcon(normalizeVehicleStatus(vehicle), isSelected)}
-                            eventHandlers={{
-                                click: () => {
-                                    onVehicleSelect(vehicle)
-                                },
-                            }}
+                        <VehicleMarker
+                            key={id}
+                            id={id}
+                            lat={Number(vehicle.latitude)}
+                            lng={Number(vehicle.longitude)}
+                            status={normalizeVehicleStatus(vehicle)}
+                            selected={String(id) === String(selectedVehicleId)}
+                            onSelect={selectById}
                         />
                     )
                 })}

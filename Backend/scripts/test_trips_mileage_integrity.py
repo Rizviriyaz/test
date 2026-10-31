@@ -2,8 +2,8 @@
 Offline tests: trip mileage comes only from Wialon's Trips Report, and anything it cannot attribute or read is
 unknown, never a substitute or a double count.
 
-  - /api/fleet/trips: group and unit Trips Reports both failing -> mileage and trip count unknown, no
-    raw-message fallback, re-read after the short transient TTL
+  - /api/fleet/trips: a failing group Trips Report never falls back to per-unit reports or raw history: the last good
+    result is served marked stale, or the request fails (502), with a bounded backoff
   - unit Trips Report: a malformed (dropped) trip row marks distance_km incomplete as well as row_shape, and
     /api/vehicles/{id}/trips and /api/fleet/trips report the distance as unknown / partial
   - /api/dashboard/mileage: a unit on several group-report rows is unknown, not summed twice; distinct trips
@@ -45,6 +45,7 @@ NO_HISTORY = AssertionError("mileage must never fall back to raw message history
 def _patches(stack, engine):
     main._cache.clear()
     fa._analytics_cache.clear()
+    fa._TRIPS_BACKOFF._state.clear()
     stack.enter_context(patch("app.wialon_reports.wialon_request", engine))
     stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS))
     for target in ("app.main", "app.fleet_analytics"):
@@ -62,41 +63,67 @@ def _dashboard(group_id=None):
                                       to_date=None, group_id=group_id)
 
 
-def test_both_trips_reports_fail_unknown_not_cached():
-    engine = FakeReportEngine(fail_exec={TEMPLATE_GROUP_TRIPS, TEMPLATE_UNIT_TRIPS})
-    with ExitStack() as stack:
-        _patches(stack, engine)
-        res = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert all(v["gps_mileage_km"] is None and v["trip_count"] is None for v in res["vehicles"]), res["vehicles"]
-        assert all(v["trips"] == [] for v in res["vehicles"]), res["vehicles"]
-        summary = res["summary"]
-        assert summary["total_trips"] is None and summary["total_distance_partial"] is True, summary
-        assert summary["distance_unknown_vehicles"] == ["UNIT-A", "UNIT-B", "UNIT-C"], summary
-        assert summary["average_trip_distance_km"] is None and summary["longest_trip_km"] is None, summary
-        # No vehicle distance known at all: the fleet total is unknown, not 0 km
-        assert summary["total_distance_km"] is None, summary
-        # Odometer readings are a separate source and stay available
-        by_id = {v["vehicle_id"]: v for v in res["vehicles"]}
-        assert by_id[101]["cumulative_odometer_km"] == 120345.6, by_id[101]
-        before = engine.count("report/exec_report")
-        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") == before, "served from the short transient cache"
-        age_report_caches(fa.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
-        fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-        assert engine.count("report/exec_report") > before, "a failed report is re-read after the short transient TTL"
-    print("[PASS] Fleet trips: group and unit Trips Reports both failing -> mileage and trip count unknown, "
-          "no raw-history fallback, re-read after the short transient TTL.")
+def _unit_trips_execs(engine):
+    return sum(1 for svc, p in engine.calls if svc == "report/exec_report" and p.get("reportTemplateId") == TEMPLATE_UNIT_TRIPS)
 
 
-def test_unit_report_failure_only_affects_mileage_source():
-    # Group report fails but unit reports succeed: Trips Report mileage is still used, never raw history
+def test_group_trips_failure_without_earlier_result_is_502_and_backs_off():
+    # Group Trips report failing with nothing retained: the request fails (502), no per-unit Trips Report runs (one
+    # per fleet unit would pile onto Wialon while it struggles), and the window is not retried during the backoff
     engine = FakeReportEngine(fail_exec={TEMPLATE_GROUP_TRIPS})
     with ExitStack() as stack:
         _patches(stack, engine)
-        res = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-    assert all(v["gps_mileage_km"] == 63.0 and v["trip_count"] == 3 for v in res["vehicles"]), res["vehicles"]
-    assert res["summary"]["total_distance_partial"] is False, res["summary"]
-    print("[PASS] Fleet trips: group report failing -> unit Trips Reports used (63.0 km each), no raw history.")
+        for attempt in range(2):
+            try:
+                fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+                raise AssertionError("expected WialonAPIError (HTTP 502)")
+            except wr.WialonAPIError:
+                pass
+            if attempt == 0:
+                after_first = engine.count("report/exec_report")
+        assert _unit_trips_execs(engine) == 0, "no per-unit fallback"
+        assert engine.count("report/exec_report") == after_first, "not retried during the backoff"
+        # Once the backoff (15 s after the first failure) has passed, the report is tried again
+        real_clock = fa._TRIPS_BACKOFF._clock
+        stack.callback(setattr, fa._TRIPS_BACKOFF, "_clock", real_clock)
+        fa._TRIPS_BACKOFF._clock = lambda: real_clock() + 16
+        try:
+            fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        except wr.WialonAPIError:
+            pass
+        assert engine.count("report/exec_report") > after_first and _unit_trips_execs(engine) == 0
+    print("[PASS] Fleet trips: group report failing with nothing retained -> 502, zero per-unit reports, no retry "
+          "during the 15 s backoff, retried after it.")
+
+
+def test_group_trips_failure_serves_last_good_marked_stale():
+    # A good result first, then the group report fails once it expired: the last good result is served marked stale
+    # with the time it was read, never rebuilt from per-unit reports; a success clears the stale state
+    engine = FakeReportEngine()
+    with ExitStack() as stack:
+        _patches(stack, engine)
+        good = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert good["stale"] is False and good["retrieved_at"], good
+        age_report_caches(4000)
+        engine.fail_exec.add(TEMPLATE_GROUP_TRIPS)
+        stale = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert stale["stale"] is True and stale["retrieved_at"] == good["retrieved_at"], stale
+        assert stale["summary"] == good["summary"] and stale["vehicles"] == good["vehicles"]
+        assert _unit_trips_execs(engine) == 0, "no per-unit fallback"
+        # During the backoff the stale result is served without asking Wialon
+        before = engine.count("report/exec_report")
+        assert fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)["stale"] is True
+        assert engine.count("report/exec_report") == before
+        # Wialon back after the backoff: a fresh result, not stale
+        engine.fail_exec.discard(TEMPLATE_GROUP_TRIPS)
+        real_clock = fa._TRIPS_BACKOFF._clock
+        stack.callback(setattr, fa._TRIPS_BACKOFF, "_clock", real_clock)
+        fa._TRIPS_BACKOFF._clock = lambda: real_clock() + 16
+        fresh = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+        assert fresh["stale"] is False and fresh["retrieved_at"] >= good["retrieved_at"]
+        assert fresh["summary"]["total_distance_km"] == good["summary"]["total_distance_km"]
+    print("[PASS] Fleet trips: group report failing after a good read -> last good result marked stale with its read "
+          "time (zero per-unit reports, no Wialon call during the backoff); fresh again once Wialon answers.")
 
 
 def _tables_with_malformed_trip():
@@ -119,15 +146,9 @@ def test_malformed_trip_row_marks_distance_incomplete():
         assert "distance_km" in res["incomplete_fields"] and "row_shape" in res["incomplete_fields"], res
         main.get_vehicle_trips(vehicle_id=101, hours=24, from_time=FROM_TS, to_time=TO_TS)
         assert engine.count("report/exec_report") == 2, "an incomplete trip list must not be served from cache"
-
-    with ExitStack() as stack:
-        _patches(stack, FakeReportEngine(tables=_tables_with_malformed_trip(), fail_exec={TEMPLATE_GROUP_TRIPS}))
-        res = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-    assert all(v["gps_mileage_km"] is None for v in res["vehicles"]), "a partial sum is not a vehicle's mileage"
-    assert res["summary"]["total_distance_partial"] is True, res["summary"]
-    assert res["summary"]["total_distance_km"] is None, "no usable mileage for any vehicle -> unknown total, not 0"
-    print("[PASS] Malformed trip row -> distance_km incomplete (with row_shape) in the unit report, the vehicle "
-          "trips route (not cached) and fleet trips (unknown, partial).")
+    # (Fleet trips never read per-unit reports: they come from the group report only, or its last good result)
+    print("[PASS] Malformed trip row -> distance_km incomplete (with row_shape) in the unit report and the vehicle "
+          "trips route (not cached).")
 
 
 def test_dashboard_duplicate_rows_not_double_counted():
@@ -160,10 +181,6 @@ def test_distinct_equal_distance_trips_are_all_counted():
         res = main.get_vehicle_trips(vehicle_id=101, hours=24, from_time=FROM_TS, to_time=TO_TS)
     assert res["trip_count"] == 2 and res["incomplete_fields"] == [], res
     assert sum(trip["distance_km"] for trip in res["trips"]) == 21.0, res["trips"]
-    with ExitStack() as stack:
-        _patches(stack, FakeReportEngine(tables=t, fail_exec={TEMPLATE_GROUP_TRIPS}))
-        res = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-    assert all(v["gps_mileage_km"] == 21.0 and v["trip_count"] == 2 for v in res["vehicles"]), res["vehicles"]
     print("[PASS] Distinct trips with equal distances are all counted (21.0 km over 2 trips).")
 
 
@@ -319,7 +336,10 @@ def test_dashboard_summary_passes_unknown_distance_through():
         res = main.get_dashboard_summary(hours=24)
     s = res["summary"]
     assert s["total_distance_km"] is None and s["total_distance_partial"] is True, s
-    print("[PASS] Dashboard summary: unknown fleet distance passes through as null (partial), not 0.")
+    assert s["total_trips"] is None and s["total_trips_partial"] is True, s
+    assert _unit_trips_execs(engine) == 0, "no per-unit fallback"
+    print("[PASS] Dashboard summary: group Trips report failing (nothing retained) -> distance and trips null "
+          "(partial), not 0; no per-unit fallback.")
 
 
 def test_ai_vehicle_trips_note_discloses_dropped_rows():
@@ -453,8 +473,8 @@ def test_ai_deep_analytics_uses_trips_report_distance():
 def main_():
     guard = OfflineGuard().start()
     tests = [
-        test_both_trips_reports_fail_unknown_not_cached,
-        test_unit_report_failure_only_affects_mileage_source,
+        test_group_trips_failure_without_earlier_result_is_502_and_backs_off,
+        test_group_trips_failure_serves_last_good_marked_stale,
         test_malformed_trip_row_marks_distance_incomplete,
         test_dashboard_duplicate_rows_not_double_counted,
         test_distinct_equal_distance_trips_are_all_counted,

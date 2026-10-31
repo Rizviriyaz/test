@@ -16,6 +16,7 @@ import {
 
 import { getCachedFleetIdleAnalytics, getFleetIdleAnalytics } from "../api/fleetApi"
 import AppShell from "../components/Common/AppShell"
+import FreshnessBadge from "../components/Common/FreshnessBadge"
 import { MobileNavButton } from "../components/Layout/Sidebar"
 import SectionCard from "../components/Common/SectionCard"
 import SearchInput from "../components/Common/SearchInput"
@@ -477,6 +478,7 @@ export default function IdleAnalytics() {
                     </div>
 
                     <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+                        <FreshnessBadge freshness={analytics?.freshness} loading={loading} error={error || null} hasData={Boolean(analytics)} />
                         {lastUpdated && (
                             <span className="hidden h-8 items-center gap-1.5 px-1 text-xs tabular-nums text-slate-500 sm:inline-flex" title="Updated (UAE time)">
                                 <span className="h-1.5 w-1.5 rounded-full bg-status-moving" aria-hidden="true" />

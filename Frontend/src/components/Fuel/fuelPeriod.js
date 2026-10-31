@@ -56,6 +56,26 @@ export function comparisonWindow(month, count = 6) {
     return { months, from: monthBounds(months[0]).from, to: monthBounds(month).to }
 }
 
+// The backend's latest month with matched monthly-summary fuel data (/api/fuel/analytics/latest-month) when it is a
+// valid month up to the current one, else null (none, or an invalid answer)
+export function validLatestMonth(latestMonth, today) {
+    return isMonth(latestMonth) && latestMonth <= monthOf(today) ? latestMonth : null
+}
+
+// The month the "Jump to latest month with data" button offers: the latest month once found, unless it is already the
+// selected month; null otherwise (still looking, none, failed). Only a click on the button selects it.
+export function jumpTargetMonth(latestMonth, selectedMonth) {
+    return latestMonth?.status === "found" && isMonth(latestMonth.month) && latestMonth.month !== selectedMonth
+        ? latestMonth.month
+        : null
+}
+
+// Whether the matched reporting scope holds dated (transaction-level) rows: dated purchases or dated refunds. Monthly
+// summary rows never count, so a month reported from monthly summaries only has no daily analysis.
+export function hasReportedDailyRows(efficiency) {
+    return (Number(efficiency?.dated_purchase_count) || 0) + (Number(efficiency?.refund_count) || 0) > 0
+}
+
 // One entry per month; a month the API returned no row for stays null (no record), never a zero
 export function alignMonths(months, rows) {
     const byPeriod = new Map((Array.isArray(rows) ? rows : []).map((r) => [String(r?.period || "").slice(0, 7), r]))

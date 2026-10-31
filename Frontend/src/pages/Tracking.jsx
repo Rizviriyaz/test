@@ -11,9 +11,11 @@ import FleetMap from "../components/FleetMap"
 import { isValidCoordinate } from "../utils/coordinates"
 import Sidebar, { SidebarProvider } from "../components/Layout/Sidebar"
 import PageHeader from "../components/Common/PageHeader"
+import FreshnessBadge from "../components/Common/FreshnessBadge"
 import { EmptyState, ErrorBanner, LoadingState } from "../components/Common/StateViews"
 import { LazyVehicleDetailDrawer as VehicleDetailDrawer } from "../components/Vehicles/lazyVehicleDetailDrawer"
 import { LIVE_STATUSES, countByStatus, formatAge, isPositionStale, isTelemetryStale, normalizeVehicleStatus } from "../utils/vehicleStatus"
+import { STALE_LIVE_FLEET_MESSAGE, liveFleetRead } from "../utils/fleetNow"
 
 function formatLastUpdate(vehicle) {
     // A recent message with an old GPS fix: show the fix age, never "Just now"
@@ -71,6 +73,9 @@ function Tracking() {
     const [loading, setLoading] = useState(() => !cachedVehicles)
     const [refreshing, setRefreshing] = useState(false)
     const [error, setError] = useState(null)
+    // Freshness of the live fleet shown (backend block) and whether the latest live request failed outright
+    const [liveFreshness, setLiveFreshness] = useState(() => cachedVehicles?.data?.freshness ?? null)
+    const [liveFailed, setLiveFailed] = useState(false)
     const [lastSyncTime, setLastSyncTime] = useState(() => (cachedVehicles
         ? new Date(cachedVehicles.fetchedAt).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
         : null))
@@ -97,6 +102,19 @@ function Tracking() {
         }
     }
 
+    // A /api/vehicles response: the sync time is when the backend read Wialon, never the browser's clock; a stale read
+    // (the backend's last good fleet after a Wialon failure) is shown with that time and an error, never as current
+    const applyLiveRead = useCallback((data) => {
+        const read = liveFleetRead(data)
+        setVehicles(data?.vehicles || [])
+        setError(read.stale ? STALE_LIVE_FLEET_MESSAGE : null)
+        setLiveFreshness(data?.freshness ?? null)
+        setLiveFailed(false)
+        setLastSyncTime(read.retrievedAt
+            ? read.retrievedAt.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : null)
+    }, [])
+
     /*
         Load fleet vehicles
     */
@@ -104,16 +122,15 @@ function Tracking() {
         if (isManual) setRefreshing(true)
         try {
             const data = await getVehicles()
-            setVehicles(data?.vehicles || [])
-            setError(null)
-            setLastSyncTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }))
+            applyLiveRead(data)
         } catch (err) {
             setError(err.message || "Failed to load vehicle telemetry")
+            setLiveFailed(true)
         } finally {
             setLoading(false)
             if (isManual) setRefreshing(false)
         }
-    }, [])
+    }, [applyLiveRead])
 
     useEffect(() => {
         let mounted = true
@@ -127,14 +144,11 @@ function Tracking() {
             isFetching = true
             try {
                 const data = await getVehicles()
-                if (mounted) {
-                    setVehicles(data?.vehicles || [])
-                    setError(null)
-                    setLastSyncTime(new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }))
-                }
+                if (mounted) applyLiveRead(data)
             } catch (err) {
                 if (mounted) {
                     setError(err.message || "Failed to load vehicle telemetry")
+                    setLiveFailed(true)
                 }
             } finally {
                 isFetching = false
@@ -158,7 +172,7 @@ function Tracking() {
             mounted = false
             if (timerId) clearTimeout(timerId)
         }
-    }, [])
+    }, [applyLiveRead])
 
     /*
         Keep selected vehicle synchronized with live refresh
@@ -289,6 +303,7 @@ function Tracking() {
                             lastUpdated={lastSyncTime}
                             className="mb-0 pb-0 border-b-0"
                         >
+                            <FreshnessBadge label="Live" freshness={liveFreshness} error={liveFailed ? "failed" : null} hasData={vehicles.length > 0} loading={loading} />
                             <div className="hidden md:flex items-center gap-2 text-xs text-slate-600 bg-slate-100/90 rounded-lg px-2.5 py-1 font-medium">
                                 <span className="font-semibold text-slate-900 tabular-nums">{vehicles.length}</span>
                                 <span>total units</span>

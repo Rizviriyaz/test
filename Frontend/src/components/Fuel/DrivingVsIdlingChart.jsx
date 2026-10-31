@@ -133,7 +133,7 @@ export default function DrivingVsIdlingChart({
                                 unavailable={fuelUnavailable}
                             />
                         </div>
-                        <p className="mt-2 text-[11px] text-slate-400">Fuel split covers vehicles with Wialon telemetry only.</p>
+                        <p className="mt-2 text-[11px] text-slate-400">Matched Wialon vehicles with telemetry only.</p>
                     </div>
                 )}
             </SectionCard>

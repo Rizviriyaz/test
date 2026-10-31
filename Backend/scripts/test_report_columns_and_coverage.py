@@ -269,13 +269,21 @@ def test_fleet_trips_guessed_column_and_missing_row():
           "unknown (not 0 km), flagged partial.")
 
 
-def test_fleet_trips_unit_path_guessed_column():
+def test_fleet_trips_group_failure_has_no_unit_report_fallback():
+    # The guessed-column rules of the unit report are covered by test_unit_routes_guessed_columns; fleet trips never
+    # reach that report: a failed group report is a 502 (no earlier result), not one unit report per vehicle
+    engine = FakeReportEngine(include_header=False, fail_exec={TEMPLATE_GROUP_TRIPS})
     with ExitStack() as stack:
-        _main_patches(stack, FakeReportEngine(include_header=False, fail_exec={TEMPLATE_GROUP_TRIPS}))
-        res = fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
-    assert all(v["gps_mileage_km"] is None for v in res["vehicles"]), res["vehicles"]
-    assert all(v["trip_count"] is not None for v in res["vehicles"]), "trip counts are still real"
-    print("[PASS] Fleet trips (unit-report fallback): guessed Mileage column -> distance unknown, trip counts kept.")
+        _main_patches(stack, engine)
+        fa._TRIPS_BACKOFF._state.clear()
+        try:
+            fa.get_trips_mileage_analytics(from_time=FROM_TS, to_time=TO_TS)
+            raise AssertionError("expected WialonAPIError")
+        except wr.WialonAPIError:
+            pass
+    unit_execs = [p for svc, p in engine.calls if svc == "report/exec_report" and p.get("reportTemplateId") == TEMPLATE_UNIT_TRIPS]
+    assert unit_execs == [], unit_execs
+    print("[PASS] Fleet trips: group report failing -> 502, no unit-report fallback.")
 
 
 def test_utilization_guessed_column_and_missing_row():
@@ -704,7 +712,7 @@ def main_() -> int:
         test_dashboard_mileage_outside_unit_sharing_in_group_name,
         test_dashboard_mileage_report_group_membership_unknown,
         test_fleet_trips_guessed_column_and_missing_row,
-        test_fleet_trips_unit_path_guessed_column,
+        test_fleet_trips_group_failure_has_no_unit_report_fallback,
         test_utilization_guessed_column_and_missing_row,
         test_idle_guessed_column_and_missing_row,
         test_idle_unmatched_report_row_flagged_not_cached,

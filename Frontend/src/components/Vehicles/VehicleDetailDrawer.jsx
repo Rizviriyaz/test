@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react"
 import { Link } from "react-router-dom"
 import { Loader2, ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
+import FreshnessBadge from "../Common/FreshnessBadge"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
 import { isPositionStale, lastSeenLabel, normalizeVehicleStatus } from "../../utils/vehicleStatus"
@@ -25,10 +26,13 @@ import {
 
 import { ScrollArea } from "@/components/website/scroll-area"
 
-function Section({ title, children }) {
+function Section({ title, children, aside = null }) {
     return (
         <section className="px-5 py-3.5">
-            <h3 className="mb-1.5 text-xs font-semibold text-slate-900">{title}</h3>
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+                <h3 className="text-xs font-semibold text-slate-900">{title}</h3>
+                {aside}
+            </div>
             <dl className="divide-y divide-slate-100">{children}</dl>
         </section>
     )
@@ -270,7 +274,10 @@ export default function VehicleDetailDrawer({
                             </Row>
                         </Section>
 
-                        <Section title="Today">
+                        <Section
+                            title="Today"
+                            aside={<FreshnessBadge label="Trips" freshness={tripsData?.freshness} loading={loadingTrips} hasData={Boolean(tripsData)} />}
+                        >
                             <Row
                                 label="Distance"
                                 hint={!loadingTrips ? distanceHint : null}
