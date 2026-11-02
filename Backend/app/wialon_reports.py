@@ -40,6 +40,10 @@ TEMPLATE_ID_UNIT_TRIPS = get_env_int("WIALON_TEMPLATE_UNIT_TRIPS", 4)
 TEMPLATE_ID_UNIT_ENGINE = get_env_int("WIALON_TEMPLATE_UNIT_ENGINE", 1)
 TEMPLATE_ID_GROUP_TRIPS = get_env_int("WIALON_TEMPLATE_GROUP_TRIPS", 5)
 TEMPLATE_ID_GROUP_ENGINE = get_env_int("WIALON_TEMPLATE_GROUP_ENGINE", 2)
+# Idle Dashboard events: the per-unit "Idle Report-Unit" template (Idling digital sensor intervals, one sub-row per
+# event) lives on a separate resource; the report resource above is unchanged.
+IDLE_REPORT_RESOURCE_ID = get_env_int("WIALON_IDLE_REPORT_RESOURCE_ID", 600441379)
+TEMPLATE_ID_UNIT_IDLE_EVENTS = get_env_int("WIALON_TEMPLATE_UNIT_IDLE_EVENTS", 28)
 
 # Optional explicit 'All Unit' group ID. 0 (the default) means it is discovered from the
 # authenticated account by name (see resolve_all_units_group_id).
@@ -1155,3 +1159,147 @@ def execute_wialon_group_engine_idle_report(
                     wialon_request("report/cleanup_result", {}, sid=sid)
                 except Exception as clean_err:
                     logging.debug(f"Failed to cleanup group engine report: {clean_err}")
+
+
+# Template columns of the Idle Report-Unit table, located by Wialon's system column name (header_type), never by
+# position. The time and duration columns are required; the others are left unknown when the template lacks them.
+_IDLE_EVENT_REQUIRED_COLUMNS = ("time_begin", "time_end", "duration")
+_IDLE_EVENT_OPTIONAL_COLUMNS = ("location", "driver", "sensor_name", "user_column")
+
+
+def _idle_event_text(cell: Any) -> Optional[str]:
+    """Text of a cell, or None when it is empty or a Wialon dash placeholder."""
+    if cell is None:
+        return None
+    text = extract_cell_text(cell).strip()
+    return None if not text or _DASH_PLACEHOLDER.fullmatch(text) else text
+
+
+def _valid_position(lat: Any, lng: Any) -> bool:
+    return (isinstance(lat, (int, float)) and isinstance(lng, (int, float))
+            and not isinstance(lat, bool) and not isinstance(lng, bool)
+            and -90 <= lat <= 90 and -180 <= lng <= 180 and (lat, lng) != (0, 0))
+
+
+def _idle_report_event(unit_id: int, subrow: Dict[str, Any], cols: Dict[str, Optional[int]]) -> Optional[Dict[str, Any]]:
+    """
+    One idle event from a sub-row, or None when its start, end or duration cannot be read (the caller flags the unit's
+    list incomplete). Times are the epochs (`v`) of the Activated/Deactivated cells, else Wialon's interval bounds; the
+    duration is Wialon's own Idling Duration cell. Position and address come only from a valid location cell.
+    """
+    cells = subrow.get("c") or []
+
+    def at(key):
+        idx = cols.get(key)
+        return cells[idx] if idx is not None and len(cells) > idx else None
+
+    start = _time_cell_value(at("time_begin")) or _time_cell_value({"v": subrow.get("t1")})
+    end = _time_cell_value(at("time_end")) or _time_cell_value({"v": subrow.get("t2")})
+    duration = parse_duration_strict(at("duration"))
+    if start is None or end is None or end < start or duration is None or duration < 0:
+        return None
+    loc = _location_cell(at("location"))
+    lat, lng, address = loc if loc is not None else (None, None, None)
+    location_verified = loc is not None and _valid_position(lat, lng)
+    if not location_verified:
+        lat = lng = None
+    return {
+        "id": f"{unit_id}-{start}",
+        "vehicle_id": unit_id,
+        "start_time": start,
+        "end_time": end,
+        "duration": duration,
+        "duration_minutes": round(duration / 60.0, 2),
+        "location": {"latitude": lat, "longitude": lng},
+        "address": (address or "").strip() or "Unknown Location",
+        "location_verified": location_verified,
+        "driver": _idle_event_text(at("driver")),
+        "sensor_name": _idle_event_text(at("sensor_name")),
+        "department": _idle_event_text(at("user_column")),
+    }
+
+
+def execute_wialon_unit_idle_events_report(
+    sid: str, unit_id: int, from_time_utc: int, to_time_utc: int
+) -> Dict[str, Any]:
+    """
+    Execute the Idle Report-Unit template (TEMPLATE_ID_UNIT_IDLE_EVENTS on IDLE_REPORT_RESOURCE_ID) for one unit and
+    return its idle events, oldest first, as {"events", "complete", "read_at", "rows_total", "invalid_events"}.
+
+    The table is grouped by day; every row's sub-rows are the discrete idle events. An event still in progress is
+    reported with its end at the unit's latest message, so a later run returns the same event (same start) with a
+    later end and longer duration; the caller decides whether it is ongoing. `complete` is False when a row's
+    sub-rows could not all be read, a row has no sub-rows, or an event's times or duration were unreadable.
+    Raises WialonAPIError when the report fails or its required columns are missing.
+    """
+    with _holding_report_lock("unit_idle_events", sid):
+        report_executed = False
+        try:
+            res = wialon_request("report/exec_report", {
+                "reportResourceId": IDLE_REPORT_RESOURCE_ID,
+                "reportTemplateId": TEMPLATE_ID_UNIT_IDLE_EVENTS,
+                "reportObjectId": int(unit_id),
+                "reportObjectSecId": 0,
+                "interval": {"flags": 0, "from": int(from_time_utc), "to": int(to_time_utc)},
+            }, sid=sid, timeout=60)
+            if not isinstance(res, dict) or "error" in res or "reportResult" not in res:
+                logging.warning("Wialon idle events report exec failed for unit %s: %s", unit_id, res)
+                raise WialonAPIError(f"Wialon idle events report failed for unit {unit_id}",
+                                     code=res.get("error") if isinstance(res, dict) else None)
+            report_executed = True
+            read_at = int(time.time())
+            tables = res["reportResult"].get("tables", [])
+            if not tables:
+                # No table: Wialon found no idle interval for the unit in the window
+                return {"events": [], "complete": True, "read_at": read_at, "rows_total": 0, "invalid_events": 0}
+
+            table = tables[0]
+            header_type = table.get("header_type") or []
+            cols = {name: (header_type.index(name) if name in header_type else None)
+                    for name in _IDLE_EVENT_REQUIRED_COLUMNS + _IDLE_EVENT_OPTIONAL_COLUMNS}
+            missing = [name for name in _IDLE_EVENT_REQUIRED_COLUMNS if cols[name] is None]
+            if missing:
+                raise WialonAPIError(f"Wialon idle events report has no {', '.join(missing)} column")
+
+            total_rows = int(table.get("rows", 0))
+            rows = _fetch_all_rows(sid, total_rows, f"idle events report of unit {unit_id}") if total_rows else []
+            subrows = _fetch_rows_subrows(sid, rows, f"idle events report of unit {unit_id}")
+            complete = True
+            events_by_id: Dict[str, Dict[str, Any]] = {}
+            invalid = 0
+            for idx, row in enumerate(rows):
+                if not row.get("d"):
+                    # A day row without event sub-rows: its events cannot be listed, and none is invented
+                    complete = False
+                    continue
+                row_subrows, row_complete = subrows.get(idx, ([], False))
+                complete = complete and row_complete
+                for sub in row_subrows:
+                    ev = _idle_report_event(int(unit_id), sub, cols)
+                    if ev is None:
+                        invalid += 1
+                        continue
+                    # One event per unit and start: a repeated sub-row keeps the reading with the latest end
+                    prev = events_by_id.get(ev["id"])
+                    if prev is None or ev["end_time"] > prev["end_time"]:
+                        events_by_id[ev["id"]] = ev
+            if invalid:
+                logging.warning("Wialon idle events report of unit %s: %s unreadable events", unit_id, invalid)
+            return {
+                "events": sorted(events_by_id.values(), key=lambda e: e["start_time"]),
+                "complete": complete and not invalid,
+                "read_at": read_at,
+                "rows_total": total_rows,
+                "invalid_events": invalid,
+            }
+        except WialonAPIError:
+            raise
+        except Exception as exc:
+            logging.error("Error executing Wialon idle events report for unit %s: %s", unit_id, exc)
+            raise WialonAPIError(f"Wialon idle events report failed for unit {unit_id}") from exc
+        finally:
+            if report_executed:
+                try:
+                    wialon_request("report/cleanup_result", {}, sid=sid)
+                except Exception as clean_err:
+                    logging.debug(f"Failed to cleanup idle events report: {clean_err}")

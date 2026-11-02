@@ -1,9 +1,10 @@
-import { useEffect } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet"
-import { X, MapPin, Truck, Clock3, Users, ArrowUpRight, Calendar, Navigation } from "lucide-react"
+import { X, MapPin, Truck, Clock3, Users, ArrowUpRight, Calendar, Navigation, User, Phone, Building2, Loader2 } from "lucide-react"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
+import { getIdleEventDriver } from "../../api/fleetApi"
 import { formatUAEDate, formatUAETime } from "../../utils/datetime"
 
 function getIdleMarkerIcon() {
@@ -34,6 +35,94 @@ const formatDuration = (seconds) => {
     return `${sec}s`
 }
 
+// Driver card: an idle event's driver is looked up on click (vehicle + event start, Wialon binding history); the
+// phone is shown only when the backend matched the driver reliably
+function DriverCard({ event }) {
+    const driverName = String(event.driver || "").trim()
+    const eventKey = `${event.vehicle_id}-${event.start_time}`
+    // { key, status: "loading" | "done" | "error", data } for the event it was read for
+    const [lookup, setLookup] = useState(null)
+    const inFlightRef = useRef(null)
+    const current = lookup && lookup.key === eventKey ? lookup : null
+
+    const reveal = useCallback(async () => {
+        if (!driverName || inFlightRef.current === eventKey || current?.status === "done") return
+        inFlightRef.current = eventKey
+        setLookup({ key: eventKey, status: "loading", data: null })
+        try {
+            const data = await getIdleEventDriver({ vehicle_id: event.vehicle_id, start_time: event.start_time, driver_name: driverName })
+            setLookup({ key: eventKey, status: "done", data })
+        } catch (err) {
+            console.error("Failed to load idle event driver:", err)
+            setLookup({ key: eventKey, status: "error", data: null })
+        } finally {
+            if (inFlightRef.current === eventKey) inFlightRef.current = null
+        }
+    }, [driverName, eventKey, event.vehicle_id, event.start_time, current?.status])
+
+    const label = (
+        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+            <User className="h-3.5 w-3.5 text-slate-500" />
+            <span>Driver</span>
+        </div>
+    )
+
+    if (!driverName) {
+        return (
+            <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 opacity-70" aria-disabled="true">
+                {label}
+                <p className="mt-1 text-xs font-medium text-slate-500">No driver details found.</p>
+            </div>
+        )
+    }
+
+    const loading = current?.status === "loading"
+    const matched = current?.status === "done" && current.data?.status === "matched"
+    return (
+        <button
+            type="button"
+            onClick={reveal}
+            disabled={loading}
+            aria-expanded={current?.status === "done"}
+            className="rounded-lg border border-slate-200/80 bg-white p-3 text-left transition hover:border-brand/40 hover:bg-slate-50 cursor-pointer disabled:cursor-wait"
+            title={current ? undefined : "Show driver details"}
+        >
+            {label}
+            <p className="mt-1 text-sm font-semibold text-slate-900 truncate">
+                {matched ? current.data.driver_name : driverName}
+            </p>
+            {loading ? (
+                <p className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
+                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Loading driver details…
+                </p>
+            ) : current?.status === "error" ? (
+                <p className="mt-1 text-[11px] font-medium text-red-700">Driver details could not be loaded. Click to retry.</p>
+            ) : current?.status === "done" ? (
+                <>
+                {matched && (
+                    <p className="mt-0.5 text-[11px] tabular-nums text-slate-500">
+                        {current.data.driver_id ? `Driver ID ${current.data.driver_id}` : "Driver ID not available."}
+                    </p>
+                )}
+                {matched && current.data.phone ? (
+                    <a
+                        href={`tel:${current.data.phone}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                    >
+                        <Phone className="h-3 w-3" aria-hidden="true" /> {current.data.phone}
+                    </a>
+                ) : (
+                    <p className="mt-1 text-[11px] text-slate-500">Phone number not available.</p>
+                )}
+                </>
+            ) : (
+                <p className="mt-1 text-[11px] text-slate-500">Show contact details</p>
+            )}
+        </button>
+    )
+}
+
 export default function IdleMapModal({ event, onClose }) {
     useEffect(() => {
         const handleKeyDown = (e) => {
@@ -61,6 +150,14 @@ export default function IdleMapModal({ event, onClose }) {
     const mapPosition = hasCoordinates ? [lat, lng] : null
     const googleMapsUrl = hasCoordinates ? `https://www.google.com/maps?q=${lat},${lng}` : null
     const address = event.address || (event.location && event.location.address) || ""
+    // An individual idle event (a hotspot selection has no vehicle or start time): only events get the
+    // Group, Driver and Department cards
+    const isIdleEvent = event.vehicle_id != null && event.start_time != null && event.location_key == null
+    // The vehicle's actual Wialon groups; a vehicle in none is shown as General Fleet
+    const groupNames = Array.isArray(event.vehicle_groups)
+        ? event.vehicle_groups
+        : (event.group_name && event.group_id ? [event.group_name] : [])
+    const department = String(event.vehicle_department || "").trim()
 
     return createPortal(
         <div
@@ -185,18 +282,42 @@ export default function IdleMapModal({ event, onClose }) {
                             </p>
                         </div>
 
-                        {/* Customer Group */}
-                        {event.group_name ? (
+                        {/* Wialon Group */}
+                        {isIdleEvent && (
                             <div className="rounded-lg border border-slate-200/80 bg-white p-3">
                                 <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
                                     <Users className="h-3.5 w-3.5 text-slate-500" />
                                     <span>Group</span>
                                 </div>
-                                <p className="mt-1 text-sm font-semibold text-slate-900 truncate">
-                                    {event.group_name}
-                                </p>
+                                {groupNames.length > 0 ? (
+                                    <p className="mt-1 text-sm font-semibold text-slate-900 truncate" title={groupNames.join(", ")}>
+                                        {groupNames.join(", ")}
+                                    </p>
+                                ) : (
+                                    <p className="mt-1 text-sm font-semibold text-slate-900 truncate">General Fleet</p>
+                                )}
                             </div>
-                        ) : null}
+                        )}
+
+                        {/* Driver (details on click) */}
+                        {isIdleEvent && <DriverCard event={event} />}
+
+                        {/* Department (unit Profile) */}
+                        {isIdleEvent && (
+                            <div className="rounded-lg border border-slate-200/80 bg-white p-3">
+                                <div className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-400">
+                                    <Building2 className="h-3.5 w-3.5 text-slate-500" />
+                                    <span>Department</span>
+                                </div>
+                                {department ? (
+                                    <p className="mt-1 text-sm font-semibold text-slate-900 truncate" title={department}>
+                                        {department}
+                                    </p>
+                                ) : (
+                                    <p className="mt-1 text-xs font-medium text-slate-500">Department not available.</p>
+                                )}
+                            </div>
+                        )}
 
                         {/* Start Time (UAE Time) */}
                         <div className="rounded-lg border border-slate-200/80 bg-white p-3">

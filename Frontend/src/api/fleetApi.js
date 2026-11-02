@@ -206,9 +206,9 @@ export async function getVehicleSafety(vehicleId, options = {}) {
 
 const FLEET_IDLE_TTL_MS = 30000
 
-function fleetIdleAnalyticsUrl(options = {}) {
+function fleetIdleAnalyticsUrl(options = {}, path = "/api/idle/fleet-analytics") {
     const { hours, from_time, to_time, timeframe, from_date, to_date, group_id, vehicle_id, include_events, skip_cache, refresh, skipCache } = options
-    let url = `${API_URL}/api/idle/fleet-analytics`
+    let url = `${API_URL}${path}`
     const params = new URLSearchParams()
 
     if (timeframe) {
@@ -264,6 +264,28 @@ export function getCachedFleetIdleAnalytics(options = {}) {
 export function peekFleetIdleAnalytics(options = {}, maxAgeMs = STALE_REPORT_MS) {
     const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl(options)
     return shouldBypass ? null : peekClientCache(cacheKey, maxAgeMs)
+}
+
+// Idle Dashboard and Vehicle Details idle events (Wialon Idle Report-Unit template); same response shape and options
+// as getFleetIdleAnalytics (include_events is ignored: events are always included). Windows: last 7 UAE days.
+const IDLE_EVENTS_PATH = "/api/idle/events"
+
+export async function getIdleEvents(options = {}) {
+    const { url, shouldBypass, cacheKey } = fleetIdleAnalyticsUrl({ ...options, include_events: undefined }, IDLE_EVENTS_PATH)
+    return deduplicatedFetch(url, { ...options, skipCache: shouldBypass, cacheKey }, FLEET_IDLE_TTL_MS)
+}
+
+// Driver of one idle event (Idle Event Details card): the driver bound to the vehicle at the event start, with the phone
+// only when it agrees with the event's driver name. Read on demand and never kept in the client cache.
+export async function getIdleEventDriver({ vehicle_id, start_time, driver_name }, options = {}) {
+    const params = new URLSearchParams({ vehicle_id, start_time, driver_name: driver_name || "" })
+    return deduplicatedFetch(`${API_URL}${IDLE_EVENTS_PATH}/driver?${params.toString()}`, options, 0)
+}
+
+// The still-fresh client-cached idle events response for these options, or null (never fetches)
+export function getCachedIdleEvents(options = {}) {
+    const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl({ ...options, include_events: undefined }, IDLE_EVENTS_PATH)
+    return shouldBypass ? null : getFromClientCache(cacheKey, FLEET_IDLE_TTL_MS)
 }
 
 export async function sendAiChatMessage(messages) {

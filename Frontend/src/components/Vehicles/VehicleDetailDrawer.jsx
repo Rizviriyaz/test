@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Link } from "react-router-dom"
 import { Loader2, ArrowUpRight, X } from "lucide-react"
-import { getVehicleTrips, getFleetIdleAnalytics } from "../../api/fleetApi"
+import { getVehicleTrips, getIdleEvents } from "../../api/fleetApi"
 import FreshnessBadge from "../Common/FreshnessBadge"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
 import FleetStatusBadge from "../Common/FleetStatusBadge"
@@ -133,7 +133,7 @@ export default function VehicleDetailDrawer({
             const refreshing = idleLoadedForRef.current === vid
             try {
                 if (!refreshing) setLoadingIdleEvents(true)
-                const res = await getFleetIdleAnalytics({ vehicle_id: vid, timeframe: "today", include_events: true })
+                const res = await getIdleEvents({ vehicle_id: vid, timeframe: "today" })
                 if (!active) return
                 const evs = (res?.events || []).filter(e => String(e.vehicle_id) === String(vid))
                 setVehicleIdleEvents(evs)

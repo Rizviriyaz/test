@@ -51,6 +51,18 @@ from app.vehicles import (
     idle_start_times,
 )
 from app.status import calculate_idle_duration
+from app.idle_events import (
+    IDLE_EVENTS_MAX_DAYS,
+    IDLE_EVENTS_TTL_SECONDS,
+    IDLE_ONGOING_MAX_END_AGE_SECONDS,
+    idling_sensor_values,
+    is_ongoing,
+    ongoing_candidate,
+    read_units_idle_events,
+    resolve_event_driver,
+    sensor_names_of,
+    vehicle_department,
+)
 from app.fuel.routes import router as fuel_router
 
 # Routine PERF timings, cache state and calculation traces log at DEBUG; set LOG_LEVEL=DEBUG to see them.
@@ -151,6 +163,7 @@ async def require_supabase_auth(request: Request, call_next):
         "/api/vehicles",
         "/api/dashboard/mileage",
         "/api/idle/fleet-analytics",
+        "/api/idle/events",
         "/api/fleet/health",
         "/api/fleet/safety",
         "/api/fleet/alerts",
@@ -2298,6 +2311,322 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
         _keep_engine_report(window_spec, report_group_id, rep_res, include_events, event_vehicle_names,
                             eff_from, eff_to, current_ts, response_ttl)
     set_cache(cache_key, response_payload, ttl_seconds=response_ttl)
+    return response_payload
+
+
+@app.get("/api/idle/events")
+@timed_calculation("/api/idle/events")
+@_fresh(lambda r: window_target((r.get("timeframe") or {}).get("to_time"), TARGET_TODAY_IDLE_S))
+def get_idle_events_analytics(
+    request: Request = None,
+    hours: Annotated[int, Query(ge=1, le=IDLE_EVENTS_MAX_DAYS * 24)] = 24,
+    timeframe: str = None,
+    from_date: str = None,
+    to_date: str = None,
+    from_time: int = None,
+    to_time: int = None,
+    group_id: int = None,
+    vehicle_id: int = None,
+    refresh: bool = False,
+    skip_cache: bool = False,
+):
+    """
+    Idle Dashboard analytics built from Wialon's per-unit Idle Report-Unit template (app/idle_events.py): discrete
+    idle events (start, end, Wialon's duration, location, driver), ongoing events, currently idling vehicles and the
+    totals, groups, hotspots and trend derived from those events. Same response shape as /api/idle/fleet-analytics,
+    which stays the Engine Hours source of the Fleet Overview KPIs. Windows are limited to the last
+    IDLE_EVENTS_MAX_DAYS UAE calendar days.
+    """
+    try:
+        eff_from, eff_to = get_timeframe_timestamps(
+            timeframe=timeframe,
+            from_time=from_time,
+            to_time=to_time,
+            from_date=from_date,
+            to_date=to_date,
+            hours=hours if (hours and not timeframe and not from_date and from_time is None) else None
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    oldest_from = int(datetime.now(UAE_TZ).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()) \
+        - (IDLE_EVENTS_MAX_DAYS - 1) * 86400
+    if eff_from < oldest_from:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Idle events are available for the last {IDLE_EVENTS_MAX_DAYS} days only "
+                    f"(from {datetime.fromtimestamp(oldest_from, tz=UAE_TZ):%d %b %Y} UAE). Choose a shorter range."),
+        )
+    if eff_to < eff_from:
+        raise HTTPException(status_code=400, detail="The range end must be after its start")
+    log_data_window("/api/idle/events", eff_from, eff_to)
+
+    if from_time is not None and to_time is not None:
+        window_spec = f"exact-{from_time}-{to_time}"
+    elif from_date:
+        window_spec = f"dates-{from_date}-{to_date or from_date}"
+    elif timeframe:
+        tf = timeframe.lower().strip()
+        # A calendar window's start moves at UAE midnight: a result cached before it never answers after it
+        window_spec = f"tf-{tf}" if tf in ROLLING_TIMEFRAMES else f"tf-{tf}-{eff_from}"
+    else:
+        window_spec = f"hours-{hours or 24}"
+
+    if (refresh or skip_cache) and request is not None:
+        # A forced refresh re-runs every unit's report: bounded per user
+        enforce_rate_limit(request, "heavy")
+
+    # A vehicle-scoped key (the Vehicle Details drawer, one per vehicle) lives in the per-vehicle cache category
+    cache_key = (f"vehicle-idle-events-v1-{vehicle_id}-{window_spec}-uae" if vehicle_id
+                 else f"idle-events-v1-{window_spec}-grp-{group_id}-uae")
+    ttl = closed_window_ttl(eff_to, IDLE_EVENTS_TTL_SECONDS)
+    if not refresh and not skip_cache:
+        hit = cached(cache_key, ttl_seconds=ttl)
+        log_cache_state("/api/idle/events", hit is not None)
+        if hit:
+            return hit
+        # Wialon failed for this key moments ago: serve the last good result (marked stale) until the backoff ends
+        stale = _last_good(cache_key) if _in_failure_backoff(cache_key) else None
+        if stale is not None:
+            return stale
+
+    with _single_flight(cache_key):
+        if not refresh and not skip_cache:
+            hit = cached(cache_key, ttl_seconds=ttl)
+            if hit:
+                return hit
+        return _compute_with_last_good(cache_key, lambda: _compute_idle_events_analytics(
+            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, cache_key, window_spec,
+            reuse_unit_results=not (refresh or skip_cache),
+        ), "/api/idle/events")
+
+
+@app.get("/api/idle/events/driver")
+def get_idle_event_driver(vehicle_id: int, start_time: int, driver_name: str = ""):
+    """
+    Driver of one idle event for the Idle Event Details card, read on demand (phones never appear in the fleet
+    response): the driver bound to vehicle_id at start_time in Wialon's binding history, looked up by driver id.
+    The phone is returned only when that driver's name agrees with the event's Idle Report driver_name.
+    """
+    if vehicle_id <= 0 or start_time <= 0 or start_time > now_timestamp() + 60:
+        raise HTTPException(status_code=400, detail="A valid vehicle and idle event start time are required")
+    return resolve_event_driver(login(), vehicle_id, start_time, driver_name)
+
+
+def _compute_idle_events_analytics(eff_from, eff_to, hours, timeframe, group_id, vehicle_id, cache_key, window_spec,
+                                   reuse_unit_results=True):
+    """Build the /api/idle/events payload from the Idle Report-Unit template and cache it under cache_key."""
+    sid = login()
+    raw_groups = get_vehicle_groups(sid)
+    unit_groups_map = defaultdict(list)
+    valid_groups = []
+    for g in raw_groups:
+        name = str(g.get("nm", "")).strip()
+        if not name or name.lower() == "all unit":
+            continue
+        valid_groups.append({"id": g.get("id"), "name": name, "vehicle_count": len(g.get("u") or [])})
+        for uid in g.get("u") or []:
+            if not any(x["id"] == g.get("id") for x in unit_groups_map[uid]):
+                unit_groups_map[uid].append({"id": g.get("id"), "name": name})
+
+    vehicles = get_all_vehicles(sid)
+    vehicles_by_id = {v.get("id"): v for v in vehicles if v.get("id")}
+    live_vehicles = get_vehicle_live_data(sid, vehicles, get_calculated_data(sid, vehicles), groups=raw_groups)
+    live_map = {v.get("vehicle_id"): v for v in live_vehicles}
+
+    target_vehicles = live_vehicles
+    if vehicle_id:
+        target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") == vehicle_id]
+    elif group_id:
+        members = set(next((g.get("u") or [] for g in raw_groups if g.get("id") == group_id), []))
+        target_vehicles = [v for v in live_vehicles if v.get("vehicle_id") in members]
+    target_ids = [v.get("vehicle_id") for v in target_vehicles]
+
+    # A unit whose latest message is older than the window start sent nothing in it: the report has nothing to read
+    no_messages = {v.get("vehicle_id") for v in target_vehicles
+                   if not v.get("last_message_timestamp") or v["last_message_timestamp"] < eff_from}
+    ttl = closed_window_ttl(eff_to, IDLE_EVENTS_TTL_SECONDS)
+    results, errors = read_units_idle_events(
+        target_ids, eff_from, eff_to, window_spec, ttl, reuse=reuse_unit_results, skip_units=no_messages,
+    )
+    if errors and len(errors) == len(set(target_ids) - no_messages):
+        # Not one report could be read: a Wialon failure (the last good result is served instead), never zero events
+        raise WialonAPIError(f"Wialon idle events report failed for all {len(errors)} units")
+
+    current_ts = now_timestamp()
+    window_open = eff_to >= current_ts - IDLE_ONGOING_MAX_END_AGE_SECONDS
+    # The Idling sensor is read after the reports, so an ongoing event is confirmed by the current state
+    sensor_states = idling_sensor_values(sid, vehicles_by_id, sensor_names_of(results, window_open))
+
+    all_events = []
+    by_vehicle = []
+    ongoing_ids = set()
+    group_agg = {g["id"]: {"group_id": g["id"], "group_name": g["name"], "vehicle_count": g["vehicle_count"],
+                           "total_idle_seconds": 0, "idle_events": 0, "currently_idling": 0} for g in valid_groups}
+    live_ids = set(live_map)
+    general_members = {vid for vid in live_ids if vid not in unit_groups_map}
+    group_agg.setdefault(0, {"group_id": 0, "group_name": "General Fleet", "vehicle_count": len(general_members),
+                             "total_idle_seconds": 0, "idle_events": 0, "currently_idling": 0})
+
+    for v in target_vehicles:
+        vid = v.get("vehicle_id")
+        vname = str(v.get("vehicle_name") or f"Vehicle {vid}").strip()
+        plate = v.get("registration_plate") or None
+        v_grps = unit_groups_map.get(vid) or [{"id": 0, "name": "General Fleet"}]
+        result = results.get(vid)
+        # A unit's totals and events are known only when its report was read completely; otherwise unknown, not zero
+        known = result is not None and result.get("complete", False)
+        candidate = ongoing_candidate(result, window_open) if result else None
+        ongoing = is_ongoing(candidate, sensor_states.get(vid), v.get("seconds_since_update"))
+        # Idle Event Details: the vehicle's actual Wialon groups (never the "General Fleet" fallback) and its
+        # department (unit Profile field), both from records already loaded above
+        actual_groups = [g["name"] for g in unit_groups_map.get(vid) or []]
+        department = vehicle_department(vehicles_by_id.get(vid))
+        v_events = [{
+            **ev,
+            "vehicle_name": vname,
+            "registration_plate": plate,
+            "group_id": v_grps[0]["id"],
+            "group_name": v_grps[0]["name"],
+            "vehicle_groups": actual_groups,
+            "vehicle_department": department,
+            # Still idling: end_time and duration are Wialon's latest reading and grow on the next read
+            "ongoing": ongoing and ev is candidate,
+        } for ev in (result or {}).get("events") or []]
+        all_events.extend(v_events)
+        if ongoing:
+            ongoing_ids.add(vid)
+        idle_sec = sum(e["duration"] for e in v_events) if known else None
+        live_status = v.get("status", "STOPPED")
+        by_vehicle.append({
+            "vehicle_id": vid,
+            "vehicle_name": vname,
+            "registration_plate": plate,
+            "group_id": v_grps[0]["id"],
+            "group_name": v_grps[0]["name"],
+            "group_ids": [g["id"] for g in v_grps],
+            "group_names": [g["name"] for g in v_grps],
+            "total_idle_seconds": idle_sec,
+            "idle_minutes": round(idle_sec / 60.0, 2) if idle_sec is not None else None,
+            "idle_events": len(v_events) if known else None,
+            "longest_idle_seconds": max((e["duration"] for e in v_events), default=0) if known else None,
+            "status": live_status,
+            # Currently idling per the template's ongoing event; its start and latest duration replace the live timer
+            "currently_idling": ongoing,
+            "idle_start": candidate["start_time"] if ongoing else (v.get("idle_start") if live_status == "IDLING" else None),
+            "idle_duration": candidate["duration"] if ongoing else v.get("idle_duration", 0),
+            "idle_duration_status": "known" if ongoing else v.get("idle_duration_status", "known"),
+            "events_error": vid in errors,
+        })
+        # A vehicle counts in every group it belongs to; a group with an unknown member has an unknown total
+        for grp in v_grps:
+            agg = group_agg.get(grp["id"])
+            if agg is None:
+                continue
+            if idle_sec is None or agg["total_idle_seconds"] is None:
+                agg["total_idle_seconds"] = None
+                agg["idle_events"] = None
+            else:
+                agg["total_idle_seconds"] += idle_sec
+                agg["idle_events"] += len(v_events)
+            if ongoing:
+                agg["currently_idling"] += 1
+
+    events_complete = all(bv["idle_events"] is not None for bv in by_vehicle)
+    known_totals = [bv["total_idle_seconds"] for bv in by_vehicle if bv["total_idle_seconds"] is not None]
+    total_idle_seconds = sum(known_totals)
+    total_events = len(all_events)
+    longest_event = max(all_events, key=lambda e: (e["duration"], -e["start_time"])) if all_events else None
+    if not events_complete:
+        longest_event = None
+
+    # A group is listed only when the filter covered every one of its live members (as /api/idle/fleet-analytics)
+    group_members = {g["id"]: set(next((rg.get("u") or [] for rg in raw_groups if rg.get("id") == g["id"]), [])) & live_ids
+                     for g in valid_groups}
+    group_members[0] = general_members
+    covered = set(target_ids)
+    by_group = []
+    for gid, agg in group_agg.items():
+        if not group_members.get(gid, set()) <= covered or (agg["vehicle_count"] == 0 and not agg["total_idle_seconds"]):
+            continue
+        g_sec, g_events = agg["total_idle_seconds"], agg["idle_events"]
+        by_group.append({
+            **agg,
+            "idle_minutes": round(g_sec / 60.0, 2) if g_sec is not None else None,
+            "average_idle_minutes": (round(g_sec / g_events / 60.0, 2) if g_events else 0) if g_sec is not None else None,
+        })
+
+    def _idle_sort_key(x):
+        return (x["total_idle_seconds"] is not None, x["total_idle_seconds"] or 0)
+
+    by_group.sort(key=_idle_sort_key, reverse=True)
+    by_vehicle.sort(key=_idle_sort_key, reverse=True)
+
+    # Hotspots: events grouped by position rounded to ~100 m, labelled with the first known address
+    hotspots = {}
+    for ev in all_events:
+        lat, lng = ev["location"]["latitude"], ev["location"]["longitude"]
+        if lat is None or lng is None:
+            continue
+        key = f"{round(lat, 3)},{round(lng, 3)}"
+        spot = hotspots.setdefault(key, {"location_key": key, "latitude": lat, "longitude": lng, "label": None,
+                                         "total_idle_seconds": 0, "event_count": 0, "vehicles": set()})
+        spot["total_idle_seconds"] += ev["duration"]
+        spot["event_count"] += 1
+        spot["vehicles"].add(ev["vehicle_name"])
+        if spot["label"] is None and ev["address"] != "Unknown Location":
+            spot["label"] = ev["address"]
+    by_location = sorted((
+        {**spot, "label": spot["label"] or f"Coordinates ({spot['location_key']})",
+         "idle_minutes": round(spot["total_idle_seconds"] / 60.0, 2),
+         "vehicle_count": len(spot["vehicles"]), "vehicles": sorted(spot["vehicles"])}
+        for spot in hotspots.values()
+    ), key=lambda x: x["total_idle_seconds"], reverse=True)
+
+    all_events.sort(key=lambda e: (e["start_time"], e["id"]), reverse=True)
+    read_times = [r["read_at"] for r in results.values() if r.get("read_at")]
+    total_vehicles = len(target_vehicles)
+    response_payload = {
+        "timeframe": {"hours": hours, "timeframe": timeframe, "from_time": eff_from, "to_time": eff_to},
+        "kpis": {
+            "total_vehicles": total_vehicles,
+            "total_idle_vehicles": sum(1 for sec in known_totals if sec),
+            "currently_idling_vehicles": len(ongoing_ids),
+            "total_idle_seconds": total_idle_seconds,
+            "total_idle_minutes": round(total_idle_seconds / 60.0, 2),
+            "total_idle_hours": round(total_idle_seconds / 3600.0, 2),
+            "total_idle_partial": not events_complete,
+            # Event KPIs need every vehicle's events: unknown (None) when any vehicle's could not be read
+            "average_idle_seconds": (round(total_idle_seconds / total_events, 2) if total_events else 0) if events_complete else None,
+            "longest_idle_seconds": (longest_event["duration"] if longest_event else 0) if events_complete else None,
+            "longest_idle_vehicle_id": longest_event["vehicle_id"] if longest_event else None,
+            "longest_idle_vehicle_name": longest_event["vehicle_name"] if longest_event else None,
+            "longest_idle_registration_plate": longest_event.get("registration_plate") if longest_event else None,
+            "longest_idle_event": longest_event,
+            "highest_idle_event": longest_event,
+            "idle_event_count": total_events if events_complete else None,
+            "idling_fleet_ratio": round(len(ongoing_ids) / total_vehicles * 100, 1) if total_vehicles else 0,
+        },
+        "by_group": by_group,
+        # by_group totals are group-membership totals: a vehicle in several groups counts in each
+        "by_group_basis": "group_membership",
+        "by_vehicle": by_vehicle,
+        "by_location": by_location[:10],
+        "trend": _build_idle_trend(all_events, eff_from, eff_to),
+        "events": all_events,
+        "events_complete": events_complete,
+        "event_location_unverified": any(not e["location_verified"] for e in all_events),
+        "groups": valid_groups,
+        # Vehicles whose idle report failed: their totals and events are unknown, not zero
+        "events_unavailable_vehicle_ids": sorted(errors),
+        "source": "wialon_idle_report_unit",
+        # The oldest unit report this result combines (UTC epoch seconds); `stale` is true only when a cached result
+        # is served because Wialon failed
+        "retrieved_at": min(read_times) if read_times else current_ts,
+        "stale": False,
+    }
+    # A result missing some vehicles' events (a failed or partly read report) is re-read after the transient TTL
+    set_cache(cache_key, response_payload, ttl_seconds=ttl if events_complete else TRANSIENT_PARTIAL_TTL_SECONDS)
     return response_payload
 
 

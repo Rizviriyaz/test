@@ -14,7 +14,7 @@ import {
     ChevronDown,
 } from "lucide-react"
 
-import { getCachedFleetIdleAnalytics, getFleetIdleAnalytics } from "../api/fleetApi"
+import { getCachedIdleEvents, getIdleEvents } from "../api/fleetApi"
 import AppShell from "../components/Common/AppShell"
 import FreshnessBadge from "../components/Common/FreshnessBadge"
 import { MobileNavButton } from "../components/Layout/Sidebar"
@@ -175,7 +175,7 @@ export default function IdleAnalytics() {
         if (filterVehicleId) opts.vehicle_id = Number(filterVehicleId)
         setEventsError("")
 
-        const cachedFull = getCachedFleetIdleAnalytics(opts)
+        const cachedFull = getCachedIdleEvents(opts)
         if (cachedFull) {
             setAnalytics(cachedFull)
             setShowingSummary(false)
@@ -185,32 +185,25 @@ export default function IdleAnalytics() {
             return
         }
 
+        // One request: every idle value (events, totals, currently idling) comes from the Wialon Idle Report-Unit
+        // template, which has no lighter summary form
         setEventsLoading(true)
-        let fullApplied = false
         const isCurrent = () => currentReq === reqSeqRef.current
-        const summaryReq = getFleetIdleAnalytics({ ...opts, include_events: false }).then((data) => {
-            if (!isCurrent() || fullApplied) return
-            setAnalytics(data)
-            setShowingSummary(true)
-            setLastUpdated(new Date())
-            setLoading(false)
-        })
-        const fullReq = getFleetIdleAnalytics(opts).then((data) => {
+        try {
+            const data = await getIdleEvents(opts)
             if (!isCurrent()) return
-            fullApplied = true
             setAnalytics(data)
             setShowingSummary(false)
             setLastUpdated(new Date())
-        })
-        const [summaryRes, fullRes] = await Promise.allSettled([summaryReq, fullReq])
-        if (!isCurrent()) return
-        setLoading(false)
-        setEventsLoading(false)
-        if (fullRes.status === "rejected") {
-            console.error(fullRes.reason)
-            const message = fullRes.reason?.message || "Failed to load idle analytics. Please try again."
-            if (summaryRes.status === "rejected") setError(message)
-            else setEventsError(`Idle events could not be loaded: ${message}`)
+        } catch (err) {
+            if (!isCurrent()) return
+            console.error(err)
+            setError(err?.message || "Failed to load idle analytics. Please try again.")
+        } finally {
+            if (isCurrent()) {
+                setLoading(false)
+                setEventsLoading(false)
+            }
         }
     }, [rangePreset, rangeInputs, filterGroupId, filterVehicleId])
 
@@ -816,9 +809,11 @@ export default function IdleAnalytics() {
                                                             <span className="block truncate font-mono text-xs font-semibold text-slate-900">
                                                                 {displayPlate}
                                                             </span>
-                                                            <span className="block truncate text-[11px] text-slate-400">
-                                                                {v.vehicle_name ? `${v.vehicle_name} · ` : ""}ID {v.vehicle_id}
-                                                            </span>
+                                                            {v.vehicle_name && v.vehicle_name !== displayPlate && (
+                                                                <span className="block truncate text-[11px] text-slate-400">
+                                                                    {v.vehicle_name}
+                                                                </span>
+                                                            )}
                                                         </div>
                                                         <div className="shrink-0 text-right">
                                                             <span className="block text-xs font-bold text-slate-900 tabular-nums">
@@ -1018,9 +1013,11 @@ export default function IdleAnalytics() {
                                                                 <span className="block truncate font-mono text-xs font-semibold text-slate-900 group-hover:text-brand transition-colors">
                                                                     {displayPlate || ev.vehicle_name}
                                                                 </span>
-                                                                <span className="block truncate text-[11px] text-slate-400">
-                                                                    {displayPlate && ev.vehicle_name ? `${ev.vehicle_name} · ` : ""}ID {ev.vehicle_id}
-                                                                </span>
+                                                                {displayPlate && ev.vehicle_name && (
+                                                                    <span className="block truncate text-[11px] text-slate-400">
+                                                                        {ev.vehicle_name}
+                                                                    </span>
+                                                                )}
                                                             </button>
                                                         </td>
                                                         <td className="max-w-[150px] truncate px-4 py-2 text-slate-600 font-medium">
