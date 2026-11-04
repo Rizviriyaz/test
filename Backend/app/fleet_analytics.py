@@ -17,13 +17,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 import functools
-from app.utils.datetime_helpers import to_iso_uae, now_timestamp, closed_window_ttl
+from app.utils.datetime_helpers import to_iso_uae, now_timestamp, closed_window_ttl, window_closed
 from app.performance_diagnostics import log_cache_state, log_data_window, map_with_request_context, new_trace_id, request_trace_id
 from collections import Counter, defaultdict
 from typing import Dict, List, Any, Optional
 
 from app.wialon import (
-    WIALON_LIMIT_MSGS_ACTIVITY, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, history_truncated,
+    HISTORY_SESSION, WIALON_LIMIT_MSGS_ACTIVITY, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, history_truncated,
     seconds_since_limit_hit, wialon_error_code,
 )
 from app.wialon_reports import (
@@ -82,21 +82,41 @@ def _remaining_ttl(key: str) -> float:
 # Groups, unit list and calc_last read once for every analytics builder running within this many seconds (the
 # alerts, groups and summary builds call several builders back to back). Callers treat the data as read-only.
 FLEET_DISCOVERY_TTL_SECONDS = 5
+# /api/fleet/health (Vehicle Health page)
+FLEET_HEALTH_TTL_SECONDS = 60
+
+
+def shared_fleet_discovery(read_fn, fresh: bool = False):
+    """
+    The one fleet discovery shared by these builders and the main.py routes (live fleet, mileage, idle, drivers):
+    (raw_groups, vehicles, calc_data) from `read_fn()`, kept FLEET_DISCOVERY_TTL_SECONDS. Concurrent callers share
+    one read (whoever starts it supplies the reader; every reader makes the same Wialon reads). `fresh` (the live fleet,
+    whose positions must be read now) skips a cached entry but still joins a read already running.
+    """
+    def read():
+        if not fresh:
+            hit = get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
+            if hit:
+                return hit
+        value = read_fn()
+        set_cached("fleet_discovery", value, ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
+        return value
+    hit = None if fresh else get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
+    return hit or _builds.run("fleet_discovery", read)
+
+
+def cached_fleet_discovery():
+    """The shared discovery when it is current, else None (never reads Wialon)."""
+    return get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
 
 
 def _fleet_discovery(sid: str):
     """(raw_groups, vehicles, calc_data), read from Wialon at most once per FLEET_DISCOVERY_TTL_SECONDS."""
     def read():
-        hit = get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
-        if hit:
-            return hit
         raw_groups = get_vehicle_groups(sid)
         vehicles = get_all_vehicles(sid)
-        calc_data = get_calculated_data(sid, vehicles)
-        value = (raw_groups, vehicles, calc_data)
-        set_cached("fleet_discovery", value, ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS)
-        return value
-    return get_cached("fleet_discovery", ttl_seconds=FLEET_DISCOVERY_TTL_SECONDS) or _builds.run("fleet_discovery", read)
+        return raw_groups, vehicles, get_calculated_data(sid, vehicles)
+    return shared_fleet_discovery(read)
 
 
 # ── Shared Group Trips snapshot ──────────────────────────────────────────────
@@ -451,7 +471,9 @@ def evaluate_vehicle_health(vehicle: Dict[str, Any], raw_unit: Dict[str, Any] = 
 
 @_coalesced
 def get_fleet_health_analytics(use_cache: bool = True) -> Dict[str, Any]:
-    cached = get_cached("fleet_health_analytics", ttl_seconds=180) if use_cache else None
+    # Built from the shared fleet discovery only (no reports), so it is kept as briefly as battery and connectivity
+    # states warrant
+    cached = get_cached("fleet_health_analytics", ttl_seconds=FLEET_HEALTH_TTL_SECONDS) if use_cache else None
     log_cache_state("/api/fleet/health", cached is not None)
     if cached:
         return cached
@@ -833,8 +855,10 @@ def get_trips_mileage_analytics(
                 snapshot_group_id = resolve_all_units_group_id(sid, raw_groups)
             except WialonAPIError:
                 snapshot_group_id = GROUP_ID_ALL_UNITS  # resolved by the report itself, as before
+            # A closed window (e.g. yesterday) runs on HISTORY_SESSION, alongside today's report on the shared one
+            report_sid = login(session=HISTORY_SESSION) if window_closed(eff_to) else sid
             snapshot, snapshot_fresh_for = group_trips_snapshot(
-                execute_wialon_group_trips_report, sid, snapshot_group_id, window_spec, eff_from, eff_to)
+                execute_wialon_group_trips_report, report_sid, snapshot_group_id, window_spec, eff_from, eff_to)
             group_report = snapshot["rows"]
             eff_from, eff_to, retrieved_at = snapshot["from_time"], snapshot["to_time"], snapshot["retrieved_at"]
         if group_report is None:

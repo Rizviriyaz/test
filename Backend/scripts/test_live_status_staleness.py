@@ -38,6 +38,7 @@ from offline_guard import OfflineGuard  # noqa: E402
 import app.ai.tools as ai_tools  # noqa: E402
 import app.fleet_analytics as fa  # noqa: E402
 import app.main as main  # noqa: E402
+import app.fleet_analytics as _shared_fa  # noqa: E402
 import app.vehicles as vehicles  # noqa: E402
 from app.utils.status_config import CONN_DELAYED_SECONDS, CONN_STABLE_SECONDS  # noqa: E402
 
@@ -181,6 +182,7 @@ def test_counts_partition_the_fleet():
     units = [{"id": 100 + i, "nm": f"U{i}"} for i in range(7)]
     with ExitStack() as stack:
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
         fa._analytics_cache.clear()
         for target in ("app.main", "app.fleet_analytics", "app.ai.tools"):
             stack.enter_context(patch(f"{target}.login", return_value="sid"))
@@ -217,6 +219,7 @@ def test_idle_analytics_excludes_stale_idler():
     fleet[1].update(status="IDLING", telemetry_stale=False)
     with ExitStack() as stack:
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
         stack.enter_context(patch("app.wialon_reports.wialon_request", FakeReportEngine()))
         stack.enter_context(patch("app.wialon_reports.get_vehicle_groups", return_value=GROUPS))
         stack.enter_context(patch("app.wialon_reports.GROUP_ID_ALL_UNITS", 0))
@@ -398,6 +401,7 @@ def test_stale_gps_position_counts_health_alerts():
     partition = ("moving", "idling", "stopped", "offline")
     with ExitStack() as stack:
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
         fa._analytics_cache.clear()
         stack.enter_context(patch("app.fleet_analytics.time.time", return_value=NOW))
         for target in ("app.main", "app.fleet_analytics", "app.ai.tools"):
@@ -414,6 +418,7 @@ def test_stale_gps_position_counts_health_alerts():
         health = fa.get_fleet_health_analytics(use_cache=False)
         alerts = fa._build_fleet_alerts(use_cache=False)
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     fa._analytics_cache.clear()
     for where, block in blocks.items():
         assert {k: block[k] for k in expected_counts} == expected_counts, (where, block)
@@ -561,6 +566,7 @@ def test_last_message_timestamp_malformed_and_valid():
         calc.append({"i": vid, "pos": calc_pos, "sensors": {"1": {"value": 1}}})
     with ExitStack() as stack:
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
         stack.enter_context(patch("app.vehicles.now_timestamp", return_value=NOW))
         stack.enter_context(patch("app.vehicles.get_vehicle_history", MagicMock(return_value=[])))
         stack.enter_context(patch("app.vehicles.get_vehicle_groups", return_value=[]))
@@ -571,6 +577,7 @@ def test_last_message_timestamp_malformed_and_valid():
         stack.enter_context(patch("app.main.get_calculated_data", return_value=calc))
         body = main.get_vehicles()  # the /api/vehicles handler
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     assert body["count"] == len(cases) == len(body["vehicles"]), "one malformed record never drops or fails the fleet"
     for rec, (lmsg, calc_t, want_ts, want_conn, want_status) in zip(body["vehicles"], cases):
         want_age = None if want_ts is None else NOW - want_ts

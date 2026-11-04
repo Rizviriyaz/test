@@ -40,6 +40,7 @@ import app.fleet_analytics as fa  # noqa: E402
 import app.fuel.importer as importer  # noqa: E402
 import app.fuel.wialon_distance as wd  # noqa: E402
 import app.main as main  # noqa: E402
+import app.fleet_analytics as _shared_fa  # noqa: E402
 import app.vehicles as vehicles  # noqa: E402
 import app.wialon as wialon  # noqa: E402
 import app.wialon_reports as wr  # noqa: E402
@@ -255,6 +256,7 @@ def test_utilization_fallback_is_labelled_and_isolated():
 
 def test_trends_isolate_failed_units():
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
 
     def history(sid, vid, hours=None):
         if vid == 2:
@@ -273,6 +275,7 @@ def test_trends_isolate_failed_units():
 
 def test_unhandled_error_is_generic_500_with_cors():
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     with patch("app.main.authenticate_access_token", return_value=VIEWER), \
             patch.object(main, "login", return_value="sid"), \
             patch.object(main, "get_all_vehicles", side_effect=ValueError("secret-internal-detail token=abc")):
@@ -308,6 +311,7 @@ def test_safety_window_and_summary_bound():
         assert [c.kwargs.get("hours") for c in safety.call_args_list] == [168, 24]
 
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     safety = MagicMock(side_effect=AssertionError("safety must not load weeks of raw history"))
     with patch.object(main, "login", return_value="sid"), patch.object(main, "get_all_vehicles", return_value=UNITS), \
             patch.object(main, "get_calculated_data", return_value=[]), \
@@ -352,6 +356,7 @@ def test_rate_limits_return_429_per_user():
 
 def test_idle_by_group_counts_every_membership():
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     groups = [{"id": 1, "nm": "North", "u": [10, 11]}, {"id": 2, "nm": "Contract", "u": [10]}]
     live = [
         {"vehicle_id": 10, "vehicle_name": "V10", "status": "IDLING", "idle_duration": 0, "idle_duration_status": "unknown"},

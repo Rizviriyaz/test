@@ -3,7 +3,7 @@ import time
 import json
 import logging
 import requests
-from app.performance_diagnostics import request_trace_id
+from app.performance_diagnostics import count_wialon_call, request_trace_id
 from app.utils.datetime_helpers import now_timestamp
 from app.utils.config import get_env_int
 from pathlib import Path
@@ -38,6 +38,13 @@ FUEL_TRIPS_SESSION = "fuel_trips"
 # Single-vehicle trips reports of the vehicle detail drawer (refreshed every minute while it is open) run on their own
 # session, so they never hold the shared report lock that Dashboard mileage and trips reports wait on.
 VEHICLE_SESSION = "vehicle"
+# Fleet Overview Engine Hours (idle) reports without events run on their own session, as the fuel engine report does:
+# the Dashboard's Group Engine and Group Trips reports then run at the same time instead of queuing on the shared
+# report lock (two report sessions, the same split the fuel reports already use).
+ENGINE_SESSION = "engine"
+# Fleet Overview Group Trips and Engine Hours reports of closed windows (e.g. yesterday) run on their own session, so a
+# cold Dashboard load runs yesterday's reports alongside today's instead of queuing them on the same report locks
+HISTORY_SESSION = "history"
 _named_sids = {}
 # Every session id ever issued for a named session (bounded by the number of re-logins), so a stale id
 # that hits error 1 is refreshed as the session it belonged to, never as the shared SID.
@@ -59,6 +66,8 @@ _wialon_http_session.mount("http://", _http_adapter)
 # Session refresh can call login() while handling Wialon's expired-session
 # response. Re-entrant locking keeps refresh serialized without self-deadlocking.
 _login_lock = threading.RLock()
+# One login lock per named session (see _login_named)
+_named_login_locks = {}
 
 
 class WialonAPIError(RuntimeError):
@@ -139,6 +148,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
 
             res_json = response.json()
         except Exception as e:
+            count_wialon_call()
             logging.warning(
                 "PERF wialon end request_id=%s service=%s duration_ms=%.1f attempt=%s outcome=transport_error",
                 request_trace_id.get(), svc, (time.perf_counter() - request_started) * 1000, attempt + 1,
@@ -155,6 +165,7 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
         # {"error": 0} is Wialon's success reply for void services such as report/cleanup_result
         is_error = isinstance(res_json, dict) and "error" in res_json and error_code != 0
         outcome = f"wialon_error_{error_code}" if is_error else "success"
+        count_wialon_call(error_code if is_error else None)
         # Per-call timings are routine; Wialon errors stay visible except 1003, which is retried with backoff below
         logging.log(
             logging.DEBUG if outcome == "success" or error_code == 1003 else logging.WARNING,
@@ -174,21 +185,23 @@ def wialon_request(svc, params, sid=None, is_retry=False, max_retries=3, timeout
 
         # Handle Wialon Error 1 (Invalid session) automatically
         if isinstance(res_json, dict) and res_json.get("error") == 1 and not is_retry and svc != "token/login":
+            session = new_sid = None
             with _login_lock:
                 # A retired id remembers its named session even after _sid_owner evicted it, so it is never refreshed
                 # (or answered) as the shared SID
                 session = _sid_owner.get(current_sid) or _retired_sids.get(current_sid)
-                if session is not None:
-                    if _named_sids.get(session) == current_sid:
-                        logging.warning("Wialon %s session invalid (error 1). Refreshing session...", session)
-                        new_sid = login(force=True, session=session)
+                if session is None:
+                    if SID == current_sid or not SID:
+                        logging.warning("Wialon session invalid (error 1). Refreshing session...")
+                        new_sid = login(force=True)
                     else:
-                        new_sid = _named_sids.get(session) or login(session=session)
-                elif SID == current_sid or not SID:
-                    logging.warning("Wialon session invalid (error 1). Refreshing session...")
-                    new_sid = login(force=True)
-                else:
-                    new_sid = SID
+                        new_sid = SID
+            if session is not None:
+                # Outside _login_lock (a named login takes its session's lock first): refreshed once when this id is
+                # still the session's current one, else the id that already replaced it
+                if _named_sids.get(session) == current_sid:
+                    logging.warning("Wialon %s session invalid (error 1). Refreshing session...", session)
+                new_sid = _login_named(session, force=True, stale_sid=current_sid)
 
             return wialon_request(svc, params, sid=new_sid, is_retry=True)
 
@@ -245,11 +258,23 @@ def login(force=False, session=None):
         return SID
 
 
-def _login_named(session, force=False):
+def _named_login_lock(session):
     with _login_lock:
-        existing = _named_sids.get(session)
-        if existing and not force:
-            return existing
+        return _named_login_locks.setdefault(session, threading.Lock())
+
+
+def _login_named(session, force=False, stale_sid=None):
+    """
+    The named session's id, logging it in when it has none (or force=True). Logins of different named sessions run
+    at the same time (each session has its own login lock; the token/login request is made outside _login_lock), so
+    a fleet of dedicated sessions starting together does not log in one after another. With `stale_sid`, a forced
+    refresh is skipped when another caller already replaced that id.
+    """
+    with _named_login_lock(session):
+        with _login_lock:
+            existing = _named_sids.get(session)
+            if existing and (not force or (stale_sid is not None and existing != stale_sid)):
+                return existing
 
         login_data = wialon_request(
             "token/login",
@@ -260,20 +285,21 @@ def _login_named(session, force=False):
             is_retry=True
         )
 
-        if not isinstance(login_data, dict) or "error" in login_data or not login_data.get("eid"):
-            _retire_sid(_named_sids.pop(session, None), session)
-            raise WialonAPIError(
-                f"Wialon login failed for {session} session: {login_data}"
-            )
+        with _login_lock:
+            if not isinstance(login_data, dict) or "error" in login_data or not login_data.get("eid"):
+                _retire_sid(_named_sids.pop(session, None), session)
+                raise WialonAPIError(
+                    f"Wialon login failed for {session} session: {login_data}"
+                )
 
-        new_sid = login_data["eid"]
-        _retire_sid(existing, session)
-        _named_sids[session] = new_sid
-        _sid_owner[new_sid] = session
-        # Stale ids only matter for requests already in flight; keep the most recent ones
-        while len(_sid_owner) > _SID_OWNER_MAX:
-            del _sid_owner[next(iter(_sid_owner))]
-        return new_sid
+            new_sid = login_data["eid"]
+            _retire_sid(existing, session)
+            _named_sids[session] = new_sid
+            _sid_owner[new_sid] = session
+            # Stale ids only matter for requests already in flight; keep the most recent ones
+            while len(_sid_owner) > _SID_OWNER_MAX:
+                del _sid_owner[next(iter(_sid_owner))]
+            return new_sid
 
 
 if __name__ == "__main__":

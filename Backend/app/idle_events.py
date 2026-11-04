@@ -18,6 +18,7 @@ import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from queue import Queue
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -31,7 +32,9 @@ from app.wialon_reports import IDLE_REPORT_RESOURCE_ID, execute_wialon_unit_idle
 # Idle Dashboard retrieval limit: windows starting before UAE midnight IDLE_EVENTS_MAX_DAYS - 1 days ago are rejected
 IDLE_EVENTS_MAX_DAYS = 7
 # Dedicated Wialon sessions (one report each at a time) the per-unit reports run on in parallel
-IDLE_EVENTS_SESSIONS = max(1, get_env_int("WIALON_IDLE_EVENTS_SESSIONS", 4))
+# (measured live: 99 unit reports for a full day took 40.7 s on 4 sessions and 24.3 s on 8, with identical results and
+# no 1003/1004; 12 sessions gained under 2 s more)
+IDLE_EVENTS_SESSIONS = max(1, get_env_int("WIALON_IDLE_EVENTS_SESSIONS", 8))
 IDLE_EVENTS_SESSION_PREFIX = "idle_events_"
 # Freshness of a window that reaches into today (UAE); closed windows use closed_window_ttl
 IDLE_EVENTS_TTL_SECONDS = 120
@@ -82,7 +85,9 @@ def read_units_idle_events(
         else:
             to_read.append(uid)
 
-    futures = {uid: _pool.submit(_read_unit, uid, from_time, to_time) for uid in to_read}
+    # Each worker runs in a copy of the caller's context, so its Wialon calls are logged and counted under the request
+    # that asked for them (request id, per-request Wialon call counts)
+    futures = {uid: _pool.submit(copy_context().run, _read_unit, uid, from_time, to_time) for uid in to_read}
     for uid, future in futures.items():
         try:
             result = future.result()

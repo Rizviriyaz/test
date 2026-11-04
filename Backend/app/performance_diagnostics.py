@@ -3,12 +3,34 @@
 import contextvars
 import functools
 import logging
+import threading
 import time
 import uuid
 from contextvars import copy_context
 
 
 request_trace_id = contextvars.ContextVar("performance_request_trace_id", default="-")
+
+
+# Wialon call counts of the current request ({"calls", "e1003", "e1004"}), set by the request middleware. Executor
+# workers run in copies of the request's context, which share this same dict, so their calls count too.
+request_wialon_stats = contextvars.ContextVar("performance_request_wialon_stats", default=None)
+# Process-wide Wialon limit errors since startup (1003 api_concurrent, 1004 msgs_activity)
+wialon_limit_errors = {"e1003": 0, "e1004": 0}
+_stats_lock = threading.Lock()
+
+
+def count_wialon_call(error_code=None) -> None:
+    """Count one Wialon HTTP attempt for the current request (and limit errors process-wide)."""
+    key = f"e{error_code}" if error_code in (1003, 1004) else None
+    stats = request_wialon_stats.get()
+    with _stats_lock:
+        if key:
+            wialon_limit_errors[key] += 1
+        if stats is not None:
+            stats["calls"] = stats.get("calls", 0) + 1
+            if key:
+                stats[key] = stats.get(key, 0) + 1
 
 
 def new_trace_id() -> str:

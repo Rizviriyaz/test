@@ -57,11 +57,16 @@ def now_timestamp() -> int:
 CLOSED_WINDOW_TTL_SECONDS = 1800
 
 
+def window_closed(eff_to: int) -> bool:
+    """True when a report window ended before today's UAE midnight (closed days only)."""
+    today_start = int(get_uae_now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    return eff_to < today_start
+
+
 def closed_window_ttl(eff_to: int, open_ttl: int) -> int:
     """Cache TTL for a report window: open_ttl while it reaches into today (UAE), CLOSED_WINDOW_TTL_SECONDS once it
     ended before today's UAE midnight (never shorter than open_ttl)."""
-    today_start = int(get_uae_now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
-    return max(open_ttl, CLOSED_WINDOW_TTL_SECONDS) if eff_to < today_start else open_ttl
+    return max(open_ttl, CLOSED_WINDOW_TTL_SECONDS) if window_closed(eff_to) else open_ttl
 
 
 def to_iso_utc(timestamp: int) -> str:

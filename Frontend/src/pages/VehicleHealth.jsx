@@ -957,7 +957,7 @@ export default function VehicleHealth() {
 
                     {/* Table / States */}
                     {loading && !data ? (
-                        <LoadingState label="Loading vehicle health telemetry…" className="rounded-none border-0" />
+                        <LoadingState label="Loading vehicle health telemetry…" className="rounded-none border-0" rows={10} columns={6} />
                     ) : error && !data ? (
                         <ErrorState message={error} onRetry={refresh} className="rounded-none border-0" />
                     ) : sortedVehicles.length === 0 ? (

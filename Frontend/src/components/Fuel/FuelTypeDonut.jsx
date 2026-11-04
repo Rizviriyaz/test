@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo } from "react"
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip } from "recharts"
-import { Loader2 } from "lucide-react"
 import { getFuelTypes } from "../../api/fleetApi"
 import { useFuelFilters } from "../../context/useFuelFilters"
 import { categoricalColor } from "../Common/chartTheme"
@@ -92,9 +91,10 @@ export default function FuelTypeDonut() {
 
             <div className="my-3 flex-1 min-h-[190px] flex items-center justify-center">
                 {loading ? (
-                    <div className="flex flex-col items-center justify-center text-slate-400">
-                        <Loader2 className="mb-1 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                        <span className="text-xs">Loading breakdown…</span>
+                    <div role="status" aria-label="Loading breakdown" className="flex items-center justify-center">
+                        {/* Donut-shaped placeholder at the chart's size */}
+                        <span aria-hidden="true" className="h-40 w-40 animate-pulse rounded-full border-[22px] border-slate-100 motion-reduce:animate-none" />
+                        <span className="sr-only">Loading breakdown…</span>
                     </div>
                 ) : error ? (
                     <div role="alert" className="text-xs text-rose-700">{error}</div>

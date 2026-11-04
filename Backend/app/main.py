@@ -1,8 +1,9 @@
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
+from contextvars import copy_context
 from datetime import datetime, timezone
-from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES, closed_window_ttl
+from app.utils.datetime_helpers import now_timestamp, to_iso_utc, get_timeframe_timestamps, UAE_TZ, ROLLING_TIMEFRAMES, closed_window_ttl, window_closed
 import functools
 import logging
 import os
@@ -17,16 +18,20 @@ from pydantic import BaseModel
 from typing import Annotated, List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth import authenticate_access_token
-from app.performance_diagnostics import log_cache_state, log_data_window, new_trace_id, request_trace_id, timed_calculation
+from app.performance_diagnostics import (
+    log_cache_state, log_data_window, new_trace_id, request_trace_id, request_wialon_stats, timed_calculation,
+    wialon_limit_errors,
+)
 from app.utils.status_config import CONN_DELAYED_SECONDS
 from app.utils.rate_limit import enforce_rate_limit
 from app.utils.ttl_cache import CategorizedTTLCache, TTLCache
 from app.utils.freshness import (
-    TARGET_FLEET_ANALYTICS_S, TARGET_GROUPS_S, TARGET_LIVE_FLEET_S, TARGET_TODAY_IDLE_S, TARGET_TODAY_REPORT_S,
+    TARGET_DRIVERS_S, TARGET_FLEET_ANALYTICS_S, TARGET_GROUPS_S, TARGET_LIVE_FLEET_S, TARGET_TODAY_IDLE_S, TARGET_TODAY_REPORT_S,
     TARGET_VEHICLE_TRIPS_S, window_target, with_freshness,
 )
 
-from app.wialon import EVENTS_SESSION, VEHICLE_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
+import app.fleet_analytics as _fa
+from app.wialon import ENGINE_SESSION, EVENTS_SESSION, HISTORY_SESSION, VEHICLE_SESSION, WialonAPIError, login, get_vehicle_history, get_vehicle_groups, audit_wialon_fleet, history_truncated
 from app.wialon_reports import (
     execute_wialon_unit_trips_report,
     execute_wialon_group_trips_report,
@@ -63,6 +68,7 @@ from app.idle_events import (
     sensor_names_of,
     vehicle_department,
 )
+from app.drivers import build_drivers_directory, fetch_driver_records
 from app.fuel.routes import router as fuel_router
 
 # Routine PERF timings, cache state and calculation traces log at DEBUG; set LOG_LEVEL=DEBUG to see them.
@@ -172,9 +178,12 @@ async def require_supabase_auth(request: Request, call_next):
         "/api/fleet/groups",
         "/api/wialon/audit",
         "/api/dashboard/summary",
+        "/api/drivers",
     } or request.url.path.startswith("/api/fuel/analytics/")
     trace_id = new_trace_id() if tracked_path else "-"
     trace_token = request_trace_id.set(trace_id)
+    wialon_stats = {"calls": 0}
+    stats_token = request_wialon_stats.set(wialon_stats if tracked_path else None)
     request_started = time.perf_counter()
     # Request entry for time budgets (the fuel import counts upload parsing and its lock wait against it)
     request.state.started = request_started
@@ -201,11 +210,18 @@ async def require_supabase_auth(request: Request, call_next):
                 end_level = logging.INFO
             else:
                 end_level = logging.DEBUG
+            # wialon_calls: Wialon HTTP attempts this request made itself (0 = answered from caches or a shared read);
+            # cache_*: entries per main-cache category; *_total: limit errors since startup
             logging.log(
                 end_level,
-                "PERF request end request_id=%s path=%s status=%s total_ms=%.1f",
+                "PERF request end request_id=%s path=%s status=%s total_ms=%.1f wialon_calls=%s e1003=%s e1004=%s "
+                "e1003_total=%s e1004_total=%s cache_live=%s cache_reports=%s cache_per_vehicle=%s",
                 trace_id, request.url.path, status_code, (time.perf_counter() - request_started) * 1000,
+                wialon_stats.get("calls", 0), wialon_stats.get("e1003", 0), wialon_stats.get("e1004", 0),
+                wialon_limit_errors["e1003"], wialon_limit_errors["e1004"],
+                _cache.size("live"), _cache.size("reports"), _cache.size("per_vehicle"),
             )
+        request_wialon_stats.reset(stats_token)
         request_trace_id.reset(trace_token)
 
 
@@ -408,6 +424,69 @@ def _single_flight(key):
                 del _flight_locks[key]
 
 
+# ─── Stale-while-revalidate ───
+# For slow report results (idle events, Fleet Overview idle, drivers): an expired result still retained and younger
+# than SWR_MAX_AGE_SECONDS is answered at once, marked `refreshing` with its own retrieval time (the freshness block
+# shows its real age), while ONE background refresh per key recomputes it with the route's own compute function and
+# cache rules. A refresh that fails records the failure backoff and leaves the old entry until it ages out; the failure
+# path (_last_good) is unchanged. Manual refreshes (refresh/skip_cache) never take this path.
+SWR_MAX_AGE_SECONDS = _CACHE_RETENTION_SECONDS
+_swr_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="swr-refresh")
+_swr_running = set()
+_swr_guard = threading.Lock()
+
+
+def _run_swr_refresh(key, compute, endpoint):
+    started = time.perf_counter()
+    request_trace_id.set(f"bg-{new_trace_id()}")
+    # Not counted against the request that started it (already answered)
+    request_wialon_stats.set(None)
+    state = "ok"
+    try:
+        # Under the key's single-flight lock: a cold request for the key meanwhile waits for this result
+        with _single_flight(key):
+            compute()
+        _record_success(key)
+    except Exception as exc:
+        state = "failed"
+        if _is_upstream_failure(exc):
+            _record_failure(key)
+        logging.warning("%s: background refresh failed; keeping the earlier result: %s", endpoint, exc)
+    finally:
+        with _swr_guard:
+            _swr_running.discard(key)
+        logging.debug("PERF swr_refresh request_id=%s endpoint=%s state=%s duration_ms=%.1f",
+                      request_trace_id.get(), endpoint, state, (time.perf_counter() - started) * 1000)
+
+
+def _serve_while_revalidating(key, compute, endpoint):
+    """The expired result retained for key, marked refreshing, after starting its background refresh unless one is
+    already running; None when there is nothing to serve (the caller computes in the foreground)."""
+    entry = _cache.get(key)
+    if not entry or not isinstance(entry.get("data"), dict) or time.time() - entry["time"] >= SWR_MAX_AGE_SECONDS:
+        return None
+    # A result kept only TRANSIENT_PARTIAL_TTL_SECONDS (a possibly transient read problem) is re-read before answering,
+    # as the report-result cache policy requires; only complete or permanently partial results are revalidated
+    if (entry.get("ttl") or 0) <= TRANSIENT_PARTIAL_TTL_SECONDS:
+        return None
+    if _in_failure_backoff(key):
+        return None  # the caller's failure path serves the last good result
+    with _swr_guard:
+        start = key not in _swr_running
+        if start:
+            _swr_running.add(key)
+    if start:
+        try:
+            _swr_pool.submit(copy_context().run, _run_swr_refresh, key, compute, endpoint)
+        except RuntimeError:
+            with _swr_guard:
+                _swr_running.discard(key)
+            return None
+    logging.debug("PERF analytics cache request_id=%s endpoint=%s state=stale_revalidate refresh_started=%s",
+                  request_trace_id.get(), endpoint, start)
+    return {**entry["data"], "refreshing": True}
+
+
 @app.get("/")
 def root():
     return {
@@ -453,6 +532,33 @@ def _live_groups(sid):
         return groups
 
 
+# Shared fleet discovery: (raw groups, units, calc_last) read once for every route that needs the fleet within
+# FLEET_DISCOVERY_TTL_SECONDS (the live fleet read, Dashboard mileage and idle, the idle events, drivers and per-vehicle
+# routes, and the fleet analytics builders: fleet trips, health, safety), instead of one core/search_items (~1.4 s
+# measured) + unit/calc_last per route. One cache entry and one in-flight read (fleet_analytics.shared_fleet_discovery);
+# the routes here read groups from the 60 s group read. Callers treat the data as read-only.
+FLEET_DISCOVERY_TTL_SECONDS = _fa.FLEET_DISCOVERY_TTL_SECONDS
+
+
+def _fleet_discovery(sid, fresh=False):
+    """
+    (raw_groups, vehicles, calc_data). A read younger than FLEET_DISCOVERY_TTL_SECONDS is reused unless `fresh` (the
+    live fleet, whose positions must be read now); a fresh read is shared with the other routes. Overlapping cold
+    callers share one read.
+    """
+    def read():
+        vehicles = get_all_vehicles(sid)
+        return _live_groups(sid), vehicles, get_calculated_data(sid, vehicles)
+    return _fa.shared_fleet_discovery(read, fresh=fresh)
+
+
+def _fleet_units(sid):
+    """The fleet's units for routes that need only ids, names, plates and sensors: the shared discovery's when it is
+    current, else one core/search_items (no calc_last)."""
+    hit = _fa.cached_fleet_discovery()
+    return hit[1] if hit else get_all_vehicles(sid)
+
+
 def _newest_message_time(fleet):
     """The newest Wialon message time among the fleet's units (a source timestamp), or None when none is known."""
     times = [v.get("last_message_timestamp") for v in fleet or [] if isinstance(v, dict)]
@@ -477,9 +583,9 @@ def _live_fleet_payload():
 
     def _read_live_fleet():
         sid = login()
-        vehicles = get_all_vehicles(sid)
-        calculated_data = get_calculated_data(sid, vehicles)
-        fleet = get_vehicle_live_data(sid, vehicles, calculated_data, groups=_live_groups(sid))
+        # Positions are read now (fresh); the read is shared with the report routes for FLEET_DISCOVERY_TTL_SECONDS
+        raw_groups, vehicles, calculated_data = _fleet_discovery(sid, fresh=True)
+        fleet = get_vehicle_live_data(sid, vehicles, calculated_data, groups=raw_groups)
         result = {
             "count": len(fleet),
             "vehicles": fleet,
@@ -554,12 +660,18 @@ def get_groups():
     hit = cached("fleet-groups-live", ttl_seconds=15)
     if hit:
         return hit
+    # Overlapping requests share one build
+    with _single_flight("fleet-groups-live"):
+        hit = cached("fleet-groups-live", ttl_seconds=15)
+        if hit:
+            return hit
+        return _build_groups()
 
+
+def _build_groups():
     try:
         sid = login()
-        raw_groups = get_vehicle_groups(sid)
-        vehicles = get_all_vehicles(sid)
-        calculated_data = get_calculated_data(sid, vehicles)
+        raw_groups, vehicles, calculated_data = _fleet_discovery(sid)
         fleet = get_vehicle_live_data(
             sid,
             vehicles,
@@ -683,7 +795,7 @@ def get_vehicle_history_data(
         _require_window_within(from_time, to_time, MAX_HISTORY_HOURS)
     sid = login()
 
-    vehicles = get_all_vehicles(sid)
+    vehicles = _fleet_units(sid)
     target_vehicle = next((v for v in vehicles if v.get("id") == vehicle_id), None)
     sens = (target_vehicle.get("sens") or {}) if target_vehicle else None
 
@@ -748,8 +860,18 @@ def get_vehicle_idle(
     hit = cached(cache_key, ttl_seconds=60)
     if hit:
         return hit
+    # Overlapping identical requests share one report run
+    with _single_flight(cache_key):
+        hit = cached(cache_key, ttl_seconds=60)
+        if hit:
+            return hit
+        return _compute_vehicle_idle(vehicle_id, hours, timeframe, eff_from, eff_to, cache_key)
 
-    sid = login()
+
+def _compute_vehicle_idle(vehicle_id, hours, timeframe, eff_from, eff_to, cache_key):
+    # Own Wialon session (VEHICLE_SESSION), as the vehicle trips report: never holds the shared report lock that the
+    # Dashboard reports wait on
+    sid = login(session=VEHICLE_SESSION)
     # The report returns its totals or raises WialonAPIError (mapped to 502); it never returns None.
     rep_res = execute_wialon_unit_engine_report(sid, vehicle_id, eff_from, eff_to)
 
@@ -802,7 +924,7 @@ def get_vehicle_idle(
 def get_vehicle_efficiency(vehicle_id: int, hours: Annotated[int, Query(ge=1, le=MAX_HISTORY_HOURS)] = 24):
     sid = login()
 
-    vehicles = get_all_vehicles(sid)
+    vehicles = _fleet_units(sid)
     target_vehicle = next((v for v in vehicles if v.get("id") == vehicle_id), None)
     sens = (target_vehicle.get("sens") or {}) if target_vehicle else None
 
@@ -904,16 +1026,11 @@ def get_vehicle_efficiency(vehicle_id: int, hours: Annotated[int, Query(ge=1, le
 
 @app.get("/api/vehicles/{vehicle_id}/safety")
 def get_vehicle_safety(vehicle_id: int):
-    sid = login()
-
-    vehicles = get_all_vehicles(sid)
-    calculated_data = get_calculated_data(sid, vehicles)
-
-    fleet = get_vehicle_live_data(
-        sid,
-        vehicles,
-        calculated_data
-    )
+    # The shared live fleet (one read for overlapping callers) already carries every vehicle's safety flags
+    try:
+        fleet = _live_fleet_payload().get("vehicles") or []
+    except Exception:
+        raise _internal_error("/api/vehicles/{vehicle_id}/safety")
 
     vehicle = next(
         (
@@ -939,57 +1056,51 @@ def get_vehicle_safety(vehicle_id: int):
     }
 
 
-@app.get("/api/drivers")
-def get_drivers():
+DRIVERS_CACHE_KEY = "drivers-directory-v1"
+# Driver records and their vehicle bindings change rarely; the page's Refresh (refresh=true) re-reads Wialon at once
+DRIVERS_TTL_SECONDS = 300
+
+
+def _compute_drivers_directory():
     sid = login()
+    records = fetch_driver_records(sid)
+    # Units and groups from the shared fleet reads when current, so the directory adds only the driver read
+    vehicles = _fleet_units(sid)
+    groups = _live_groups(sid)
+    result = build_drivers_directory(records, vehicles, groups, now_timestamp())
+    set_cache(DRIVERS_CACHE_KEY, result, DRIVERS_TTL_SECONDS)
+    return result
 
-    vehicles = get_all_vehicles(sid)
-    calculated_data = get_calculated_data(sid, vehicles)
 
-    fleet = get_vehicle_live_data(
-        sid,
-        vehicles,
-        calculated_data
-    )
-
-    drivers = {}
-
-    invalid_driver_ids = {
-        "",
-        "---",
-        "0000000000000000",
-        "0",
-        "none",
-        "null"
-    }
-
-    for vehicle in fleet:
-        driver = vehicle.get("driver") or {}
-        driver_id = driver.get("id")
-
-        if driver_id is None:
-            continue
-
-        driver_id_string = str(driver_id).strip().lower()
-
-        if driver_id_string in invalid_driver_ids:
-            continue
-
-        driver_key = driver_id_string
-
-        if driver_key not in drivers:
-            drivers[driver_key] = {
-                "driver_id": driver_id,
-                "vehicle_id": vehicle["vehicle_id"],
-                "vehicle_name": vehicle["vehicle_name"]
-            }
-
-    driver_list = list(drivers.values())
-
-    return {
-        "count": len(driver_list),
-        "drivers": driver_list
-    }
+@app.get("/api/drivers")
+@_fresh(TARGET_DRIVERS_S)
+def get_drivers(request: Request = None, refresh: bool = False):
+    """
+    Drivers page directory (app/drivers.py): every Wialon driver record with its current vehicle assignment (`bu`),
+    vehicle plate and groups, coverage summary and data issues. All signed-in roles may read it, phones included.
+    """
+    if refresh and request is not None:
+        # A forced refresh bypasses the cache and re-reads Wialon: bounded per user
+        enforce_rate_limit(request, "heavy")
+    if not refresh:
+        hit = cached(DRIVERS_CACHE_KEY, ttl_seconds=DRIVERS_TTL_SECONDS)
+        if hit:
+            return hit
+        stale = _last_good(DRIVERS_CACHE_KEY) if _in_failure_backoff(DRIVERS_CACHE_KEY) else None
+        if stale is not None:
+            return stale
+        revalidating = _serve_while_revalidating(DRIVERS_CACHE_KEY, _compute_drivers_directory, "/api/drivers")
+        if revalidating is not None:
+            return revalidating
+    with _single_flight(DRIVERS_CACHE_KEY):
+        if not refresh:
+            hit = cached(DRIVERS_CACHE_KEY, ttl_seconds=DRIVERS_TTL_SECONDS)
+            if hit:
+                return hit
+        try:
+            return _compute_with_last_good(DRIVERS_CACHE_KEY, _compute_drivers_directory, "/api/drivers")
+        except Exception:
+            raise _internal_error("/api/drivers")
 
 
 @app.get("/api/dashboard/summary")
@@ -1097,11 +1208,17 @@ def get_fleet_health():
     hit = cached("fleet-health", ttl_seconds=300)  # 5 min cache
     if hit:
         return hit
+    # Overlapping requests share one build
+    with _single_flight("fleet-health"):
+        hit = cached("fleet-health", ttl_seconds=300)
+        if hit:
+            return hit
+        return _build_fleet_health()
 
+
+def _build_fleet_health():
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
-    vehicles = get_all_vehicles(sid)
-    calculated_data = get_calculated_data(sid, vehicles)
+    raw_groups, vehicles, calculated_data = _fleet_discovery(sid)
     fleet = get_vehicle_live_data(sid, vehicles, calculated_data, groups=raw_groups)
 
     total = len(fleet)
@@ -1245,7 +1362,7 @@ def get_dashboard_mileage(
 
     def _build():
         sid = login()
-        raw_groups = get_vehicle_groups(sid)
+        raw_groups, vehicles, calculated_data = _fleet_discovery(sid)
         unit_groups_map = {}
         for group in raw_groups:
             group_name = group.get("nm", "").strip()
@@ -1257,11 +1374,9 @@ def get_dashboard_mileage(
                 if group_name not in unit_groups_map[uid]:
                     unit_groups_map[uid].append(group_name)
 
-        vehicles = get_all_vehicles(sid)
         name_counts = Counter(str(v.get("nm", "")).strip() for v in vehicles)
         # Report rows carry only the unit name: a name shared by several units cannot be attributed
         ambiguous_names = sorted(n for n, c in name_counts.items() if c > 1)
-        calculated_data = get_calculated_data(sid, vehicles)
         calculated_by_vehicle = {item.get("i"): item for item in calculated_data}
 
         mileage_units = []
@@ -1294,8 +1409,10 @@ def get_dashboard_mileage(
             report_group_id = int(group_id) if group_id else resolve_all_units_group_id(sid, raw_groups)
             # Shared with /api/fleet/trips for the same report group and window: this result reports the snapshot's
             # window and retrieval time and expires with it, so Distance and Trips come from one report run
+            # A closed window (e.g. yesterday) runs on HISTORY_SESSION, alongside today's report on the shared one
+            report_sid = login(session=HISTORY_SESSION) if window_closed(eff_to) else sid
             snapshot, snapshot_fresh_for = group_trips_snapshot(
-                execute_wialon_group_trips_report, sid, report_group_id, window_spec, eff_from, eff_to)
+                execute_wialon_group_trips_report, report_sid, report_group_id, window_spec, eff_from, eff_to)
             group_report = snapshot["rows"]
             window_from, window_to, retrieved_at = snapshot["from_time"], snapshot["to_time"], snapshot["retrieved_at"]
 
@@ -1478,10 +1595,18 @@ def get_dashboard_trends(request: Request = None, hours: int = 24):
     if hit:
         return hit
     enforce_rate_limit(request, "heavy")
+    # Every unit's raw history is loaded: overlapping requests share one build instead of each loading it
+    with _single_flight(cache_key):
+        hit = cached(cache_key, ttl_seconds=600)
+        if hit:
+            return hit
+        return _build_dashboard_trends(hours, cache_key)
 
+
+def _build_dashboard_trends(hours, cache_key):
     sid = login()
 
-    vehicles = get_all_vehicles(sid)
+    vehicles = _fleet_units(sid)
 
     if not vehicles:
         return {
@@ -1794,15 +1919,24 @@ def get_fleet_idle_analytics(
 
     # Overlapping identical requests (two tabs, a remount) wait for the one already running and reuse its cached
     # result instead of each paging the same Wialon report; a refresh still recomputes after it.
+    def compute():
+        return _compute_fleet_idle_analytics(
+            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key,
+            window_spec=window_spec, reuse_report=not (refresh or skip_cache),
+        )
+
+    if not refresh and not skip_cache:
+        # Expired but retained: answered at once while one background refresh re-runs the Engine Hours report
+        revalidating = _serve_while_revalidating(cache_key, compute, "/api/idle/fleet-analytics")
+        if revalidating is not None:
+            return revalidating
+
     with _single_flight(cache_key):
         if not refresh and not skip_cache:
             hit = cached(cache_key, ttl_seconds=idle_ttl)
             if hit:
                 return hit
-        return _compute_with_last_good(cache_key, lambda: _compute_fleet_idle_analytics(
-            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, include_events, cache_key,
-            window_spec=window_spec, reuse_report=not (refresh or skip_cache),
-        ), "/api/idle/fleet-analytics")
+        return _compute_with_last_good(cache_key, compute, "/api/idle/fleet-analytics")
 
 
 def _engine_report_key(window_spec, report_group_id):
@@ -1857,8 +1991,8 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
     """Build the /api/idle/fleet-analytics payload from Wialon and cache it under cache_key when complete."""
     sid = login()
 
-    # Dynamic Customer Groups Discovery
-    raw_groups = get_vehicle_groups(sid)
+    # Dynamic Customer Groups Discovery (shared fleet discovery: groups, units and calc_last)
+    raw_groups, vehicles, calculated_data = _fleet_discovery(sid)
     group_map = {}
     unit_groups_map = {}
     valid_groups = []
@@ -1882,8 +2016,6 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
                 unit_groups_map[uid].append({"id": gid, "name": name})
 
     # Vehicles & Live Calculations
-    vehicles = get_all_vehicles(sid)
-    calculated_data = get_calculated_data(sid, vehicles)
     live_vehicles = get_vehicle_live_data(sid, vehicles, calculated_data, groups=raw_groups)
     live_map = {v["vehicle_id"]: v for v in live_vehicles}
 
@@ -1910,8 +2042,12 @@ def _compute_fleet_idle_analytics(eff_from, eff_to, hours, timeframe, group_id, 
 
     # Execute authoritative Wialon Engine Hours Report (Template 2). Paging every unit's idle events
     # can hold a report lock for minutes, so it runs on a dedicated Wialon session with its own lock:
-    # Dashboard summary/mileage reports on the shared session never wait behind it.
-    report_sid = login(session=EVENTS_SESSION) if include_events else sid
+    # Dashboard summary/mileage reports on the shared session never wait behind it. Without events (the Fleet
+    # Overview idle KPIs) it runs on ENGINE_SESSION, so it runs alongside the Group Trips report on the shared
+    # session instead of queuing behind it. Same template and parameters either way.
+    # A closed window without events (yesterday's idle tile) runs on HISTORY_SESSION, alongside today's on ENGINE_SESSION
+    report_sid = login(session=EVENTS_SESSION if include_events
+                       else HISTORY_SESSION if window_closed(eff_to) else ENGINE_SESSION)
     report_group_id = resolve_all_units_group_id(sid, raw_groups)
     # Members of the report group: one without a row is a (transient) report gap, a non-member a permanent one
     report_group_members = set(next((g.get("u") or [] for g in raw_groups if g.get("id") == report_group_id), []))
@@ -2390,15 +2526,24 @@ def get_idle_events_analytics(
         if stale is not None:
             return stale
 
+    def compute():
+        return _compute_idle_events_analytics(
+            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, cache_key, window_spec,
+            reuse_unit_results=not (refresh or skip_cache),
+        )
+
+    if not refresh and not skip_cache:
+        # Expired but retained: answered at once while one background refresh re-reads the units' reports
+        revalidating = _serve_while_revalidating(cache_key, compute, "/api/idle/events")
+        if revalidating is not None:
+            return revalidating
+
     with _single_flight(cache_key):
         if not refresh and not skip_cache:
             hit = cached(cache_key, ttl_seconds=ttl)
             if hit:
                 return hit
-        return _compute_with_last_good(cache_key, lambda: _compute_idle_events_analytics(
-            eff_from, eff_to, hours, timeframe, group_id, vehicle_id, cache_key, window_spec,
-            reuse_unit_results=not (refresh or skip_cache),
-        ), "/api/idle/events")
+        return _compute_with_last_good(cache_key, compute, "/api/idle/events")
 
 
 @app.get("/api/idle/events/driver")
@@ -2417,7 +2562,7 @@ def _compute_idle_events_analytics(eff_from, eff_to, hours, timeframe, group_id,
                                    reuse_unit_results=True):
     """Build the /api/idle/events payload from the Idle Report-Unit template and cache it under cache_key."""
     sid = login()
-    raw_groups = get_vehicle_groups(sid)
+    raw_groups, vehicles, calculated_data = _fleet_discovery(sid)
     unit_groups_map = defaultdict(list)
     valid_groups = []
     for g in raw_groups:
@@ -2429,9 +2574,8 @@ def _compute_idle_events_analytics(eff_from, eff_to, hours, timeframe, group_id,
             if not any(x["id"] == g.get("id") for x in unit_groups_map[uid]):
                 unit_groups_map[uid].append({"id": g.get("id"), "name": name})
 
-    vehicles = get_all_vehicles(sid)
     vehicles_by_id = {v.get("id"): v for v in vehicles if v.get("id")}
-    live_vehicles = get_vehicle_live_data(sid, vehicles, get_calculated_data(sid, vehicles), groups=raw_groups)
+    live_vehicles = get_vehicle_live_data(sid, vehicles, calculated_data, groups=raw_groups)
     live_map = {v.get("vehicle_id"): v for v in live_vehicles}
 
     target_vehicles = live_vehicles

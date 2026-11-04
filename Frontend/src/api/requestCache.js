@@ -10,9 +10,14 @@ export const MAX_CLIENT_CACHE_ENTRIES = 200
 // write its response back into the cache or be shared with callers that start after it.
 let cacheGeneration = 0
 
+// A response the backend answered from an expired result while it refreshes it (`refreshing`) is served from this
+// cache for this long only, so the next read picks up the refreshed result; it still counts as the last response
+// for peekClientCache
+export const REFRESHING_TTL_MS = 5000
+
 export function getFromClientCache(key, ttlMs = 10000) {
     const entry = clientCache.get(key)
-    if (entry && (Date.now() - entry.timestamp) < ttlMs) {
+    if (entry && (Date.now() - entry.timestamp) < Math.min(ttlMs, entry.maxTtlMs ?? Infinity)) {
         clientCache.delete(key)
         clientCache.set(key, entry)
         return entry.data
@@ -22,7 +27,11 @@ export function getFromClientCache(key, ttlMs = 10000) {
 
 export function setClientCache(key, data) {
     clientCache.delete(key)
-    clientCache.set(key, { data, timestamp: Date.now() })
+    clientCache.set(key, {
+        data,
+        timestamp: Date.now(),
+        maxTtlMs: data && typeof data === "object" && data.refreshing === true ? REFRESHING_TTL_MS : undefined,
+    })
     while (clientCache.size > MAX_CLIENT_CACHE_ENTRIES) {
         clientCache.delete(clientCache.keys().next().value)
     }

@@ -1,18 +1,28 @@
-import { AlertCircle, Inbox, Loader2, RefreshCw } from "lucide-react"
+import { AlertCircle, Inbox, RefreshCw } from "lucide-react"
+import { SkeletonChart, SkeletonLines, SkeletonTableRows } from "./Skeleton"
 
 /**
  * Standard loading / error / empty states shared by every data component.
  */
 
 // Framed by default; callers embedding a state inside a panel pass "border-0"/"border-none" to drop the frame
+const isFrameless = (className) => /\bborder-(0|none)\b/.test(className)
 const frameFor = (className) =>
-    `flex flex-col items-center justify-center px-6 text-center ${/\bborder-(0|none)\b/.test(className) ? "" : "rounded-lg border border-slate-200 bg-white"}`
+    `flex flex-col items-center justify-center px-6 text-center ${isFrameless(className) ? "" : "rounded-lg border border-slate-200 bg-white"}`
 
-export function LoadingState({ label = "Loading…", className = "" }) {
+// A section's first load: a skeleton of the content it will show (table rows, a chart or text lines), never a spinner.
+// `label` is announced to assistive technology only.
+export function LoadingState({ label = "Loading…", className = "", variant = "table", rows = 6, columns = 5, height = 240 }) {
+    const frame = isFrameless(className) ? "" : "rounded-lg border border-slate-200 bg-white"
     return (
-        <div role="status" className={`${frameFor(className)} py-14 ${className}`}>
-            <Loader2 className="h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-            <p className="mt-2.5 text-xs text-slate-500">{label}</p>
+        <div className={`${frame} ${className}`}>
+            {variant === "chart" ? (
+                <SkeletonChart height={height} label={label} className="m-4" />
+            ) : variant === "lines" ? (
+                <SkeletonLines lines={rows} label={label} className="space-y-2.5 p-4" />
+            ) : (
+                <SkeletonTableRows rows={rows} columns={columns} label={label} />
+            )}
         </div>
     )
 }

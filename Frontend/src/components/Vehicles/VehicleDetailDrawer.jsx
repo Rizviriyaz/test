@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Link } from "react-router-dom"
-import { Loader2, ArrowUpRight, X } from "lucide-react"
+import { ArrowUpRight, X } from "lucide-react"
 import { getVehicleTrips, getIdleEvents } from "../../api/fleetApi"
 import FreshnessBadge from "../Common/FreshnessBadge"
 import { formatUAETime, getUAETodayBounds } from "../../utils/datetime"
@@ -217,7 +217,8 @@ export default function VehicleDetailDrawer({
         ? `Partial: ${distanceUnknownTrips} trip(s) unknown`
         : (distanceIncomplete ? "Partial: some Wialon trip rows could not be read" : null)
 
-    const spinner = <Loader2 className="inline h-3.5 w-3.5 animate-spin text-slate-400 motion-reduce:animate-none" aria-label="Loading" />
+    // First load of a value: an inline placeholder of a short value's width (refreshes keep the value on screen)
+    const spinner = <span role="status" aria-label="Loading" className="inline-block h-3 w-12 animate-pulse rounded bg-slate-100 align-middle motion-reduce:animate-none" />
     const isIdling = statusStr === "IDLING"
     const idleStatus = idleDurationStatus(currentVehicle)
 

@@ -135,12 +135,19 @@ export async function getVehicleGroups(options = {}) {
     return deduplicatedFetch(`${API_URL}/api/groups`, options, 30000)
 }
 
-export async function getDrivers() {
-    const response = await apiFetch(`${API_URL}/api/drivers`)
-    if (!response.ok) {
-        throw new Error("Failed to fetch drivers")
-    }
-    return response.json()
+// Drivers page directory: every Wialon driver with its current vehicle assignment. `refresh` re-reads Wialon (rate
+// limited by the backend); its result replaces the cached directory under the same key.
+const DRIVERS_TTL_MS = 60000
+
+export async function getDrivers(options = {}) {
+    const url = `${API_URL}/api/drivers`
+    const { refresh, ...rest } = options
+    return deduplicatedFetch(refresh ? `${url}?refresh=true` : url, { ...rest, skipCache: Boolean(refresh || rest.skipCache), cacheKey: url }, DRIVERS_TTL_MS)
+}
+
+// The last drivers directory (up to maxAgeMs old, possibly past its TTL), or null (never fetches)
+export function peekDrivers(maxAgeMs = STALE_REPORT_MS) {
+    return peekClientCache(`${API_URL}/api/drivers`, maxAgeMs)
 }
 
 export async function getVehicleTrips(vehicleId, options = {}) {
@@ -286,6 +293,12 @@ export async function getIdleEventDriver({ vehicle_id, start_time, driver_name }
 export function getCachedIdleEvents(options = {}) {
     const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl({ ...options, include_events: undefined }, IDLE_EVENTS_PATH)
     return shouldBypass ? null : getFromClientCache(cacheKey, FLEET_IDLE_TTL_MS)
+}
+
+// The last idle events response for these options (up to maxAgeMs old, possibly past its TTL), or null (never fetches)
+export function peekIdleEvents(options = {}, maxAgeMs = STALE_REPORT_MS) {
+    const { shouldBypass, cacheKey } = fleetIdleAnalyticsUrl({ ...options, include_events: undefined }, IDLE_EVENTS_PATH)
+    return shouldBypass ? null : peekClientCache(cacheKey, maxAgeMs)
 }
 
 export async function sendAiChatMessage(messages) {

@@ -4,13 +4,13 @@ import {
     X,
     AlertTriangle,
     Info,
-    Loader2,
     CheckCircle2,
 } from "lucide-react"
 import { getVehicleFuelDetail } from "../../api/fleetApi"
 import VehicleStatusBadge from "./VehicleStatusBadge"
 import { formatMeasurement, resolveActivityHours, collectTelemetryNotice, isKnownNumber, idleSessionsLabel } from "./telemetryFormat"
 import ClassificationBadge from "./ClassificationBadge"
+import { SkeletonCards, SkeletonTableRows } from "../Common/Skeleton"
 import { fuelTypeLabel } from "./fuelLabels"
 import { formatReportingMonth } from "./fuelImportState"
 
@@ -148,9 +148,9 @@ export default function VehicleFuelDetailModal({
                 {/* ─── MODAL BODY ──────────────────────────────────────────── */}
                 <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-5">
                     {loading ? (
-                        <div role="status" className="py-16 text-center text-xs text-slate-500">
-                            <Loader2 className="mx-auto mb-3 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                            <span>Loading fuel transactions and activity…</span>
+                        <div className="space-y-5">
+                            <SkeletonCards count={4} className="grid grid-cols-2 gap-3 sm:grid-cols-4" cardClassName="h-[84px]" label="Loading fuel transactions and activity" />
+                            <div className="rounded-lg border border-slate-200"><SkeletonTableRows rows={6} columns={5} label="Loading transactions" /></div>
                         </div>
                     ) : error ? (
                         <div role="alert" className="flex items-center gap-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">

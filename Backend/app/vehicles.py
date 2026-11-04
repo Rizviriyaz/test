@@ -1,5 +1,6 @@
 import logging
 import math
+import threading
 import time
 
 from app.performance_diagnostics import request_trace_id
@@ -24,6 +25,16 @@ from app.status import (
 from app.normalize import is_valid_sensor_value, resolve_unit_sensors
 
 idle_start_times = {}
+# One lock per unit being seeded (see get_vehicle_live_data); bounded by the fleet's unit count
+_idle_seed_locks = {}
+_idle_seed_locks_guard = threading.Lock()
+
+
+def _idle_seed_lock(vehicle_id):
+    with _idle_seed_locks_guard:
+        return _idle_seed_locks.setdefault(vehicle_id, threading.Lock())
+
+
 # Units whose seeded idle start is only a lower bound (see idle_duration_status below)
 idle_start_lower_bound = set()
 
@@ -369,58 +380,63 @@ def get_vehicle_live_data(sid, vehicles, calculated_data, groups=None):
 
             if vehicle_id not in idle_start_times:
 
-                seed_vehicles += 1
-                seed_started = time.perf_counter()
-                idle_duration_from_history = 0
-                lower_bound = False
-                try:
-                    for lookback_hours in IDLE_SEED_LOOKBACK_HOURS:
-                        seed_history_reads += 1
-                        messages = get_vehicle_history(
-                            sid,
-                            vehicle_id,
-                            from_time=current_time - lookback_hours * 3600,
-                            to_time=current_time
-                        )
+                # One history read per vehicle: concurrent fleet reads (the Dashboard's routes) wait for the seed already
+                # running and use its idle start instead of each loading the same history
+                with _idle_seed_lock(vehicle_id):
+                    if vehicle_id not in idle_start_times:
 
-                        idle_duration_from_history = (
-                            calculate_idle_duration(
-                                messages,
-                                current_time,
-                                configured_sensors
+                        seed_vehicles += 1
+                        seed_started = time.perf_counter()
+                        idle_duration_from_history = 0
+                        lower_bound = False
+                        try:
+                            for lookback_hours in IDLE_SEED_LOOKBACK_HOURS:
+                                seed_history_reads += 1
+                                messages = get_vehicle_history(
+                                    sid,
+                                    vehicle_id,
+                                    from_time=current_time - lookback_hours * 3600,
+                                    to_time=current_time
+                                )
+
+                                idle_duration_from_history = (
+                                    calculate_idle_duration(
+                                        messages,
+                                        current_time,
+                                        configured_sensors
+                                    )
+                                )
+
+                                # The idle run began after the window's first message, so its real start was found.
+                                # Otherwise it fills the whole window and is re-read over the next, wider one.
+                                # Only data messages count, matching calculate_idle_duration.
+                                first_ts = min((m["t"] for m in messages if m.get("tp") == "ud" and m.get("t")), default=None)
+                                if first_ts is None:
+                                    # No data message in the window: the run's start is not known, only that it is ongoing
+                                    lower_bound = True
+                                    break
+                                if current_time - idle_duration_from_history > first_ts:
+                                    lower_bound = history_truncated(messages)
+                                    break
+                            else:
+                                # The run fills even the widest window searched
+                                lower_bound = True
+                        except Exception as exc:
+                            # One unit's history failure must not fail the fleet response: its idle start is unknown
+                            logging.warning("Idle start history read failed for vehicle %s; idle duration unknown: %s", vehicle_id, exc)
+                            idle_duration_status = IDLE_DURATION_UNKNOWN
+                        else:
+                            idle_start_times[
+                                vehicle_id
+                            ] = (
+                                current_time
+                                - idle_duration_from_history
                             )
-                        )
-
-                        # The idle run began after the window's first message, so its real start was found.
-                        # Otherwise it fills the whole window and is re-read over the next, wider one.
-                        # Only data messages count, matching calculate_idle_duration.
-                        first_ts = min((m["t"] for m in messages if m.get("tp") == "ud" and m.get("t")), default=None)
-                        if first_ts is None:
-                            # No data message in the window: the run's start is not known, only that it is ongoing
-                            lower_bound = True
-                            break
-                        if current_time - idle_duration_from_history > first_ts:
-                            lower_bound = history_truncated(messages)
-                            break
-                    else:
-                        # The run fills even the widest window searched
-                        lower_bound = True
-                except Exception as exc:
-                    # One unit's history failure must not fail the fleet response: its idle start is unknown
-                    logging.warning("Idle start history read failed for vehicle %s; idle duration unknown: %s", vehicle_id, exc)
-                    idle_duration_status = IDLE_DURATION_UNKNOWN
-                else:
-                    idle_start_times[
-                        vehicle_id
-                    ] = (
-                        current_time
-                        - idle_duration_from_history
-                    )
-                    if lower_bound:
-                        idle_start_lower_bound.add(vehicle_id)
-                    else:
-                        idle_start_lower_bound.discard(vehicle_id)
-                seed_seconds += time.perf_counter() - seed_started
+                            if lower_bound:
+                                idle_start_lower_bound.add(vehicle_id)
+                            else:
+                                idle_start_lower_bound.discard(vehicle_id)
+                        seed_seconds += time.perf_counter() - seed_started
 
             idle_start = idle_start_times.get(
                 vehicle_id

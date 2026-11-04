@@ -8,6 +8,7 @@ import {
     Clock3,
     LogOut,
     Menu,
+    Users,
 } from "lucide-react"
 
 import { NavLink, Link, useNavigate } from "react-router-dom"
@@ -62,6 +63,7 @@ const navigation = [
             { name: "Live Tracking",   icon: Map,        path: "/tracking" },
             { name: "Idle Analytics",  icon: Clock3,     path: "/idle-analytics" },
             { name: "Vehicle Health",  icon: HeartPulse, path: "/vehicle-health" },
+            { name: "Drivers",         icon: Users,      path: "/drivers" },
         ],
     },
 ]

@@ -99,9 +99,11 @@ test("dashboard loads closed-day (yesterday) reports once per UAE day", () => {
 
 test("alias routes redirect instead of rendering another page under a misleading URL", () => {
     const app = readFileSync(new URL("../App.jsx", import.meta.url), "utf8")
-    for (const [from, to] of [["/trips", "/tracking"], ["/reports", "/idle-analytics"], ["/drivers", "/dashboard"], ["/settings", "/dashboard"]]) {
+    for (const [from, to] of [["/trips", "/tracking"], ["/reports", "/idle-analytics"], ["/settings", "/dashboard"]]) {
         assert.match(app, new RegExp(`path="${from}"\\s+element=\\{<Navigate to="${to}" replace />\\}`), from)
     }
+    // /drivers is its own protected page now, no longer an alias
+    assert.match(app, /path="\/drivers"\s+element=\{\s*<ProtectedRoute>\s*<Drivers \/>\s*<\/ProtectedRoute>\s*\}/)
 })
 
 test("idleElapsedSeconds stops the live idle timer at the last message", () => {

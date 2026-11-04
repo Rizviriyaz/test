@@ -21,6 +21,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && C:/Users/HP/.local/bin/graphify.EXE update . >/dev/null 2>&1 || true",
+            "timeout": 300,
+            "async": true
+          }
+        ]
+      }
     ]
   }
 }

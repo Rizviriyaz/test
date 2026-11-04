@@ -1,12 +1,12 @@
 import { useState } from "react"
 import {
     ArrowUpRight,
-    Loader2,
     ChevronDown,
     ChevronUp,
 } from "lucide-react"
 import SearchInput from "../Common/SearchInput"
 import Pagination from "../Common/Pagination"
+import { SkeletonTableRows } from "../Common/Skeleton"
 import VehicleStatusBadge from "./VehicleStatusBadge"
 import { fixedOrDash, sortOrderLabels } from "./fuelLabels"
 
@@ -165,12 +165,7 @@ export default function VehicleLeaderboard({
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                         {loading ? (
-                            <tr>
-                                <td colSpan={6} role="status" className="py-12 text-center text-xs text-slate-500">
-                                    <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                                    Loading rankings…
-                                </td>
-                            </tr>
+                            <SkeletonTableRows rows={8} columns={6} asRows />
                         ) : error ? (
                             <tr>
                                 <td colSpan={6} role="alert" className="py-10 text-center text-xs text-rose-700">

@@ -19,10 +19,10 @@ import { Magnetic } from "../components/core/magnetic"
 import { useAuth } from "../context/useAuth"
 
 // Real captured screenshots from the active ATS Fleet Management dashboard
-import fleetOverviewImg from "../assets/screenshots/fleet-overview.png"
-import liveTrackingImg from "../assets/screenshots/live-tracking.png"
-import vehicleTelemetryImg from "../assets/screenshots/vehicle-telemetry.png"
-import fleetAlertsImg from "../assets/screenshots/fleet-alerts.png"
+import fleetOverviewImg from "../assets/screenshots/fleet-overview.webp"
+import liveTrackingImg from "../assets/screenshots/live-tracking.webp"
+import vehicleTelemetryImg from "../assets/screenshots/vehicle-telemetry.webp"
+import fleetAlertsImg from "../assets/screenshots/fleet-alerts.webp"
 
 const CORE_CAPABILITIES = [
     {

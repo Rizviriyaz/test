@@ -28,6 +28,7 @@ FRESH_READ_SECONDS = 2
 # Age up to which each category counts as current (its cache TTL plus its usual client refresh interval)
 TARGET_LIVE_FLEET_S = 30            # /api/vehicles: 8 s cache, 10 s polls
 TARGET_GROUPS_S = 120
+TARGET_DRIVERS_S = 360              # drivers directory: 300 s cache, refreshed on demand
 TARGET_TODAY_REPORT_S = 120         # today's mileage and trips: 60 s report snapshot, 30 s polls
 TARGET_TODAY_IDLE_S = 240           # today's engine/idle report: 180 s cache, 30 s polls
 TARGET_FLEET_ANALYTICS_S = 360      # fleet health, utilization, alerts, group rollups: 180-300 s caches
@@ -92,4 +93,6 @@ def with_freshness(result: Any, *, target_age_seconds: Optional[int], fetched_at
         target_age_seconds=target_age_seconds, stale=result.get("stale") is True, partial=partial,
         unavailable=unavailable, refresh_error=refresh_error, source_updated_at=source_updated_at, now=now,
     )
+    # An expired result answered while its background refresh runs (stale-while-revalidate)
+    block["refreshing"] = result.get("refreshing") is True
     return {**result, "freshness": block}

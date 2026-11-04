@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from offline_guard import OfflineGuard  # noqa: E402
 
 import app.main as main  # noqa: E402
+import app.fleet_analytics as _shared_fa  # noqa: E402
 import app.wialon as wialon  # noqa: E402
 from app.wialon import WialonAPIError  # noqa: E402
 
@@ -52,6 +53,7 @@ def test_auth_errors_carry_cors_headers():
 def test_internal_errors_are_generic():
     client = _client()
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     with patch("app.main.authenticate_access_token", return_value=USER), \
             patch("app.main.login", side_effect=ValueError("secret-internal-detail token=abc")):
         res = client.get("/api/vehicles", headers=AUTH_HEADERS)
@@ -104,6 +106,7 @@ def test_log_levels():
 
         client = _client()
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
         main.set_cache("fleet-vehicles-live", {"count": 0, "vehicles": []})
         cases = [
             (logging.DEBUG, 200, patch("app.main.login")),
@@ -113,6 +116,7 @@ def test_log_levels():
         for expected, status, login_patch in cases:
             if status == 502:
                 main._cache.clear()
+                _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
             records.clear()
             headers = AUTH_HEADERS if login_patch else {}
             with patch("app.main.authenticate_access_token", return_value=USER):
@@ -127,6 +131,7 @@ def test_log_levels():
             if status == 200:
                 assert levels("PERF calculation") == [logging.DEBUG, logging.DEBUG], levels("PERF calculation")
         main._cache.clear()
+        _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     finally:
         root.removeHandler(handler)
         root.setLevel(previous_level)
@@ -157,6 +162,7 @@ def test_caches_are_bounded():
     # main._cache keeps one bound per category: a flood of per-vehicle keys stays within the per-vehicle bound and
     # never evicts a shared live or report entry
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     main.set_cache("fleet-vehicles-live", {"live": True})
     main.set_cache("dashboard-mileage-v3-tf-today-1-None-uae", {"report": True})
     for i in range(5000):
@@ -173,6 +179,7 @@ def test_caches_are_bounded():
             setter(i)
         assert len(cache._data) <= cache.max_entries, len(cache._data)
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     fa._analytics_cache.clear()
     assert main.cached("missing") is None
     main.set_cache("k", {"v": 1})
@@ -275,6 +282,7 @@ def test_ui_windows_still_accepted():
 def test_summary_uses_one_window():
     client = _client()
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     calls = {}
 
     def rec(name, payload):
@@ -304,6 +312,7 @@ def test_summary_uses_one_window():
             assert bad.status_code == 400, (tf, bad.status_code, bad.text)
         assert not calls, calls
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     print(f"[PASS] M15: summary passes one rolling window (7d -> hours={hours}) to trips, idle and safety; "
           "calendar timeframes return 400.")
 
@@ -391,6 +400,7 @@ def test_idle_seed_widens_past_two_hours():
 def test_report_failures_are_502_not_fallback():
     client = _client()
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     with patch("app.main.authenticate_access_token", return_value=USER), \
             patch("app.main.login", return_value="sid"), \
             patch("app.main.get_vehicle_history", side_effect=AssertionError("no raw-history fallback")), \
@@ -399,6 +409,7 @@ def test_report_failures_are_502_not_fallback():
         assert client.get("/api/vehicles/1/trips", headers=AUTH_HEADERS).status_code == 502
         assert client.get("/api/vehicles/1/idle", headers=AUTH_HEADERS).status_code == 502
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     print("[PASS] M12: unit trips/idle report failures return 502 (dead fallback branches removed).")
 
 
@@ -457,6 +468,7 @@ def test_docs_disabled_in_production():
 def test_duplicate_unit_names_not_attributed():
     client = _client()
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     units = [{"id": 1, "nm": "TWIN"}, {"id": 2, "nm": "TWIN"}, {"id": 3, "nm": "SOLO"}]
     rows = [{"vehicle_name": "TWIN", "mileage_km": 10.0}, {"vehicle_name": "SOLO", "mileage_km": 5.0}]
     with patch("app.main.authenticate_access_token", return_value=USER), \
@@ -467,6 +479,7 @@ def test_duplicate_unit_names_not_attributed():
             patch("app.main.execute_wialon_group_trips_report", return_value=rows):
         res = client.get("/api/dashboard/mileage?timeframe=today", headers=AUTH_HEADERS)
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     assert res.status_code == 200, res.text
     body = res.json()
     units_out = sorted((u["vehicle_id"], u["vehicle_name"], u["mileage"]) for u in body["all_units"])
@@ -506,6 +519,7 @@ def test_ambiguous_idle_is_unknown_not_zero():
 
 def test_incomplete_reports_not_cached():
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     calls = {"trips": 0, "engine": 0, "group": 0}
 
     def unit_trips(*a, **k):
@@ -542,6 +556,7 @@ def test_incomplete_reports_not_cached():
         age_report_caches(main.TRANSIENT_PARTIAL_TTL_SECONDS + 1)
         mileage = main.get_dashboard_mileage(timeframe="custom", from_time=1000, to_time=5000)
     main._cache.clear()
+    _shared_fa._analytics_cache.clear()  # the shared fleet discovery lives in the analytics cache
     assert calls == {"trips": 2, "engine": 2, "group": 2}, f"incomplete results were cached: {calls}"
     assert trips["incomplete_fields"] == ["distance_km"], trips
     assert idle["summary"]["total_idle_seconds"] is None and idle["summary"]["total_engine_seconds"] == 3600, idle

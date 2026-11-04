@@ -121,7 +121,10 @@ test("Idle analytics labels trend, hotspots and the event list when events are p
     assert.match(page, /title="Idle Duration Trend"\s+subtitle=\{eventsNote \|\| undefined\}/)
     assert.match(page, /subtitle=\{eventsNote \? `Top 10 locations · \$\{eventsNote\}` : undefined\}/)
     assert.match(page, /subtitle=\{eventsNote \? `Ranked idle locations · \$\{eventsNote\}` : /, "hotspot table note")
-    assert.equal((page.match(/\{eventsNote && \(/g) || []).length, 1, "event list note")
+    // The per-vehicle event list (modal) carries the same partial-events note
+    assert.match(page, /<VehicleIdleEventsModal[\s\S]*?note=\{eventsNote\}/, "event list note")
+    const modal = readFileSync(new URL("../components/Analytics/VehicleIdleEventsModal.jsx", import.meta.url), "utf8")
+    assert.match(modal, /\{note && !loading && /, "event list renders the note")
     assert.match(page, /\{eventsPending \? "…" : \(kpis\.idle_event_count \?\? "—"\)\}/,
         "unknown event count renders as a dash (and as loading while the full response is pending)")
 })

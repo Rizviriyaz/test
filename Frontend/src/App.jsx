@@ -3,7 +3,9 @@ import {
     Routes,
     Route,
     Navigate,
+    useLocation,
 } from "react-router-dom"
+import { AppShellSkeleton } from "./components/Common/Skeleton"
 import { lazy, Suspense, useEffect } from "react"
 
 import { AuthProvider } from "./context/AuthContext"
@@ -22,6 +24,7 @@ const operationalPages = {
     tracking: () => import("./pages/Tracking"),
     idle: () => import("./pages/IdleAnalytics"),
     health: () => import("./pages/VehicleHealth"),
+    drivers: () => import("./pages/Drivers"),
 }
 
 // Main Fleet Dashboard Pages
@@ -32,6 +35,7 @@ const FuelPerformance = lazy(operationalPages.fuel)
 const Tracking = lazy(operationalPages.tracking)
 const IdleAnalytics = lazy(operationalPages.idle)
 const VehicleHealth = lazy(operationalPages.health)
+const Drivers = lazy(operationalPages.drivers)
 
 const AiAssistantWidget = lazy(() => import("./components/AI/AiAssistantWidget"))
 
@@ -50,13 +54,22 @@ function PrefetchOperationalPages() {
     return null
 }
 
+// While a page's code loads: the operational layout's skeleton (public pages: their plain background)
+function PageCodeFallback() {
+    const { pathname } = useLocation()
+    if (pathname === "/" || pathname === "/login") {
+        return <div role="status" aria-label="Loading" className="min-h-dvh bg-white" />
+    }
+    return <AppShellSkeleton label="Loading page" />
+}
+
 function App() {
     return (
         <AuthProvider>
             <PrefetchOperationalPages />
             <FuelFilterProvider>
                 <BrowserRouter>
-                    <Suspense fallback={<div role="status" className="grid min-h-dvh place-items-center bg-white text-xs font-semibold text-slate-500">Loading…</div>}>
+                    <Suspense fallback={<PageCodeFallback />}>
                         <Routes>
                             {/* Public Routes */}
                             <Route path="/" element={<Landing />} />
@@ -115,7 +128,7 @@ function App() {
                             />
 
                             {/* ─── Preserved Operations Routes ────────────────────── */}
-                            {/* Legacy URLs (/trips, /reports, /drivers, /settings) redirect to the page that serves them, so the
+                            {/* Legacy URLs (/trips, /reports, /settings) redirect to the page that serves them, so the
                                 address bar never names a page that is not shown; the target route keeps its own protection */}
                             <Route
                                 path="/tracking"
@@ -135,7 +148,11 @@ function App() {
                             />
                             <Route
                                 path="/drivers"
-                                element={<Navigate to="/dashboard" replace />}
+                                element={
+                                    <ProtectedRoute>
+                                        <Drivers />
+                                    </ProtectedRoute>
+                                }
                             />
                             <Route
                                 path="/trips"

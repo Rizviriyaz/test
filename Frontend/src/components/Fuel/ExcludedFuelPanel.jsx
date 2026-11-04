@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo } from "react"
-import { AlertTriangle, ChevronDown, ChevronUp, Loader2, CheckCircle2, Search, ShieldAlert } from "lucide-react"
+import { AlertTriangle, ChevronDown, ChevronUp, CheckCircle2, Search, ShieldAlert } from "lucide-react"
 import { getFuelExcluded } from "../../api/fleetApi"
 import { useFuelFilters } from "../../context/useFuelFilters"
 import { EXCLUDED_REASON_LABELS, excludedSummary } from "./fuelLabels"
@@ -73,9 +73,10 @@ export default function ExcludedFuelPanel() {
 
     if (loading) {
         return (
-            <div role="status" className="mb-4 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs text-slate-500 shadow-2xs">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-brand motion-reduce:animate-none" />
-                <span>Checking fuel data audit…</span>
+            <div role="status" aria-label="Checking fuel data audit" className="mb-4 flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 shadow-2xs">
+                <span aria-hidden="true" className="h-3.5 w-3.5 animate-pulse rounded-full bg-slate-100 motion-reduce:animate-none" />
+                <span aria-hidden="true" className="h-3 w-48 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                <span className="sr-only">Checking fuel data audit…</span>
             </div>
         )
     }

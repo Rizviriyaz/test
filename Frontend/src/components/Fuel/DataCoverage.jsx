@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { AlertTriangle, Info, Loader2 } from "lucide-react"
 import SectionCard from "../Common/SectionCard"
 import SearchInput from "../Common/SearchInput"
-import { ErrorState } from "../Common/StateViews"
+import { ErrorState, LoadingState } from "../Common/StateViews"
 import { clearClientCache, getFuelExcluded, getVehicleEfficiencyList, getVehicles, isAbortError } from "../../api/fleetApi"
 import { fuelVehicleListParams } from "../../utils/fleetRules"
 import { buildCoverage, buildExcelWithoutWialon, distanceReadiness, filterCoverageRows, overlapUnitIds, partialSummaryRowCount, withoutWialonTotalsOf } from "./coverageRows"
@@ -91,6 +91,7 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
             if (fuelRes.status === "rejected") throw fuelRes.reason
             setState({
                 loading: false,
+                loadedFor: JSON.stringify(queryParams),
                 error: null,
                 fleet: Array.isArray(fleetRes.value?.vehicles) ? fleetRes.value.vehicles : [],
                 fuel: fuelRes.value.rows,
@@ -137,7 +138,9 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
     const notMatchedApplies = !vehicleFilter
     // Distance is classified only from final Wialon results: never while reports run, never when they failed
     const distanceFinal = state.readiness === "ready" || state.readiness === "partial"
-    const ready = !state.loading && !state.error
+    // A reload of the same filters (telematics retry, import) keeps the loaded lists on screen; new filters do not
+    const showingCurrent = state.loadedFor === JSON.stringify(queryParams)
+    const ready = (!state.loading || showingCurrent) && !state.error
     const rows = tab === "not_matched"
         ? (notMatchedApplies ? notMatched : [])
         : tab === "no_wialon"
@@ -198,11 +201,8 @@ export default function DataCoverage({ queryParams, vehicleFilter, onClearVehicl
                 <SearchInput value={search} onChange={setSearch} placeholder="Search vehicle or group…" className="w-full sm:w-56" />
             </div>
 
-            {state.loading ? (
-                <div role="status" className="py-10 text-center text-xs text-slate-500">
-                    <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin text-slate-400 motion-reduce:animate-none" />
-                    Comparing the fleet with fuel records…
-                </div>
+            {state.loading && !showingCurrent ? (
+                <LoadingState label="Comparing the fleet with fuel records…" className="border-0" rows={6} columns={5} />
             ) : state.error ? (
                 <ErrorState title="Data coverage unavailable" message={state.error} onRetry={load} className="border-0 py-8" />
             ) : tab === "not_matched" && !notMatchedApplies ? (

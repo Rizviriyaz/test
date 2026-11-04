@@ -121,7 +121,8 @@ function Tracking() {
     const loadVehicles = useCallback(async (isManual = false) => {
         if (isManual) setRefreshing(true)
         try {
-            const data = await getVehicles()
+            // A manual refresh asks the backend (skipping the 8 s client cache); polls may reuse it
+            const data = await getVehicles(isManual ? { skipCache: true } : {})
             applyLiveRead(data)
         } catch (err) {
             setError(err.message || "Failed to load vehicle telemetry")
@@ -449,7 +450,7 @@ function Tracking() {
                             {/* Vehicle List */}
                             <div className="flex-1 divide-y divide-slate-100 overflow-y-auto overscroll-contain pr-0.5">
                                 {loading && (
-                                    <LoadingState label="Loading vehicle telemetry…" className="m-3 border-none" />
+                                    <LoadingState label="Loading vehicle telemetry…" className="border-none" rows={8} columns={2} />
                                 )}
 
                                 {error && (

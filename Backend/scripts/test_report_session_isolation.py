@@ -298,10 +298,21 @@ def test_idle_endpoint_uses_events_session():
     with fake_wialon(t):
         shared = gateway.login()
         full_sids, full = run_idle_endpoint(True)
-        summary_sids, summary = run_idle_endpoint(False)
+        # The fixture window is in the past (closed); the idle tile's own window is today (open)
+        with patch("app.main.window_closed", return_value=False):
+            summary_sids, summary = run_idle_endpoint(False)
+        closed_sids, closed = run_idle_endpoint(False)
         events = gateway.login(session=gateway.EVENTS_SESSION)
+        engine = gateway.login(session=gateway.ENGINE_SESSION)
+        history = gateway.login(session=gateway.HISTORY_SESSION)
     check(full_sids == [events] and events != shared, "include_events=true runs the report on the events session")
-    check(summary_sids == [shared], "include_events=false (Dashboard idle tile) stays on the shared session")
+    # Its own session (not the shared one Group Trips uses), so the two Dashboard reports never queue on one lock
+    check(summary_sids == [engine] and engine not in (shared, events),
+          "include_events=false (Dashboard idle tile, today) runs on the engine session")
+    # A closed window (yesterday's tile) runs on the history session, alongside today's
+    check(closed_sids == [history] and history not in (shared, events, engine),
+          "include_events=false for a closed window runs on the history session")
+    check(closed["kpis"] == summary["kpis"], "same report output on either session")
     check(full["kpis"]["total_idle_seconds"] == summary["kpis"]["total_idle_seconds"] == 5400 + 4530,
           "idle totals unchanged (9930 s) whichever session runs the report")
     check(len(full["events"]) == 4 and summary["events"] == [], "event output unchanged (4 events / none for summary)")

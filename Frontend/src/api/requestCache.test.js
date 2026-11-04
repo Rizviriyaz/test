@@ -3,7 +3,7 @@
 import { test, beforeEach } from "node:test"
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { MAX_CLIENT_CACHE_ENTRIES, clearClientCache, clientCacheSize, deduplicatedFetch, getFromClientCache, peekClientCache, setClientCache } from "./requestCache.js"
+import { MAX_CLIENT_CACHE_ENTRIES, REFRESHING_TTL_MS, clearClientCache, clientCacheSize, deduplicatedFetch, getFromClientCache, peekClientCache, setClientCache } from "./requestCache.js"
 
 function deferred() {
     let resolve, reject
@@ -229,4 +229,28 @@ test("cancellation: an already aborted signal never starts a request; a later ca
     await assert.rejects(deduplicatedFetch("/api/late", fetchJson, { signal: a.signal }, 10000), (err) => err.name === "AbortError")
     assert.equal(calls, 0)
     assert.deepEqual(await deduplicatedFetch("/api/late", fetchJson, {}, 10000), { n: 1 })
+})
+
+test("a `refreshing` response (backend revalidating) is served from the client cache for REFRESHING_TTL_MS only", async (t) => {
+    clearClientCache()
+    let now = 1_000_000
+    t.mock.method(Date, "now", () => now)
+    let calls = 0
+    const fetchJson = async () => { calls += 1; return calls === 1 ? { refreshing: true, v: 1 } : { v: 2 } }
+    assert.deepEqual(await deduplicatedFetch("/api/idle/events?timeframe=today", fetchJson, {}, 30000), { refreshing: true, v: 1 })
+    now += REFRESHING_TTL_MS - 1
+    assert.deepEqual(await deduplicatedFetch("/api/idle/events?timeframe=today", fetchJson, {}, 30000), { refreshing: true, v: 1 })
+    assert.equal(calls, 1, "within REFRESHING_TTL_MS the cached response is reused")
+    now += 2
+    assert.deepEqual(await deduplicatedFetch("/api/idle/events?timeframe=today", fetchJson, {}, 30000), { v: 2 })
+    assert.equal(calls, 2, "after it, the refreshed result is read")
+    // Still the last response for display while a newer one loads (peek), whatever its fetch TTL
+    clearClientCache()
+    setClientCache("/k", { refreshing: true })
+    now += REFRESHING_TTL_MS * 10
+    assert.deepEqual(peekClientCache("/k", 10 * 60 * 1000)?.data, { refreshing: true })
+    // A normal response keeps the caller's TTL
+    setClientCache("/n", { v: 3 })
+    now += REFRESHING_TTL_MS * 2
+    assert.deepEqual(getFromClientCache("/n", 30000), { v: 3 })
 })

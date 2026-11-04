@@ -68,6 +68,14 @@ def _patches(stack, engine, units=UNITS, groups=GROUPS, calculated=CALCULATED, l
         stack.enter_context(patch(f"{target}.get_vehicle_live_data", side_effect=lambda *a, **k: [dict(v) for v in live]))
 
 
+def _wait_background_refreshes(timeout=5.0):
+    """Wait until no stale-while-revalidate refresh is running (they run on main._swr_pool)."""
+    deadline = time.time() + timeout
+    while main._swr_running and time.time() < deadline:
+        time.sleep(0.01)
+    assert not main._swr_running, "background refresh did not finish"
+
+
 def _idle(**kw):
     params = dict(from_time=FROM_TS, to_time=TO_TS, include_events=True, skip_cache=False)
     params.update(kw)
@@ -350,6 +358,12 @@ def test_transient_failure_serves_last_good_with_backoff():
         _idle()
         age_report_caches(main.IDLE_ANALYTICS_TTL_SECONDS + 1)
         stack.enter_context(patch("app.wialon_reports.wialon_request", FakeReportEngine(fail_exec={TEMPLATE_GROUP_ENGINE})))
+        # Stale-while-revalidate: the expired result is answered at once (not stale: nothing has failed yet) while one
+        # background refresh runs; it fails, so the next request is the failure path's last good result
+        revalidating = _idle()
+        assert revalidating["refreshing"] is True and revalidating["stale"] is False, revalidating
+        assert revalidating["kpis"]["total_idle_seconds"] == 5400 + 4530, revalidating["kpis"]
+        _wait_background_refreshes()
         stale = _idle()
         assert stale["stale"] is True and stale["kpis"]["total_idle_seconds"] == 5400 + 4530, stale["kpis"]
     print("[PASS] Cache: a Wialon failure serves the last good result marked stale with its original retrieval "

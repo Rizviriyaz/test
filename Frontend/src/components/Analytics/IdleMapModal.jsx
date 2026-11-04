@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet"
-import { X, MapPin, Truck, Clock3, Users, ArrowUpRight, Calendar, Navigation, User, Phone, Building2, Loader2 } from "lucide-react"
+import { X, MapPin, Truck, Clock3, Users, ArrowUpRight, Calendar, Navigation, User, Phone, Building2 } from "lucide-react"
 import L from "leaflet"
 import "leaflet/dist/leaflet.css"
 import { getIdleEventDriver } from "../../api/fleetApi"
@@ -92,8 +92,9 @@ function DriverCard({ event }) {
                 {matched ? current.data.driver_name : driverName}
             </p>
             {loading ? (
-                <p className="mt-1 flex items-center gap-1 text-[11px] text-slate-500">
-                    <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" /> Loading driver details…
+                <p role="status" aria-label="Loading driver details" className="mt-1.5 flex items-center gap-1.5">
+                    <span aria-hidden="true" className="h-3 w-24 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
+                    <span aria-hidden="true" className="h-3 w-16 animate-pulse rounded bg-slate-100 motion-reduce:animate-none" />
                 </p>
             ) : current?.status === "error" ? (
                 <p className="mt-1 text-[11px] font-medium text-red-700">Driver details could not be loaded. Click to retry.</p>
@@ -101,7 +102,7 @@ function DriverCard({ event }) {
                 <>
                 {matched && (
                     <p className="mt-0.5 text-[11px] tabular-nums text-slate-500">
-                        {current.data.driver_id ? `Driver ID ${current.data.driver_id}` : "Driver ID not available."}
+                        {current.data.driver_id ? `Employee ID ${current.data.driver_id}` : "Employee ID not available."}
                     </p>
                 )}
                 {matched && current.data.phone ? (
